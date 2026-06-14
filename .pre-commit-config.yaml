@@ -1,0 +1,15 @@
+# pre-commit 配置
+# 安装: pip install pre-commit && pre-commit install
+# 手动运行: pre-commit run --all-files
+
+repos:
+  - repo: local
+    hooks:
+      - id: check-consistency
+        name: 文档一致性校验
+        description: 检查设计文档与代码文件的状态一致性（版本号、路径、阶段状态）
+        entry: py scripts/check_consistency.py
+        language: python
+        always_run: true
+        pass_filenames: false
+        stages: [commit]

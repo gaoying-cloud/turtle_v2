@@ -1,0 +1,25 @@
+# ── 跨市场ETF海龟组合策略 V3.0 依赖 ──
+
+# 回测引擎
+backtrader>=1.9.78.123
+
+# 数据处理
+numpy>=1.24.0
+pandas>=2.0.0
+pyarrow>=12.0.0          # Parquet 读写
+
+# 数据源
+tushare>=1.4.0          # Tushare Pro
+
+# 风险建模
+scikit-learn>=1.3.0     # Ledoit-Wolf 收缩估计
+
+# 测试
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# 配置
+pyyaml>=6.0
+
+# 实用工具
+tabulate>=0.9.0         # 表格化输出

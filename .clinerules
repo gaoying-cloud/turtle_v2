@@ -1,0 +1,44 @@
+# code-context MCP 工具使用规则
+
+MCP 服务器 `code-context` 已安装，优先使用以下工具节省 Token：
+
+## 核心省 Token 原则
+
+1. **查大文件（>200行）禁止用 `read_file`**
+2. **查多个符号一次完成 → `batch_read`**
+3. **修改代码用两阶段提交 → `write_file_surgical`（先 dry-run 预览 diff，确认后提交）**
+
+## 文件大小速查（辅助决策）
+
+| 文件 | 行数 | 最佳工具 |
+|------|------|---------|
+| `src/execution_engine.py` | **6438** | ⚠️ 只读特定类/函数 → `read_file_surgical` |
+| `src/strategy_engine.py` | **1476** | ⚠️ 只读特定类/函数 → `read_file_surgical` |
+| `src/data_pipeline.py` | **889** | 大文件 → `read_file_surgical` |
+| `tests/conftest.py` | **575** | 大文件 → `read_file_surgical` |
+| `src/backtest_engine.py` | 200+ | 大文件 → `read_file_surgical` |
+| 其他 `src/*.py` | <200 | 可用 `read_file`，但优先 `read_file_surgical` |
+| `scripts/*.py` | 通常 <300 | `read_file` 可接受 |
+| `tests/*.py` | 通常 100-200 | `read_file` 可接受 |
+| `docs/*.md` | 通常 <200 | `read_file` 可接受 |
+
+## 省 Token 操作（替代传统 read_file）
+
+- 查单个函数/类 → `read_file_surgical`
+- 查多个符号 → `batch_read`
+- 查调用关系 + 定义 → `explain_symbol`
+- 查项目架构 → `get_semantic_repo_map`
+- 搜索代码模式 → `search_code_pattern`
+
+## 安全修改代码（替代 replace_in_file）
+
+- 修改函数/类 → `write_file_surgical`
+  - Phase 1：传入 `newContent` → 返回 diff + token
+  - Phase 2：传入 `confirm=true` + `confirmationToken` → 实际写入
+- 重命名符号 → `rename_symbol`
+- 在函数内/前后插入代码 → `insert_symbol`
+- 删除符号 → `remove_symbol`
+
+## 自动维护
+
+- 文件修改后 → file watcher 自动清理缓存

@@ -1,0 +1,71 @@
+# 跨市场ETF海龟组合策略 · 参数配置 (V3.0)
+# 对应设计文档: docs/strategy_design_v3.0.md
+# 注意：参数值必须与设计文档一致，修改时同步更新设计文档
+
+# ── 资金 ──
+initial_cash: 200000          # 初始资金，单位：元
+commission_pct: 0.00015       # 佣金：万1.5 (双边)
+slippage_pct: 0.001           # 滑点：0.1% (双边)
+
+# ── 海龟参数 ──
+turtle:
+  breakout_period: 20         # 20日突破入场
+  atr_period: 20              # ATR计算周期 (指数平滑平均)
+  stop_period: 10             # 10日反向突破止损
+  stop_atr_multiple: 2.0      # 2N绝对止损
+  risk_per_unit: 0.01         # 每单位占用1%账户风险
+  max_units: 4                # 最多4个单位
+  unit_step: 0.5              # 每0.5N加仓一次
+  use_55_filter: false        # 默认不使用55日过滤
+  exit_period: 10             # 10日反向突破退出
+
+# ── 三层权重配置 ──
+weighting:
+  alpha: 0.05                # α风险平价偏移系数 (0=纯ATR, 1=纯风险平价)
+  cov_lookback_days: 252    # 协方差矩阵估计窗口 (约12个月交易日)
+  rebalance_quarterly: true  # 每季度全组合再平衡
+  atr_change_threshold: 0.30 # ATR变动超过30%触发强制再平衡
+
+# ── 交易标的 (6只ETF) ──
+symbols:
+  - code: "510500.SH"   # 中证500ETF
+    name: "中证500"
+    market: "A股"
+  - code: "159845.SZ"   # 中证1000ETF
+    name: "中证1000"
+    market: "A股"
+  - code: "159915.SZ"   # 创业板ETF
+    name: "创业板"
+    market: "A股"
+  - code: "588000.SH"   # 科创50ETF
+    name: "科创50"
+    market: "A股"
+  - code: "513100.SH"   # 纳指ETF
+    name: "纳指ETF"
+    market: "跨境"
+  - code: "518880.SH"   # 黄金ETF
+    name: "黄金ETF"
+    market: "商品"
+
+# ── 国债ETF (空仓期现金管理) ──
+bond:
+  code: "511010.SH"
+  name: "国债ETF"
+  annual_return: 0.025       # 年化收益率 2.5%
+
+# ── 回测区间 ──
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2026-06-10"
+
+# ── 风控参数 ──
+risk:
+  max_portfolio_risk: 0.20       # 组合总风险敞口 ≤ 20%
+  single_max_risk: 0.04          # 单品种最大风险 ≤ 4%
+  concentration_trigger: 4       # ≥4品种同时持仓时降敞口
+  concentrated_risk_per_unit: 0.005  # 集中度熔断后单单位风险
+  max_consecutive_losses: 8      # 连续亏损8次暂停交易
+  max_cumulative_loss_pct: 0.15  # 累计亏损15%暂停交易
+  pause_days: 5                  # 暂停交易天数
+  correlation_warning: 0.6       # 60日滚动平均相关系数预警阈值
+  correlation_lookback: 60       # 滚动相关性计算窗口
