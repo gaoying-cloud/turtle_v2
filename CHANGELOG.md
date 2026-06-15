@@ -1,5 +1,18 @@
 # Changelog
 
+## [S8] - 2026-06-16
+### 综合报告 + 测试
+- `scripts/gen_report.py`: 综合报告生成脚本
+  - `load_best_params()`: 读取 S6 最优参数，文件不存在时回退 config 默认值
+  - `run_backtest_with_best()`: 用最优参数运行全区间回测，输出 18 项指标
+  - `generate_summary_table()`: §1.2 核心目标通过/条件通过/不通过判定（5 项指标）
+  - `generate_report()`: 5 章节 Markdown 报告（核心目标/绩效/基准对比/最优参数/压力测试）
+  - CLI: `--mode/--start/--end/--params/--no-backtest/--output`
+- `tests/test_gen_report.py`: 10 项单元测试（通过判定、章节完整性、优雅降级）
+- `docs/strategy_design_v3.0.md`: 升级 V3.4，新增 §5.11 S8 施工图设计
+- 全量测试 150/150 passed ✅（+10 新增，无回归）
+- [S8] `已完成`
+
 ## [S7] - 2026-06-15
 ### 极端情景回测 + 压力测试
 - `docs/strategy_design_v3.0.md`: 升级 V3.3，新增 §5.9 S7 施工图设计 + §5.10 滚动相关性监控

@@ -1,15 +1,19 @@
 ---
-version: "3.3"
-date: "2026-06-15"
-based_on: "V3.2 (2026-06-15)"
+version: "3.4"
+date: "2026-06-16"
+based_on: "V3.3 (2026-06-15)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V3.3
+# 跨市场ETF海龟组合策略 — 设计文件 V3.4
+
+**V3.4 变更**：
+- 新增 §5.11 S8 综合报告生成施工图设计（scripts/gen_report.py）
+- 全量测试从 140→150（+10 新增，无回归）
+- 更新实施路线图 S8 状态为 ✅
 
 **V3.3 变更**：
 - 新增 §5.9 S7 极端情景回测 + 压力测试施工图设计
 - 新增 §5.10 滚动相关性监控模块设计（独立脚本 scripts/run_correlation_monitor.py）
-- 更新实施路线图 S7 状态为 ✅，新增两条相关脚本路径
 
 **V3.2 变更**：
 - 新增 §5.8 S6 参数网格搜索施工图设计（完整模块架构、接口、CLI、输出产物）
@@ -704,7 +708,7 @@ results/                         # 回测输出
 | **S5** | 四种基准对比 | 0.5天 | src/benchmarks.py + scripts/run_comparison.py | ✅ |
 | **S6** | 参数网格搜索 | 0.5天 | scripts/run_grid_search.py | ✅ |
 | **S7** | 极端情景回测 | 0.5天 | scripts/run_stress_test.py + scripts/run_correlation_monitor.py | ✅ |
-| **S8** | 综合报告 + 测试 | 1天 | scripts/gen_report.py + tests/ 覆盖 | ⏳ |
+| **S8** | 综合报告 + 测试 | 1天 | scripts/gen_report.py + tests/ 覆盖 | ✅ |
 | **S9** | Dry-Run 准备 | 后续 | 信号校验脚本 | ⏳ |
 
 ---
@@ -715,7 +719,7 @@ results/                         # 回测输出
 
 | 文件 | 内容 |
 |:--|:--|
-| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.3） |
+| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.4） |
 | `docs/governance_model.md` | 项目管控模型 |
 | `docs/analysis/t+0_t+1_impact.md` | T+0/T+1 结算规则差异对策略的完整影响分析 |
 | `CHANGELOG.md` | 版本变更记录 |
