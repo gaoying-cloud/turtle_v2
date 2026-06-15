@@ -179,7 +179,8 @@ class ATREqualRisk(bt.Strategy):
         # 计算每只品种的 ATR
         for i, code in enumerate(self.params.symbols):
             data = self.datas[i]
-            idx = pd.RangeIndex(len(data))
+            n_bars = len(data.close.array)
+            idx = pd.RangeIndex(n_bars)
             high = pd.Series(data.high.array, index=idx)
             low = pd.Series(data.low.array, index=idx)
             close = pd.Series(data.close.array, index=idx)

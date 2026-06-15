@@ -103,17 +103,26 @@ class TurtleStrategy(bt.Strategy):
         self._filter = SignalFilter(max_rejections=3)
 
         # ── 预计算所有品种的信号序列 ──
+        self._close_series: Dict[str, pd.Series] = {}
         signal_calc = TurtleSignals(self.params.turtle_params)
         for i, code in enumerate(self.params.symbols):
             data = self.datas[i]
             # 将 Backtrader lines 转为 pandas Series
-            idx = pd.RangeIndex(len(data))
+            n_bars = len(data.close.array)
+            idx = pd.RangeIndex(n_bars)
             high = pd.Series(data.high.array, index=idx)
             low = pd.Series(data.low.array, index=idx)
             close = pd.Series(data.close.array, index=idx)
             self._signals[code] = signal_calc.precompute_all(high, low, close)
+            self._close_series[code] = close
+
+        # ── S4 风险平价权重状态 ──
+        self._alpha_risk_pcts: Optional[np.ndarray] = None
+        self._last_rebalance_day: Optional[date] = None
+        self._last_n_values: Dict[str, float] = {}
 
         # ── 状态字段 ──
+        self._risk_events: dict = {}
         self._current_day = None          # 当前交易日（用于 T+1 标记重置）
         self._buy_today: Dict[str, bool] = {}  # T+1 品种当日是否已买入
         self._consecutive_losses: int = 0
@@ -125,11 +134,6 @@ class TurtleStrategy(bt.Strategy):
         self._trade_count: int = 0
         self._trades: List[dict] = []
 
-        # ── S4 风险平价权重状态 ──
-        self._alpha_risk_pcts: Optional[np.ndarray] = None  # 缓存当期 α 融合 risk_pct
-        self._last_rebalance_day: Optional[date] = None
-        self._last_n_values: Dict[str, float] = {}  # 用于 ATR 变动检测
-        self._close_series: Dict[str, pd.Series] = {}  # 各品种 close 序列缓存（供协方差计算）
 
     def _next_idx(self, code: str) -> int:
         """获取当前行在预计算序列中的索引。"""
@@ -211,7 +215,8 @@ class TurtleStrategy(bt.Strategy):
 
         prices = {}
         for code in self.params.symbols:
-            series = self._signals[code]["close"].iloc[start:idx + 1].copy()
+            # 从 _close_series 缓存取 close 价格
+            series = self._close_series[code].iloc[start:idx + 1].copy()
             series.name = code
             prices[code] = series
 

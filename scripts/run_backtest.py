@@ -123,13 +123,12 @@ def df_to_feed(df: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
 
     return bt.feeds.PandasData(
         dataname=feed_df,
-        datetime="date",
         open="open",
         high="high",
         low="low",
         close="close",
         volume="volume",
-        plot=False,  # 不单独绘图（用 cerebro.plot() 统一出图）
+        plot=False,
     )
 
 
