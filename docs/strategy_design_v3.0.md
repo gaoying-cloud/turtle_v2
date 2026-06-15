@@ -1,15 +1,19 @@
 ---
-version: "3.2"
+version: "3.3"
 date: "2026-06-15"
-based_on: "V3.1 (2026-06-15)"
+based_on: "V3.2 (2026-06-15)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V3.2
+# 跨市场ETF海龟组合策略 — 设计文件 V3.3
+
+**V3.3 变更**：
+- 新增 §5.9 S7 极端情景回测 + 压力测试施工图设计
+- 新增 §5.10 滚动相关性监控模块设计（独立脚本 scripts/run_correlation_monitor.py）
+- 更新实施路线图 S7 状态为 ✅，新增两条相关脚本路径
 
 **V3.2 变更**：
 - 新增 §5.8 S6 参数网格搜索施工图设计（完整模块架构、接口、CLI、输出产物）
 - α 搜索范围扩展为 [0%, 5%, 10%, 15%, 20%]，合计 405 组 × 2 模式 = 810 次回测
-- 更新 §5.5 参数敏感性分析表（增加组合数列、合计行）
 
 **V3.1 变更**：
 - 新增 §2.5 ETF结算规则差异说明
@@ -446,6 +450,159 @@ robustness_score =
 | 数据日期边界不一致 | 所有回测使用统一的 CLI 日期参数 |
 | α=0 时风险平价计算 | 策略层检查 alpha==0 时跳过 `compute_alpha_weights()` |
 
+### 5.9 S7 极端情景回测 — 施工图设计
+
+基于 §3.6 和 §6.3 的定义，本节给出极端情景回测与压力测试模块的完整架构设计。
+
+#### 5.9.1 情景定义
+
+设计文档要求回测 2020 年 3 月、2015 年 6-8 月、2018 年全年三个经典极端行情。
+但因科创50(588000) 2020 年上市、中证1000(159845) 2019 年上市，2018 年和 2015 年无法全品种回测，**等价替换方案**如下：
+
+| # | 场景 | 日期范围 | 特征 | 替代原因 |
+|:--|:--|:--|:--|:--|
+| A1 | COVID 熔断 | 2020-02-03 ~ 2020-04-30 | VIX>80，全球同步暴跌 | 保留原要求 |
+| A2 | 俄乌冲突 | 2022-02-14 ~ 2022-04-29 | 商品暴涨 + 股市暴跌，黄金负相关 | 替代 2018 年贸易战 |
+| A3 | A 股二次探底 | 2022-09-01 ~ 2022-11-30 | 持续阴跌 + 急跌交替 | 替代 2015 年股灾 |
+| A4 | 完整 2022 年 | 2022-01-01 ~ 2022-12-31 | 全年熊市（创业板 -29%） | 覆盖全年压力 |
+
+**合成压力情景**：
+
+| # | 场景 | 触发方式 | 参数 |
+|:--|:--|:--|:--|
+| B1 | 单月同步暴跌 | 选定日期注入 -X% 价格冲击（每月一次） | X = 3%, 5%, 7% |
+| B2 | 连续流动性枯竭 | 指定品种连续 N 天注入跌停价 | 品种 = 中证500, N=3, 每日 -10% |
+
+B1 注入逻辑：在回测区间内**每月第一个交易日**向所有 6 品种当日收盘价注入 -X% 冲击，计算策略在该日的组合净值损失。B2 注入逻辑：事后计算，取该品种满仓 4 单位 × 连续 3 日跌停的累计不可抗损失。
+
+#### 5.9.2 模块架构
+
+```
+scripts/run_stress_test.py
+├── define_scenarios()            # 定义 A1-A4 + B1-B2 场景参数
+├── load_best_params()            # 从 S6 best_params.json 加载最优参数
+├── run_historical_scenario()     # 历史情景回放
+├── run_synthetic_shock()         # B1: 合成单月同步暴跌
+├── run_liquidity_stress()        # B2: 连续跌停不可抗损失
+├── generate_report()             # 生成 Markdown 压力测试报告
+├── save_results()                # 写 CSV + JSON
+└── main() / argparse CLI         # CLI 入口
+```
+
+#### 5.9.3 核心接口
+
+**`define_scenarios()`** → `dict`
+
+返回 A1-A4 + B1-B2 共 6 个场景的完整定义参数（start_date, end_date, description, type）。
+
+**`run_historical_scenario(scenario, params)`** → `dict`
+
+在指定历史区间运行 Backtrader 回测（复用 S6 的 Cerebro 组装 + `TurtleStrategy`），返回含场景标签的指标字典：
+
+```python
+{
+    "scenario": str,           # "A1_covid"
+    "date_range": str,
+    "total_return": float,     "cagr": float,
+    "sharpe": float | None,    "max_drawdown": float,
+    "max_dd_duration": int,    # 最大回撤持续天数
+    "daily_var_95": float,     # 95% 置信度 VaR（历史模拟法）
+    "daily_var_99": float,     # 99% VaR
+    "total_trades": int,       "win_rate": float,
+    "t1_stop_delay_hits": int, # T+1 止损延迟触发次数
+    "correlation_avg": float,  # 区间内平均两两相关系数
+    "final_value": float,
+}
+```
+
+参数默认取自 S6 结果 `results/grid_search/best_params.json` 中排名第一的组合。
+
+**`run_synthetic_shock(params, shock_pcts)`** → `pd.DataFrame`
+
+在基准区间（默认 2022 年）每月第一个交易日注入同步暴跌，遍历 3%/5%/7% 三个冲击幅度。
+
+**`run_liquidity_stress(params)`** → `dict`
+
+事后计算：`总不可抗损失 = 满仓 4 单位 × 名义金额 × [1 - (1-0.10)^3]`。
+
+**`generate_report(all_results)`** → `str`
+
+生成包含通过/不通过判定的 Markdown 报告。判定标准：
+
+| 指标 | 压力情景通过线 |
+|:--|:--|
+| 最大回撤 | ≤ 25% |
+| 最大回撤持续时间 | ≤ 60 个交易日 |
+| 99% 日 VaR | ≤ 5% |
+| 月度最大亏损 | ≤ 15% |
+| 连续止损暂停保护 | 至少触发 1 次 |
+
+**综合判定**：全部 5 项 → ✅ 通过；1-2 项不达标 → ⚠️ 条件通过（需 Dry-Run 验证）；3+ 项不达标 → ❌ 不通过（需重新设计风控）。
+
+#### 5.9.4 CLI 接口
+
+```
+用法: py scripts/run_stress_test.py [选项]
+
+选项:
+  --params PATH      最优参数 JSON (默认: results/grid_search/best_params.json)
+  --scenarios {A1,A2,A3,A4,B1,B2,all}  运行场景 (默认: all)
+  --output PATH      输出目录 (默认: results/stress_test/)
+  --mode {A,B}       回测模式 (默认: A)
+  --workers N        并行进程数 (默认: 4)
+  --verbose          详细日志
+```
+
+#### 5.9.5 输出产物
+
+| 产物 | 路径 | 说明 |
+|:--|:--|:--|
+| **压力测试报告** | `results/stress_test/stress_report.md` | Markdown 完整报告 |
+| **场景汇总 CSV** | `results/stress_test/scenario_summary.csv` | 所有场景横向对比表 |
+| **历史情景详情** | `results/stress_test/historical_{scenario}.csv` | 逐日净值序列 |
+| **合成冲击结果** | `results/stress_test/synthetic_shock.csv` | B1 冲击矩阵 |
+| **通过/失败结论** | `results/stress_test/stress_conclusion.json` | 结构化结论 |
+
+### 5.10 滚动相关性监控 — 独立模块
+
+为满足 §3.6「滚动相关性监控」要求，设计独立脚本 `scripts/run_correlation_monitor.py`。
+
+#### 5.10.1 模块职责
+
+```
+scripts/run_correlation_monitor.py
+├── compute_rolling_correlation()   # 60 日滚动两两相关系数，返回时间序列
+├── detect_correlation_events()     # 检测平均相关系数 > 0.6 的预警区间
+├── plot_correlation_timeseries()   # 绘制滚动相关性折线图（--plot）
+├── generate_report()               # 生成 Markdown + CSV
+└── main() / argparse CLI
+```
+
+#### 5.10.2 核心接口
+
+**`compute_rolling_correlation(period, window=60)`** → `pd.DataFrame`
+
+列：`date, avg_corr, max_corr, min_corr, over_threshold(bool), pair_count`
+
+**`detect_correlation_events(df, threshold=0.6)`** → `pd.DataFrame`
+
+输出相关系数突破阈值的起始/结束日期、持续天数、峰值。
+
+#### 5.10.3 CLI 接口
+
+```
+用法: py scripts/run_correlation_monitor.py [选项]
+
+选项:
+  --start DATE        起始日期 (默认: 2020-01-01)
+  --end DATE          截止日期 (默认: 2026-06-10)
+  --window N          滚动窗口天数 (默认: 60)
+  --threshold FLOAT   预警阈值 (默认: 0.6)
+  --output PATH       输出目录 (默认: results/stress_test/)
+  --plot              生成折线图
+  --verbose           详细日志
+```
+
 ---
 
 ## 六、风险控制体系
@@ -546,7 +703,7 @@ results/                         # 回测输出
 | **S4** | 风险平价权重 | 1天 | src/risk_parity.py | ✅ |
 | **S5** | 四种基准对比 | 0.5天 | src/benchmarks.py + scripts/run_comparison.py | ✅ |
 | **S6** | 参数网格搜索 | 0.5天 | scripts/run_grid_search.py | ✅ |
-| **S7** | 极端情景回测 | 0.5天 | scripts/run_stress_test.py | ⏳ |
+| **S7** | 极端情景回测 | 0.5天 | scripts/run_stress_test.py + scripts/run_correlation_monitor.py | ✅ |
 | **S8** | 综合报告 + 测试 | 1天 | scripts/gen_report.py + tests/ 覆盖 | ⏳ |
 | **S9** | Dry-Run 准备 | 后续 | 信号校验脚本 | ⏳ |
 
@@ -558,7 +715,7 @@ results/                         # 回测输出
 
 | 文件 | 内容 |
 |:--|:--|
-| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.2） |
+| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.3） |
 | `docs/governance_model.md` | 项目管控模型 |
 | `docs/analysis/t+0_t+1_impact.md` | T+0/T+1 结算规则差异对策略的完整影响分析 |
 | `CHANGELOG.md` | 版本变更记录 |
