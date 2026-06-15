@@ -1,5 +1,16 @@
 # Changelog
 
+## [S5] - 2026-06-15
+### 四种基准对比
+- `src/benchmarks.py`: 三种基准策略
+  - `BuyAndHold`: 买入等权持有（B1）
+  - `EqualWeightRebalance`: 等权定期再平衡（B2）
+  - `ATREqualRisk`: ATR 等风险贡献，无海龟信号（B3）
+- `scripts/run_comparison.py`: 一键运行 B1-B4 对比，输出表格 + CSV
+- `tests/test_benchmarks.py`: 10 项单元测试（B1/B2/B3 各逻辑 + SIX_SYMBOLS 常量）
+- 全量测试 126/126 passed ✅
+- [S5] `已完成`
+
 ## [S4] - 2026-06-15
 ### 风险平价权重（三层融合）
 - `src/risk_parity.py`: Ledoit-Wolf 收缩协方差 + 风险平价权重 CCD 求解 + α 融合

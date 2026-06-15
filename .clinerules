@@ -19,8 +19,10 @@ MCP 服务器 `code-context` 已安装，优先使用以下工具节省 Token：
 | `src/turtle_core.py` | **673** | ⚠️ 只读特定类/函数 → `read_file_surgical` |
 | `strategies/turtle_trading.py` | **~530** | ⚠️ 大文件 → `read_file_surgical` |
 | `src/risk_parity.py` | **~245** | ⚠️ 大文件 → `read_file_surgical` |
+| `src/benchmarks.py` | **~240** | ⚠️ 大文件 → `read_file_surgical` |
 | `src/data_pipeline.py` | **~300** | 大文件 → `read_file_surgical` |
 | `scripts/run_backtest.py` | **~350** | 大文件 → `read_file_surgical` |
+| `scripts/run_comparison.py` | **~280** | 大文件 → `read_file_surgical` |
 | 其他 `src/*.py` | <200 | 可用 `read_file`，但优先 `read_file_surgical` |
 | `scripts/*.py` | 通常 <300 | `read_file` 可接受 |
 | `tests/*.py` | 通常 200-350 | `read_file` 可接受 |
@@ -58,7 +60,7 @@ MCP 服务器 `code-context` 已安装，优先使用以下工具节省 Token：
 ```
 S0 骨架搭建     ✅   →  S1 数据管道     ✅
 S2 核心移植     ✅   →  S3 策略层       ✅
-S4 风险平价     ✅   →  S5 基准对比     ⏳
+S4 风险平价     ✅   →  S5 基准对比     ✅
 S6 网格搜索     ⏳   →  S7 压力测试     ⏳
 S8 综合报告     ⏳   →  S9 Dry-Run     ⏳
 ```
@@ -99,8 +101,9 @@ tests/test_data_pipeline.py     20 passed  ✅
 tests/test_turtle_core.py       52 passed  ✅
 tests/test_turtle_strategy.py   22 passed  ✅
 tests/test_risk_parity.py       22 passed  ✅
+tests/test_benchmarks.py        10 passed  ✅
 ─────────────────────────────────────────
-合计                           116 passed  ✅
+合计                           126 passed  ✅
 ```
 
 ---
