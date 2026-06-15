@@ -196,7 +196,7 @@ def run_backtest(
     # 滑点通过 commission 模拟（单边）
     cerebro.broker.setcommission(commission=commission + slippage)
 
-    # ── 添加策略 ──
+    # ── 添加策略（含 S4 风险平价权重参数） ──
     cerebro.addstrategy(
         TurtleStrategy,
         turtle_params=config["turtle"],
@@ -207,6 +207,10 @@ def run_backtest(
         max_consecutive_losses=config["risk"]["max_consecutive_losses"],
         max_cumulative_loss_pct=config["risk"]["max_cumulative_loss_pct"],
         pause_days=config["risk"]["pause_days"],
+        alpha=config["weighting"]["alpha"],
+        cov_lookback_days=config["weighting"]["cov_lookback_days"],
+        rebalance_quarterly=config["weighting"]["rebalance_quarterly"],
+        atr_change_threshold=config["weighting"]["atr_change_threshold"],
     )
 
     # ── 添加分析器 ──

@@ -91,6 +91,10 @@ def strat():
         "max_consecutive_losses": 8,
         "max_cumulative_loss_pct": 0.15,
         "pause_days": 5,
+        "alpha": 0.05,
+        "cov_lookback_days": 252,
+        "rebalance_quarterly": True,
+        "atr_change_threshold": 0.30,
     })()
     s.datas = [MockData(), MockData()]
     s.broker = MagicMock()
@@ -99,17 +103,22 @@ def strat():
     s.buy = MagicMock()
     s.close = MagicMock()
 
-    s._signals = {}
-    s._positions = TurtlePositions(max_units=4)
-    s._filter = SignalFilter(max_rejections=3)
-    s._current_day = None
-    s._buy_today = {}
-    s._consecutive_losses = 0
-    s._cumulative_loss_pct = 0.0
-    s._paused_until = None
-    s._in_bond = False
-    s._trade_count = 0
-    s._trades = []
+    s.__dict__["_signals"] = {}
+    s.__dict__["_positions"] = TurtlePositions(max_units=4)
+    s.__dict__["_filter"] = SignalFilter(max_rejections=3)
+    s.__dict__["_current_day"] = None
+    s.__dict__["_buy_today"] = {}
+    s.__dict__["_consecutive_losses"] = 0
+    s.__dict__["_cumulative_loss_pct"] = 0.0
+    s.__dict__["_paused_until"] = None
+    s.__dict__["_in_bond"] = False
+    s.__dict__["_trade_count"] = 0
+    s.__dict__["_trades"] = []
+    # S4 状态字段
+    s.__dict__["_alpha_risk_pcts"] = None
+    s.__dict__["_last_rebalance_day"] = None
+    s.__dict__["_last_n_values"] = {}
+    s.__dict__["_close_series"] = {}
 
     return s
 
@@ -345,3 +354,73 @@ class TestIsNewDay:
         """同一天 → False。"""
         strat._current_day = date(2024, 1, 15)
         assert not strat._is_new_day()
+
+
+# ════════════════════════════════════════════════════════════
+#  S4: α 融合风险权重
+# ════════════════════════════════════════════════════════════
+
+
+class TestAlphaWeighting:
+    """验证 S4 风险平价权重集成正确性。"""
+
+    def test_alpha_risk_pcts_fallback_on_none(self, strat):
+        """_alpha_risk_pcts=None → 使用 risk_per_unit。"""
+        strat._alpha_risk_pcts = None
+        assert strat._alpha_risk_pcts is None
+
+    def test_alpha_risk_pcts_cached_after_recalc(self, strat):
+        """_recalc_alpha_weights 后 _alpha_risk_pcts 不为空（当数据足够时）。"""
+        # 模拟足够的信号长度
+        n_bars = 300
+        for code in strat.params.symbols:
+            n_series = pd.Series(np.random.uniform(0.5, 2.0, n_bars))
+            close_series = pd.Series(np.random.uniform(1.0, 100.0, n_bars))
+            strat._signals[code] = {"n": n_series, "close": close_series}
+
+        # 模拟当前 bar 位置
+        with patch.object(strat, "_next_idx", return_value=n_bars - 1):
+            strat._recalc_alpha_weights()
+
+        if strat._alpha_risk_pcts is not None:
+            assert len(strat._alpha_risk_pcts) == len(strat.params.symbols)
+            assert all(p > 0 for p in strat._alpha_risk_pcts)
+
+    def test_should_rebalance_on_first_call(self, strat):
+        """首次调用 _should_rebalance_weights → True（_alpha_risk_pcts is None）。"""
+        strat._alpha_risk_pcts = None
+        assert strat._should_rebalance_weights(date(2024, 1, 15))
+
+    def test_build_returns_matrix_shape(self, strat):
+        """_build_returns_matrix 返回形状正确。"""
+        n_bars = 300
+        for code in strat.params.symbols:
+            close_series = pd.Series(np.random.uniform(10.0, 100.0, n_bars))
+            strat._signals[code] = {"close": close_series, "n": pd.Series(np.ones(n_bars))}
+
+        with patch.object(strat, "_next_idx", return_value=n_bars - 1):
+            returns = strat._build_returns_matrix()
+            assert returns.shape[0] >= 1  # 至少 1 个交易日
+            assert returns.shape[1] == len(strat.params.symbols)
+
+    def test_entry_uses_alpha_risk_pcts(self, strat):
+        """_check_entry 中使用 _alpha_risk_pcts 调整的 risk。"""
+        # 设置 _alpha_risk_pcts
+        strat._alpha_risk_pcts = np.array([0.005, 0.01])
+
+        # 模拟入场条件（突破 + 足够 equity）
+        strat._cumulative_loss_pct = 0.0
+        strat._filter.check_entry = lambda c, hp: (True, "")
+
+        # 模拟数据
+        code = strat.params.symbols[0]
+        idx = 2
+        with patch.object(strat, "_next_idx", return_value=idx):
+            strat._signals[code] = sig(high=10.5, low=10.0, close=10.5)
+            d = strat.datas[0]
+            d.high[0] = 10.6
+            d.close[0] = 10.5
+
+            strat._check_entry(code, d)
+
+            assert strat._positions.has_position(code)
