@@ -1,10 +1,15 @@
 ---
-version: "3.1"
+version: "3.2"
 date: "2026-06-15"
-based_on: "V3.0 (2026-06-14)"
+based_on: "V3.1 (2026-06-15)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V3.1
+# 跨市场ETF海龟组合策略 — 设计文件 V3.2
+
+**V3.2 变更**：
+- 新增 §5.8 S6 参数网格搜索施工图设计（完整模块架构、接口、CLI、输出产物）
+- α 搜索范围扩展为 [0%, 5%, 10%, 15%, 20%]，合计 405 组 × 2 模式 = 810 次回测
+- 更新 §5.5 参数敏感性分析表（增加组合数列、合计行）
 
 **V3.1 变更**：
 - 新增 §2.5 ETF结算规则差异说明
@@ -316,6 +321,131 @@ if 品种是 T+1 且 当日有买入成交:
     在止损检查中：若止损信号与买入信号同一天 → 跳过当日止损，下一日开盘执行
 ```
 
+### 5.8 S6 参数网格搜索 — 施工图设计
+
+基于 §5.5 定义的参数空间，本节给出网格搜索模块的完整架构、接口、CLI 设计。
+
+#### 5.8.1 参数空间
+
+| # | 参数 | config key | 默认值 | 搜索值 | 组合数 |
+|:--|:--|:--|:--|:--|:--:|
+| P1 | N 计算周期 | `turtle.atr_period` | 20 | [15, 20, 25] | 3 |
+| P2 | 突破周期 | `turtle.breakout_period` | 20 | [15, 20, 25] | 3 |
+| P3 | 止损周期 | `turtle.stop_period` | 10 | [8, 10, 12] | 3 |
+| P4 | 2N 止损倍数 | `turtle.stop_atr_multiple` | 2.0 | [1.5, 2.0, 2.5] | 3 |
+| P5 | α (RP偏移) | `weighting.alpha` | 0.05 | [0, 0.05, 0.10, 0.15, 0.20] | 5 |
+
+**总计**：3×3×3×3×5 = 405 组参数组合。每组分模式 A（无过滤）和模式 B（55日过滤），**总计 810 次回测**。
+
+#### 5.8.2 模块架构
+
+```
+scripts/run_grid_search.py
+├── build_param_grid()          # 展开参数笛卡尔积 → list[dict]（405 组）
+├── run_single_backtest()       # 单次回测包装器 → dict(metrics)
+├── run_grid_search()           # 主循环：样本内 + 样本外分割
+├── evaluate_results()          # 稳健性评估 + 最优参数选择（Top-10）
+├── save_results()              # 写 CSV + JSON
+├── plot_results()              # 散点图 + 热力图（可选，需 matplotlib）
+└── main() / argparse CLI       # CLI 入口
+```
+
+#### 5.8.3 核心接口设计
+
+**`build_param_grid()`** → `list[dict]`
+
+使用 `itertools.product` 展开 5 参数的笛卡尔积，返回 405 个 dict，每个包含 `atr_period`, `breakout_period`, `stop_period`, `stop_atr_multiple`, `alpha`。
+
+**`run_single_backtest(params, mode, start_date, end_date, run_id)`** → `dict | None`
+
+接收参数组合 dict 和模式标识，通过 `cerebro.addstrategy(TurtleStrategy, ...)` 注入参数，运行 Backtrader 回测，返回标准化指标字典：
+
+```python
+{
+    "run_id": int,          "mode": str,            # A/B
+    "atr_period": int,      "breakout_period": int,
+    "stop_period": int,     "stop_atr_multiple": float,
+    "alpha": float,
+    "total_return": float,  "cagr": float,          # 年化收益率
+    "sharpe": float|None,   "max_drawdown": float,
+    "win_rate": float,      "profit_factor": float,
+    "total_trades": int,    "annual_vol": float,
+    "calmar": float,        "final_value": float,
+    "date_range": str,
+}
+```
+
+参数注入方式：将 5 个搜索参数注入 `TurtleStrategy.params.turtle_params`（`atr_period`/`breakout_period`/`stop_period`/`stop_atr_multiple`），α 作为独立 param 传入。其他参数（`risk_per_unit`, `max_units` 等）使用 config 默认值。
+
+**`evaluate_results(df, top_n=10)`** → `pd.DataFrame`
+
+按模式分组计算稳健性评分：
+
+```
+robustness_score =
+    0.25 × Sharpe(IQR标准化)    ← 收益风险平衡
+  + 0.20 × Calmar(IQR标准化)   ← 回撤控制
+  + 0.20 × CAGR(IQR标准化)     ← 绝对收益
+  + 0.15 × (-MDD)(IQR标准化)   ← 回撤越小越好
+  + 0.20 × log(trades)(IQR标准化) ← 交易频率充足
+```
+
+标准化使用中位数 + IQR 的稳健方法（对异常值不敏感）。夏普全为 NaN 时自动回退到 CAGR+MDD+trades 评分。
+
+#### 5.8.4 样本内/外分割与过拟合检验
+
+**默认分割**：
+- 样本内：2020-01-01 ~ 2023-12-31（4 年训练）
+- 样本外：2024-01-01 ~ 2026-06-10（2.5 年验证）
+
+**流程**：
+1. 样本内跑完全部 405 × 2 = 810 次回测
+2. 按模式分组计算稳健性评分，选取 Top-10
+3. 在样本外区间验证 Top-10 参数组合的绩效
+4. 输出 `oos_validation.csv` 供人工对比衰减率
+
+**滚动窗口检验**（可选 `--rolling`，默认关闭）：固定窗口 3 年，步长 1 年，3 个窗口（2020-2022, 2021-2023, 2022-2024），计算各指标均值和标准差。
+
+#### 5.8.5 CLI 接口
+
+```
+用法: py scripts/run_grid_search.py [选项]
+
+选项:
+  --mode {A,B,all}        搜索模式 (默认: all)
+  --start DATE            样本内起始日期 (默认: 2020-01-01)
+  --split DATE            样本内/外分割日期 (默认: 2024-01-01)
+  --end DATE              样本外截止日期 (默认: 2026-06-10)
+  --rolling               启用滚动窗口检验 (默认关闭)
+  --workers N             并行进程数 (默认: 4)
+  --top N                 输出 Top-N 结果 (默认: 10)
+  --quick                 快速验证 (抽样 10 组参数)
+  --output PATH           输出目录 (默认: results/grid_search/)
+  --plot                  生成参数敏感性散点图 + 热力图
+  --verbose               详细日志
+```
+
+**并行化策略**：使用 `multiprocessing.ProcessPoolExecutor`（workers=4），每个进程独立创建 Cerebro 实例。预期在 4 核机器上将总耗时从 ~2 小时压缩到 ~35 分钟。
+
+#### 5.8.6 输出产物
+
+| 产物 | 路径 | 说明 |
+|:--|:--|:--|
+| **完整结果表** | `results/grid_search/grid_results_full.csv` | 样本内 810 行 × 18 列 |
+| **样本外验证** | `results/grid_search/oos_validation.csv` | Top-10 在样本外的绩效 |
+| **最优参数** | `results/grid_search/best_params.json` | 按稳健性评分排序的 Top-10（含完整绩效） |
+| **散点图** | `results/grid_search/sensitivity_sharpe.png` | 5 参数 vs 夏普的散点图 |
+| **热力图** | `results/grid_search/heatmap_{A,B}.png` | 突破周期 × 止损周期交互热力图 |
+
+#### 5.8.7 风险与缓解
+
+| 风险 | 缓解 |
+|:--|:--|
+| 810 次回测耗时过长 | 默认 4 workers 并行；`--quick` 抽样 10 组用于验证流程 |
+| Backtrader 内存泄漏 | 每次回测后 `del cerebro + gc.collect()` |
+| 数据日期边界不一致 | 所有回测使用统一的 CLI 日期参数 |
+| α=0 时风险平价计算 | 策略层检查 alpha==0 时跳过 `compute_alpha_weights()` |
+
 ---
 
 ## 六、风险控制体系
@@ -428,7 +558,7 @@ results/                         # 回测输出
 
 | 文件 | 内容 |
 |:--|:--|
-| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.1） |
+| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.2） |
 | `docs/governance_model.md` | 项目管控模型 |
 | `docs/analysis/t+0_t+1_impact.md` | T+0/T+1 结算规则差异对策略的完整影响分析 |
 | `CHANGELOG.md` | 版本变更记录 |
