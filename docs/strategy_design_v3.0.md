@@ -411,7 +411,7 @@ results/                         # 回测输出
 | **S1** | 数据管道 | 0.5天 | src/data_pipeline.py + scripts/pull_data.py | ✅ |
 | **S2** | 海龟核心移植 | 1天 | src/turtle_core.py（从 strategy_engine.py 提取） | ✅ |
 | **S3** | Backtrader 策略层 | 1天 | strategies/turtle_trading.py + scripts/run_backtest.py | ✅ |
-| **S4** | 风险平价权重 | 1天 | src/risk_parity.py | ⏳ |
+| **S4** | 风险平价权重 | 1天 | src/risk_parity.py | ✅ |
 | **S5** | 四种基准对比 | 0.5天 | src/benchmarks.py + scripts/run_comparison.py | ⏳ |
 | **S6** | 参数网格搜索 | 0.5天 | scripts/run_grid_search.py | ⏳ |
 | **S7** | 极端情景回测 | 0.5天 | scripts/run_stress_test.py | ⏳ |

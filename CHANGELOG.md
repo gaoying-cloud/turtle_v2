@@ -1,5 +1,21 @@
 # Changelog
 
+## [S4] - 2026-06-15
+### 风险平价权重（三层融合）
+- `src/risk_parity.py`: Ledoit-Wolf 收缩协方差 + 风险平价权重 CCD 求解 + α 融合
+  - `ledoit_wolf_cov()`: 收缩估计，提高样本外稳定性
+  - `risk_parity_weights()`: Newton 迭代求解等边际风险贡献权重
+  - `compute_alpha_weights()`: 一步式 (1-α)×w_ATR + α×w_RP
+- `strategies/turtle_trading.py`: 集成 α 融合到 _check_entry 入场风险权重
+  - `_should_rebalance_weights()`: 触发条件（首次/季度末/ATR变动>30%）
+  - `_build_returns_matrix()`: 从信号序列构建 252日收益率矩阵
+  - `_recalc_alpha_weights()`: 重新计算并缓存
+- `tests/test_risk_parity.py`: 22 项单元测试（Ledoit-Wolf + RP + α融合）
+- `tests/test_turtle_strategy.py`: 新增 TestAlphaWeighting 5 项集成测试
+- `scripts/run_backtest.py`: 传入 weighting 参数（alpha/cov_lookback/rebalance/atr_threshold）
+- 全量测试 116/116 passed ✅
+- [S4] `已完成`
+
 ## [S3] - 2026-06-15
 ### Backtrader 策略层
 - `strategies/turtle_trading.py`: TurtleStrategy (bt.Strategy) 回测策略
