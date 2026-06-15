@@ -1,0 +1,352 @@
+#!/usr/bin/env python
+"""
+跨市场ETF海龟组合策略 · 回测入口 (S3)
+
+从 data/etf_daily/ 读取 Parquet 缓存，加载到 Backtrader 运行回测。
+
+用法：
+    py scripts/run_backtest.py                     # 模式 A（无过滤）
+    py scripts/run_backtest.py --mode B             # 模式 B（55日过滤）
+    py scripts/run_backtest.py --start 2023-01-01   # 指定日期
+    py scripts/run_backtest.py --end 2024-12-31     # 指定截止日期
+    py scripts/run_backtest.py --plot               # 绘图
+    py scripts/run_backtest.py --verbose            # 详细日志
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from datetime import datetime, date
+from pathlib import Path
+from typing import Optional
+
+import backtrader as bt
+import pandas as pd
+import yaml
+
+# 确保 src/ 和 strategies/ 在 sys.path 中
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from src.turtle_core import TurtleSignals
+from strategies.turtle_trading import TurtleStrategy
+
+logger = logging.getLogger(__name__)
+
+# ── 配置 ──
+CONFIG_PATH = ROOT / "config" / "turtle_config.yaml"
+DATA_DIR = ROOT / "data" / "etf_daily"
+
+# 海龟品种顺序必须与策略中的 self.datas 索引一致
+SIX_SYMBOLS = [
+    "510500.SH",  # 中证500
+    "159845.SZ",  # 中证1000
+    "159915.SZ",  # 创业板
+    "588000.SH",  # 科创50
+    "513100.SH",  # 纳指ETF
+    "518880.SH",  # 黄金ETF
+]
+
+BOND_SYMBOL = "511010.SH"
+
+ALL_SYMBOLS = SIX_SYMBOLS + [BOND_SYMBOL]
+
+
+# ════════════════════════════════════════════════════════════
+#  数据加载
+# ════════════════════════════════════════════════════════════
+
+def load_data(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+) -> Optional[pd.DataFrame]:
+    """从 Parquet 缓存加载单个品种的数据。
+
+    Parameters
+    ----------
+    symbol : str
+        品种代码。
+    start_date : str
+        起始日期 "YYYY-MM-DD"。
+    end_date : str
+        截止日期 "YYYY-MM-DD"。
+
+    Returns
+    -------
+    pd.DataFrame or None
+        数据帧，包含 date, open, high, low, close, volume, amount, pre_close。
+        缓存不存在或未覆盖请求区间时返回 None。
+    """
+    path = DATA_DIR / f"{symbol}.parquet"
+    if not path.exists():
+        logger.error("缓存文件不存在: %s\n请先运行 py scripts/pull_data.py", path)
+        return None
+
+    df = pd.read_parquet(path)
+    if df.empty:
+        logger.warning("[%s] 缓存为空", symbol)
+        return None
+
+    # 裁剪日期区间
+    mask = (df["date"] >= start_date) & (df["date"] <= end_date)
+    df = df[mask].copy()
+    if df.empty:
+        logger.warning("[%s] 在 %s~%s 区间无数据", symbol, start_date, end_date)
+        return None
+
+    # 确保按日期升序
+    df.sort_values("date", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    logger.info("[%s] 加载 %d 行: %s ~ %s",
+                symbol, len(df), df["date"].iloc[0].date(), df["date"].iloc[-1].date())
+    return df
+
+
+def df_to_feed(df: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
+    """将 pandas DataFrame 转换为 Backtrader PandasData feed。
+
+    字段映射：
+        date      → datetime（索引）
+        open      → open
+        high      → high
+        low       → low
+        close     → close
+        volume    → volume
+    """
+    feed_df = df[["date", "open", "high", "low", "close", "volume"]].copy()
+    feed_df["date"] = pd.to_datetime(feed_df["date"])
+    feed_df.set_index("date", inplace=True)
+
+    return bt.feeds.PandasData(
+        dataname=feed_df,
+        datetime="date",
+        open="open",
+        high="high",
+        low="low",
+        close="close",
+        volume="volume",
+        plot=False,  # 不单独绘图（用 cerebro.plot() 统一出图）
+    )
+
+
+# ════════════════════════════════════════════════════════════
+#  回测运行
+# ════════════════════════════════════════════════════════════
+
+def run_backtest(
+    *,
+    start_date: str = "2020-01-01",
+    end_date: str = "2026-06-10",
+    mode: str = "A",
+    plot: bool = False,
+    verbose: bool = False,
+) -> Optional[dict]:
+    """运行海龟策略回测。
+
+    Parameters
+    ----------
+    start_date : str
+        回测起始日期。
+    end_date : str
+        回测截止日期。
+    mode : str
+        "A" = 无55日过滤, "B" = 55日过滤。
+    plot : bool
+        是否绘制图表。
+    verbose : bool
+        是否输出 DEBUG 级别日志。
+
+    Returns
+    -------
+    dict or None
+        TurtleStrategy._trade_summary（交易统计），失败返回 None。
+    """
+    # ── 加载配置 ──
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    # ── 加载所有品种的数据 ──
+    feeds: dict[str, bt.feeds.PandasData] = {}
+    for symbol in ALL_SYMBOLS:
+        df = load_data(symbol, start_date, end_date)
+        if df is None:
+            logger.error("品种 %s 数据加载失败，终止回测", symbol)
+            return None
+        feed = df_to_feed(df, symbol)
+        feed._name = symbol  # 设置名称，供策略中识别
+        feeds[symbol] = feed
+
+    # ── 设置 Cerebro ──
+    cerebro = bt.Cerebro()
+
+    # 添加数据
+    for symbol in SIX_SYMBOLS:
+        cerebro.adddata(feeds[symbol], name=symbol)
+    # 国债ETF 加到最后
+    cerebro.adddata(feeds[BOND_SYMBOL], name=BOND_SYMBOL)
+
+    # 资金与成本
+    cerebro.broker.setcash(config["initial_cash"])
+    commission = config["commission_pct"]
+    slippage = config["slippage_pct"]
+    # 滑点通过 commission 模拟（单边）
+    cerebro.broker.setcommission(commission=commission + slippage)
+
+    # ── 添加策略 ──
+    cerebro.addstrategy(
+        TurtleStrategy,
+        turtle_params=config["turtle"],
+        symbols=SIX_SYMBOLS,  # 不含国债（国债是现金管理工具）
+        use_55_filter=(mode == "B"),
+        risk_per_unit=config["turtle"]["risk_per_unit"],
+        concentration_trigger=config["risk"]["concentration_trigger"],
+        max_consecutive_losses=config["risk"]["max_consecutive_losses"],
+        max_cumulative_loss_pct=config["risk"]["max_cumulative_loss_pct"],
+        pause_days=config["risk"]["pause_days"],
+    )
+
+    # ── 添加分析器 ──
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)
+    cerebro.addanalyzer(bt.analyzers.AnnualReturn, _name="annual_return")
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+    cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
+
+    # ── 运行 ──
+    logger.info("=" * 50)
+    logger.info("开始回测 | 模式 %s | %s ~ %s | 初始资金 %.0f",
+                mode, start_date, end_date, config["initial_cash"])
+    logger.info("品种: %s + %s(国债)", ", ".join(SIX_SYMBOLS), BOND_SYMBOL)
+    logger.info("=" * 50)
+
+    results = cerebro.run()
+    if not results:
+        logger.error("回测未返回结果")
+        return None
+
+    strat = results[0]
+
+    # ── 输出分析结果 ──
+    print()
+    print("=" * 60)
+    print("回测结果汇总")
+    print("=" * 60)
+
+    final_value = cerebro.broker.getvalue()
+    initial_cash = config["initial_cash"]
+    print(f"初始资金: {initial_cash:>10.2f}")
+    print(f"最终净值: {final_value:>10.2f}")
+    print(f"总收益率: {(final_value / initial_cash - 1) * 100:>9.2f}%")
+
+    # 夏普比率
+    sharpe = strat.analyzers.sharpe.get_analysis()
+    if sharpe and "sharperatio" in sharpe:
+        sr = sharpe["sharperatio"]
+        print(f"夏普比率: {sr:>14.4f}" if sr else "夏普比率: N/A")
+
+    # 最大回撤
+    dd = strat.analyzers.drawdown.get_analysis()
+    if dd and "max" in dd:
+        print(f"最大回撤: {dd['max']['drawdown']:>12.2f}%")
+        print(f"最长回撤期: {dd['max']['len']:>11d} 天")
+
+    # 交易统计
+    trades = strat.analyzers.trades.get_analysis()
+    if trades:
+        total = trades.get("total", {}).get("total", 0)
+        won = trades.get("won", {}).get("total", 0)
+        lost = trades.get("lost", {}).get("total", 0)
+        win_rate = won / total * 100 if total > 0 else 0
+        print(f"交易次数: {total:>15d}")
+        print(f"盈利/亏损: {won}/{lost}")
+        print(f"胜率: {win_rate:>19.2f}%")
+
+        # 盈亏比
+        avg_win = trades.get("won", {}).get("pnl", {}).get("average", 0)
+        avg_loss = abs(trades.get("lost", {}).get("pnl", {}).get("average", 0))
+        if avg_loss > 0:
+            profit_factor = avg_win / avg_loss
+            print(f"盈亏比: {profit_factor:>16.2f}")
+        print(f"平均盈利: {avg_win:>14.2f}")
+        print(f"平均亏损: -{avg_loss:>13.2f}")
+
+    print("=" * 60)
+    print()
+
+    # ── 绘图（可选） ──
+    if plot:
+        cerebro.plot(style="candlestick", volume=True)
+
+    return getattr(strat, "_trade_summary", None)
+
+
+# ════════════════════════════════════════════════════════════
+#  CLI 入口
+# ════════════════════════════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="跨市场ETF海龟组合策略 — 回测入口",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--mode", "-m",
+        type=str,
+        choices=["A", "B"],
+        default="A",
+        help="模式 A=无55日过滤(默认), B=55日过滤",
+    )
+    parser.add_argument(
+        "--start",
+        type=str,
+        default="2020-01-01",
+        help="回测起始日期 YYYY-MM-DD (默认: 2020-01-01)",
+    )
+    parser.add_argument(
+        "--end",
+        type=str,
+        default="2026-06-10",
+        help="回测截止日期 YYYY-MM-DD (默认: 2026-06-10)",
+    )
+    parser.add_argument(
+        "--plot", "-p",
+        action="store_true",
+        default=False,
+        help="绘制回测图表",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        default=False,
+        help="详细日志输出 (DEBUG 级别)",
+    )
+
+    args = parser.parse_args()
+
+    # 日志级别
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    # 运行回测
+    result = run_backtest(
+        start_date=args.start,
+        end_date=args.end,
+        mode=args.mode,
+        plot=args.plot,
+        verbose=args.verbose,
+    )
+
+    if result is None:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
