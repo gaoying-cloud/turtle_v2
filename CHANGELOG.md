@@ -1,5 +1,20 @@
 # Changelog
 
+## [S6] - 2026-06-15
+### 参数网格搜索
+- `scripts/run_grid_search.py`: 完整网格搜索模块
+  - `build_param_grid()`: 5 参数笛卡尔积 → 405 组（含 α=0.15）
+  - `run_single_backtest()`: 单次回测包装器，18 项标准化指标
+  - `run_grid_search()`: 样本内（2020-2023）+ 样本外（2024-2026）分割验证
+  - `evaluate_results()`: 稳健性评分（Sharpe/Calmar/CAGR/MDD/trades 加权）
+  - `_worker()` + `ProcessPoolExecutor`: 多进程并行（默认 4 workers）
+  - `plot_results()`: 散点图 + 热力图（可选 --plot）
+  - CLI: `--mode/--start/--split/--end/--workers/--quick/--plot`
+- `tests/test_grid_search.py`: 14 项单元测试（笛卡尔积、schema、稳健性评分、JSON 读写、冒烟测试）
+- `docs/strategy_design_v3.0.md`: 升级 V3.2，新增 §5.8 施工图设计
+- 全量测试 140/140 passed ✅（+14 新增，无回归）
+- [S6] `已完成`
+
 ## [S5] - 2026-06-15
 ### 四种基准对比
 - `src/benchmarks.py`: 三种基准策略
