@@ -1,0 +1,673 @@
+"""
+跨市场ETF海龟组合策略 · 海龟核心模块 (S2)
+
+从 automated_trading/src/strategy_engine.py 提取并重构。
+
+设计原则：
+    - 纯 Python/numpy/pandas，无 Backtrader 依赖
+    - 无状态计算函数 + 有状态管理类 分离
+    - 保留 20日/55日 双通道支持（55日过滤可选）
+    - 接口级别预留做空和商品期货扩展
+
+模块结构：
+    无状态计算函数  ← 纯函数，无副作用
+    TurtleSignals   ← 一次性预计算所有信号序列
+    Position        ← 单品种持仓 dataclass
+    TurtlePositions ← 多品种持仓管理器
+    SignalFilter    ← 盈利过滤器
+"""
+
+from __future__ import annotations
+
+import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import date
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+# ════════════════════════════════════════════════════════════
+#  无状态计算函数
+# ════════════════════════════════════════════════════════════
+
+def compute_tr(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    """计算真实波幅 TR。
+
+    TR = max(high - low, |high - prev_close|, |low - prev_close|)
+    """
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    return pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+
+def compute_atr(tr: pd.Series, period: int = 20) -> pd.Series:
+    """计算 ATR(N) —— 指数平滑平均真实波幅。
+
+    初始值 = 前 period 个 TR 的简单平均
+    后续 = (1 - 1/period) × ATR(t-1) + (1/period) × TR(t)
+
+    Parameters
+    ----------
+    tr : pd.Series
+        真实波幅序列。
+    period : int
+        平滑周期，默认 20。
+
+    Returns
+    -------
+    pd.Series
+        ATR 序列（前 period-1 个值为 NaN）。
+    """
+    alpha = 1.0 / period
+    atr = pd.Series(np.nan, index=tr.index, dtype=float)
+
+    if len(tr) >= period:
+        atr.iloc[period - 1] = tr.iloc[:period].mean()
+
+    for i in range(period, len(tr)):
+        if pd.notna(atr.iloc[i - 1]):
+            atr.iloc[i] = (1 - alpha) * atr.iloc[i - 1] + alpha * tr.iloc[i]
+
+    return atr.round(4)
+
+
+def donchian_high(high: pd.Series, period: int) -> pd.Series:
+    """N 日最高价通道（不含当日）。
+
+    唐奇安通道上轨 = max(high[-period:-1], high[-period+1:], ..., high[-1])
+    shift(1) 确保不含当日最高价。
+    """
+    return high.shift(1).rolling(window=period, min_periods=period).max()
+
+
+def donchian_low(low: pd.Series, period: int) -> pd.Series:
+    """N 日最低价通道（不含当日）。
+
+    唐奇安通道下轨 = min(low[-period:-1], low[-period+1:], ..., low[-1])
+    shift(1) 确保不含当日最低价。
+    """
+    return low.shift(1).rolling(window=period, min_periods=period).min()
+
+
+def trail_high_close(close: pd.Series, period: int = 10) -> pd.Series:
+    """移动止损参考线：最近 M 日最高收盘价。"""
+    return close.rolling(window=period, min_periods=period).max()
+
+
+def calc_position_size(
+    equity: float,
+    n_value: float,
+    price: float,
+    risk_pct: float = 0.01,
+) -> int:
+    """计算头寸规模（股数）。
+
+    公式：
+        理论仓位 = equity × risk_pct / N
+        股数 = floor(理论仓位 / 价格 / 100) × 100
+        最小为 0
+
+    返回 100 的整数倍的股数（A 股最小交易单位）。
+
+    Parameters
+    ----------
+    equity : float
+        当前账户净值。
+    n_value : float
+        当前 ATR(N) 值。
+    price : float
+        当前价格（入场价）。
+    risk_pct : float
+        单位风险比例，默认 0.01（1%）。
+
+    Returns
+    -------
+    int
+        股数，100 的整数倍。
+    """
+    if n_value <= 0 or price <= 0:
+        return 0
+
+    risk_amount = equity * risk_pct
+    theoretical = risk_amount / n_value
+    lots = int(theoretical / price / 100)
+    return max(0, lots * 100)
+
+
+def calc_fixed_stop(
+    entry_price: float,
+    n_value: float,
+    stop_mult: float = 2.0,
+) -> float:
+    """固定止损线 = 入场价 - stop_mult × N。
+
+    Parameters
+    ----------
+    entry_price : float
+        入场价格。
+    n_value : float
+        入场时的 N 值。
+    stop_mult : float
+        N 的倍数，默认 2.0（2N 止损）。
+
+    Returns
+    -------
+    float
+        止损价格。
+    """
+    return round(entry_price - stop_mult * n_value, 4)
+
+
+def calc_trailing_stop(
+    trail_high: float,
+    n_value: float,
+    prev_stop: Optional[float] = None,
+    stop_mult: float = 2.0,
+) -> float:
+    """移动止损线 = max(trail_high - stop_mult × N, prev_stop)。
+
+    Parameters
+    ----------
+    trail_high : float
+        最近 M 日最高收盘价（预计算值）。
+    n_value : float
+        当前 N 值。
+    prev_stop : float, optional
+        前一日移动止损线。
+    stop_mult : float
+        N 的倍数，默认 2.0。
+
+    Returns
+    -------
+    float
+        当前移动止损价格。只上移不下移。
+    """
+    if not np.isfinite(n_value) or n_value <= 0:
+        logger.warning(
+            "calc_trailing_stop: n_value=%.4f 非法，回退到 prev_stop=%.4f",
+            n_value, prev_stop or 0,
+        )
+        return prev_stop if (prev_stop is not None and np.isfinite(prev_stop)) else 0.0
+
+    if not np.isfinite(trail_high):
+        logger.warning(
+            "calc_trailing_stop: trail_high=%.4f 非法，回退到 prev_stop=%.4f",
+            trail_high, prev_stop or 0,
+        )
+        return prev_stop if (prev_stop is not None and np.isfinite(prev_stop)) else 0.0
+
+    raw_stop = round(float(trail_high) - stop_mult * float(n_value), 4)
+
+    if not np.isfinite(raw_stop):
+        safe = prev_stop if (prev_stop is not None and np.isfinite(prev_stop)) else 0.0
+        logger.warning(
+            "calc_trailing_stop: raw_stop=%.4f 非法，回退到 %.4f",
+            raw_stop, safe,
+        )
+        return safe
+
+    if prev_stop is not None and np.isfinite(prev_stop):
+        return max(raw_stop, prev_stop)
+    return raw_stop
+
+
+def calc_pyramid_trigger(
+    base_price: float,
+    current_units: int,
+    n_at_entry: float,
+    step: float = 0.5,
+) -> float:
+    """计算下一次加仓触发价。
+
+    公式：base_price + current_units × step × n_at_entry
+
+    其中 step = 0.5 表示每上涨 0.5N 加仓一次。
+    首个单位的加仓触发价为 base_price + 1 × 0.5N。
+    第 2 单位加仓触发价为 base_price + 2 × 0.5N，以此类推。
+
+    Parameters
+    ----------
+    base_price : float
+        初始入场价格。
+    current_units : int
+        当前持有单位数（1 ~ max_units-1）。
+    n_at_entry : float
+        入场时的 N 值。
+    step : float
+        加仓步长（N 的倍数），默认 0.5。
+
+    Returns
+    -------
+    float
+        下一次加仓触发价。
+    """
+    if current_units < 1:
+        return base_price
+    return round(float(base_price) + float(current_units) * float(step) * float(n_at_entry), 4)
+
+
+def pyramid_add(
+    current_units: int,
+    max_units: int = 4,
+    base_price: float = 0.0,
+    n_at_entry: float = 0.0,
+    step: float = 0.5,
+) -> Tuple[bool, float]:
+    """检查是否满足加仓条件并返回新的触发价。
+
+    用法在 S3 策略层：
+        can_add, trigger_price = pyramid_add(pos.units, 4, pos.base_price, pos.n_at_entry)
+        if can_add and high >= trigger_price:
+            # 执行加仓
+
+    Parameters
+    ----------
+    current_units : int
+        当前单位数。
+    max_units : int
+        最大单位数，默认 4。
+    base_price : float
+        初始入场价。
+    n_at_entry : float
+        入场时的 N 值。
+    step : float
+        加仓步长，默认 0.5。
+
+    Returns
+    -------
+    (can_add, trigger_price)
+        can_add: 是否可以加仓
+        trigger_price: 加仓触发价（can_add=False 时为 0）
+    """
+    if current_units >= max_units:
+        return False, 0.0
+
+    trigger = calc_pyramid_trigger(base_price, current_units, n_at_entry, step)
+    return True, trigger
+
+
+# ════════════════════════════════════════════════════════════
+#  Position — 单品种持仓
+# ════════════════════════════════════════════════════════════
+
+@dataclass
+class Position:
+    """单个品种的持仓信息。
+
+    Attributes
+    ----------
+    symbol : str
+        品种代码（如 "510500.SH"）。
+    system : str
+        信号系统标识。
+        "primary"  — 20日突破入场（默认）
+        "filtered" — 20日突破 + 55日过滤入场
+        （扩展：商品期货时可使用 "S1"/"S2"）
+    direction : str
+        交易方向。当前仅支持 "long"（预留做空扩展）。
+    """
+
+    symbol: str
+    system: str = "primary"
+    direction: str = "long"
+    entry_date: Optional[date] = None
+    entry_price: float = 0.0
+    units: int = 1
+    shares_per_unit: int = 0
+    stop_loss: float = 0.0
+    stop_type: str = "fixed"          # "fixed" | "trailing"
+    trail_high: float = 0.0           # 10日收盘价高点（移动止损用）
+    n_at_entry: float = 0.0           # 入场时的 N 值
+    base_price: float = 0.0           # 初始入场价（加仓基准点）
+    holding_days: int = 0
+
+    @property
+    def total_shares(self) -> int:
+        """持仓总股数。"""
+        return self.units * self.shares_per_unit
+
+    def market_value(self, current_price: float) -> float:
+        """持仓市值。"""
+        return self.total_shares * current_price
+
+
+# ════════════════════════════════════════════════════════════
+#  TurtleSignals — 信号预计算
+# ════════════════════════════════════════════════════════════
+
+class TurtleSignals:
+    """一次性为所有品种预计算海龟信号所需的中间序列。
+
+    在 Backtrader 的 __init__() 中调用 precompute_all()，
+    将结果挂载到自定义 lines 上供 next() 直接访问。
+
+    对单个品种输出（precompute_all 返回值字典的键）：
+        n              — ATR(period)
+        entry_high_20  — 20日最高价通道（S1 入场参考）
+        entry_low_20   — 20日最低价通道（S1 入场参考）
+        entry_high_55  — 55日最高价通道（S2/55过滤参考）
+        entry_low_55   — 55日最低价通道（S2/55过滤参考）
+        stop_high_10   — 10日最高价（空单止损参考）
+        stop_low_10    — 10日最低价（多单止损参考）
+        trail_high_10  — 10日最高收盘价（移动止损参考）
+    """
+
+    def __init__(self, params: dict):
+        """初始化信号计算器。
+
+        Parameters
+        ----------
+        params : dict
+            海龟参数，从 turtle_config.yaml['turtle'] 读取。
+            必须包含: breakout_period, atr_period, stop_period
+        """
+        self.breakout_period = int(params.get("breakout_period", 20))
+        self.atr_period = int(params.get("atr_period", 20))
+        self.stop_period = int(params.get("stop_period", 10))
+        self.stop_mult = float(params.get("stop_atr_multiple", 2.0))
+
+        # 55日通道参数（硬编码为 55）
+        self.filter_period = 55
+
+    def precompute_all(self, high: pd.Series, low: pd.Series, close: pd.Series) -> dict:
+        """为单个品种预计算所有信号序列。
+
+        Parameters
+        ----------
+        high, low, close : pd.Series
+            该品种的 OHLC 数据（相同长度和索引）。
+
+        Returns
+        -------
+        dict[str, pd.Series]
+            键见类的 docstring。
+        """
+        tr = compute_tr(high, low, close)
+        atr = compute_atr(tr, self.atr_period)
+
+        return {
+            "n": atr,
+            "entry_high_20": donchian_high(high, self.breakout_period),
+            "entry_low_20": donchian_low(low, self.breakout_period),
+            "entry_high_55": donchian_high(high, self.filter_period),
+            "entry_low_55": donchian_low(low, self.filter_period),
+            "stop_high_10": donchian_high(high, self.stop_period),
+            "stop_low_10": donchian_low(low, self.stop_period),
+            "trail_high_10": trail_high_close(close, self.stop_period),
+        }
+
+
+# ════════════════════════════════════════════════════════════
+#  TurtlePositions — 多品种持仓管理
+# ════════════════════════════════════════════════════════════
+
+class TurtlePositions:
+    """管理所有品种的持仓，提供增删改查快捷方法。
+
+    用法：
+        positions = TurtlePositions(max_units=4)
+        positions.open("510500.SH", entry_price=5.5, n_at_entry=0.12, shares=800)
+        if positions.has_position("510500.SH"):
+            pos = positions.get("510500.SH")
+            pos.holding_days += 1
+        positions.close("510500.SH")
+    """
+
+    def __init__(self, max_units: int = 4):
+        self._positions: Dict[str, Position] = {}
+        self._max_units = max_units
+
+    # ── 查询 ──
+
+    def has_position(self, symbol: str) -> bool:
+        """检查指定品种是否有持仓。"""
+        return symbol in self._positions
+
+    def get(self, symbol: str) -> Optional[Position]:
+        """获取指定品种的持仓，不存在返回 None。"""
+        return self._positions.get(symbol)
+
+    def all_positions(self) -> List[Position]:
+        """返回所有持仓的列表副本。"""
+        return list(self._positions.values())
+
+    @property
+    def count(self) -> int:
+        """当前有持仓的品种数量。"""
+        return len(self._positions)
+
+    @property
+    def symbols(self) -> List[str]:
+        """当前有持仓的品种代码列表。"""
+        return list(self._positions.keys())
+
+    def is_full(self, symbol: str) -> bool:
+        """指定品种是否已达最大单位数。"""
+        pos = self.get(symbol)
+        if pos is None:
+            return False
+        return pos.units >= self._max_units
+
+    # ── 操作 ──
+
+    def open(
+        self,
+        symbol: str,
+        system: str = "primary",
+        direction: str = "long",
+        entry_date: Optional[date] = None,
+        entry_price: float = 0.0,
+        shares: int = 0,
+        n_at_entry: float = 0.0,
+        stop_loss: float = 0.0,
+    ) -> Position:
+        """开新仓。
+
+        Returns
+        -------
+        Position
+            新创建的持仓对象。
+        """
+        if self.has_position(symbol):
+            raise ValueError(f"{symbol} 已有持仓，不能重复开仓")
+
+        position = Position(
+            symbol=symbol,
+            system=system,
+            direction=direction,
+            entry_date=entry_date,
+            entry_price=entry_price,
+            shares_per_unit=shares,
+            n_at_entry=n_at_entry,
+            stop_loss=stop_loss,
+            base_price=entry_price,
+        )
+        self._positions[symbol] = position
+        logger.info("[开仓] %s system=%s price=%.4f shares=%d units=1",
+                    symbol, system, entry_price, shares)
+        return position
+
+    def add_unit(self, symbol: str, new_stop_loss: float) -> bool:
+        """对一个已有持仓品种加仓一个单位。
+
+        Parameters
+        ----------
+        symbol : str
+            品种代码。
+        new_stop_loss : float
+            加仓后新的止损线。
+
+        Returns
+        -------
+        bool
+            是否成功加仓。
+        """
+        pos = self.get(symbol)
+        if pos is None:
+            logger.warning("[加仓] %s 无持仓，无法加仓", symbol)
+            return False
+        if pos.units >= self._max_units:
+            logger.warning("[加仓] %s 已达最大单位 %d", symbol, self._max_units)
+            return False
+
+        pos.units += 1
+        pos.stop_loss = new_stop_loss
+        logger.info("[加仓] %s units=%d stop=%.4f", symbol, pos.units, new_stop_loss)
+        return True
+
+    def close(self, symbol: str) -> Optional[Position]:
+        """平仓并返回平仓前的持仓信息。
+
+        Returns
+        -------
+        Position or None
+            平仓前的持仓对象（用于计算盈亏）；无持仓时返回 None。
+        """
+        pos = self._positions.pop(symbol, None)
+        if pos is not None:
+            logger.info("[平仓] %s units=%d entry=%.4f", symbol, pos.units, pos.entry_price)
+        return pos
+
+    def update_stop_loss(self, symbol: str, new_stop: float, stop_type: str = "trailing"):
+        """更新指定品种的止损线。"""
+        pos = self.get(symbol)
+        if pos is not None:
+            pos.stop_loss = new_stop
+            pos.stop_type = stop_type
+
+    def update_trail_high(self, symbol: str, new_high: float):
+        """更新移动止损的参考高点。"""
+        pos = self.get(symbol)
+        if pos is not None:
+            if new_high > pos.trail_high:
+                pos.trail_high = new_high
+
+
+# ════════════════════════════════════════════════════════════
+#  SignalFilter — 盈利过滤器（单系统简化版）
+# ════════════════════════════════════════════════════════════
+
+@dataclass
+class _FilterState:
+    """单个 (symbol) 的过滤器内部状态。"""
+    symbol: str
+    total_signals: int = 0
+    total_accepted: int = 0
+    total_rejected: int = 0
+    consecutive_rejections: int = 0
+    last_trade_was_win: Optional[bool] = None  # None = 无历史
+
+
+class SignalFilter:
+    """盈利过滤器（单系统版）。
+
+    规则：
+        1. 首个信号 → 无条件接受
+        2. 同品种已持仓 → 拒绝
+        3. 上次同品种交易盈利 → 接受；亏损 → 跳过
+        4. 连续拒绝 ≥ max_rejections → 强制放行（上限保护）
+
+    用法：
+        filter = SignalFilter()
+        accepted, reason = filter.check_entry("510500.SH", has_position=False)
+        filter.record_result("510500.SH", was_win=True)
+    """
+
+    def __init__(self, max_rejections: int = 3):
+        self._states: Dict[str, _FilterState] = {}
+        self.max_rejections = max_rejections
+
+    def _get_state(self, symbol: str) -> _FilterState:
+        if symbol not in self._states:
+            self._states[symbol] = _FilterState(symbol=symbol)
+        return self._states[symbol]
+
+    def check_entry(self, symbol: str, has_position: bool = False) -> Tuple[bool, str]:
+        """检查入场信号是否通过过滤器。
+
+        Parameters
+        ----------
+        symbol : str
+            品种代码。
+        has_position : bool
+            该品种当前是否有持仓。
+
+        Returns
+        -------
+        (accepted, reason)
+            accepted: True 为接受，False 为拒绝
+            reason: 原因说明
+        """
+        state = self._get_state(symbol)
+        state.total_signals += 1
+
+        # 规则 1：首个信号
+        if state.last_trade_was_win is None:
+            state.total_accepted += 1
+            state.consecutive_rejections = 0
+            return True, "首个信号，无条件接受"
+
+        # 规则 2：持仓互斥
+        if has_position:
+            state.total_rejected += 1
+            state.consecutive_rejections += 1
+            return False, "同品种已持仓，拒绝"
+
+        # 规则 3：盈利过滤器
+        if state.last_trade_was_win:
+            state.total_accepted += 1
+            state.consecutive_rejections = 0
+            return True, "上次交易盈利出场，接受"
+
+        # 规则 4：上限保护
+        if state.consecutive_rejections >= self.max_rejections:
+            state.total_accepted += 1
+            state.consecutive_rejections = 0
+            logger.info(
+                "[滤波器] %s 连续拒绝 %d 次 → 强制放行",
+                symbol, state.consecutive_rejections + 1,
+            )
+            return True, f"连续拒绝≥{self.max_rejections}→强制放行"
+
+        state.total_rejected += 1
+        state.consecutive_rejections += 1
+        return False, f"上次交易亏损出场（连续拒绝{state.consecutive_rejections}次），跳过"
+
+    def record_result(self, symbol: str, was_win: bool):
+        """记录一笔交易的结果，更新过滤器状态。
+
+        Parameters
+        ----------
+        symbol : str
+            品种代码。
+        was_win : bool
+            是否盈利出场。
+        """
+        state = self._get_state(symbol)
+        state.last_trade_was_win = was_win
+        state.consecutive_rejections = 0
+
+    def reset(self, symbol: Optional[str] = None):
+        """重置过滤器状态。
+
+        Parameters
+        ----------
+        symbol : str, optional
+            指定品种。不指定则重置所有。
+        """
+        if symbol:
+            self._states.pop(symbol, None)
+        else:
+            self._states.clear()
+
+    def get_stats(self) -> Dict[str, dict]:
+        """导出所有过滤器的统计信息（用于日志/调试）。"""
+        from dataclasses import asdict
+        return {k: asdict(v) for k, v in self._states.items()}
