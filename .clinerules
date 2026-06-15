@@ -1,28 +1,31 @@
-# code-context MCP 工具使用规则
+# turtle_v2 项目规则 — Cline 指令
+
+---
+
+## 一、code-context MCP 工具使用规则
 
 MCP 服务器 `code-context` 已安装，优先使用以下工具节省 Token：
 
-## 核心省 Token 原则
+### 核心省 Token 原则
 
 1. **查大文件（>200行）禁止用 `read_file`**
 2. **查多个符号一次完成 → `batch_read`**
 3. **修改代码用两阶段提交 → `write_file_surgical`（先 dry-run 预览 diff，确认后提交）**
 
-## 文件大小速查（辅助决策）
+### 本项目的文件大小速查
 
 | 文件 | 行数 | 最佳工具 |
 |------|------|---------|
-| `src/execution_engine.py` | **6438** | ⚠️ 只读特定类/函数 → `read_file_surgical` |
-| `src/strategy_engine.py` | **1476** | ⚠️ 只读特定类/函数 → `read_file_surgical` |
-| `src/data_pipeline.py` | **889** | 大文件 → `read_file_surgical` |
-| `tests/conftest.py` | **575** | 大文件 → `read_file_surgical` |
-| `src/backtest_engine.py` | 200+ | 大文件 → `read_file_surgical` |
+| `src/turtle_core.py` | **673** | ⚠️ 只读特定类/函数 → `read_file_surgical` |
+| `strategies/turtle_trading.py` | **~400** | ⚠️ 大文件 → `read_file_surgical` |
+| `src/data_pipeline.py` | **~300** | 大文件 → `read_file_surgical` |
+| `scripts/run_backtest.py` | **~260** | 大文件 → `read_file_surgical` |
 | 其他 `src/*.py` | <200 | 可用 `read_file`，但优先 `read_file_surgical` |
 | `scripts/*.py` | 通常 <300 | `read_file` 可接受 |
-| `tests/*.py` | 通常 100-200 | `read_file` 可接受 |
+| `tests/*.py` | 通常 200-350 | `read_file` 可接受 |
 | `docs/*.md` | 通常 <200 | `read_file` 可接受 |
 
-## 省 Token 操作（替代传统 read_file）
+### 省 Token 操作
 
 - 查单个函数/类 → `read_file_surgical`
 - 查多个符号 → `batch_read`
@@ -30,7 +33,7 @@ MCP 服务器 `code-context` 已安装，优先使用以下工具节省 Token：
 - 查项目架构 → `get_semantic_repo_map`
 - 搜索代码模式 → `search_code_pattern`
 
-## 安全修改代码（替代 replace_in_file）
+### 安全修改代码
 
 - 修改函数/类 → `write_file_surgical`
   - Phase 1：传入 `newContent` → 返回 diff + token
@@ -39,6 +42,79 @@ MCP 服务器 `code-context` 已安装，优先使用以下工具节省 Token：
 - 在函数内/前后插入代码 → `insert_symbol`
 - 删除符号 → `remove_symbol`
 
-## 自动维护
+### 自动维护
 
 - 文件修改后 → file watcher 自动清理缓存
+
+---
+
+## 二、turtle_v2 项目状态速查
+
+**说明：以下表格在推进阶段时原地更新（替换旧状态），不会逐行追加导致膨胀。** 预估保持在 130 行以内。
+
+### 路线图
+
+```
+S0 骨架搭建     ✅   →  S1 数据管道     ✅
+S2 核心移植     ✅   →  S3 策略层       ✅
+S4 风险平价     ⏳   →  S5 基准对比     ⏳
+S6 网格搜索     ⏳   →  S7 压力测试     ⏳
+S8 综合报告     ⏳   →  S9 Dry-Run     ⏳
+```
+
+### 模块依赖
+
+```
+config/turtle_config.yaml          ← 所有模块读取
+data/etf_daily/{code}.parquet      ← S1 数据缓存
+    ↑
+src/data_pipeline.py               ← S1: Tushare 拉取 + Parquet 缓存
+    ↑
+src/turtle_core.py                 ← S2: 纯 pandas，无外部依赖
+    ↑
+strategies/turtle_trading.py       ← S3: Backtrader 策略，依赖 S2
+    ↑
+scripts/run_backtest.py            ← S3: 回测入口，依赖 S2+S3
+```
+
+### 品种与结算
+
+| 代码 | 名称 | 结算 | 角色 |
+|:--|:--|:--:|:--|
+| 510500.SH | 中证500 | T+1 | 海龟 |
+| 159845.SZ | 中证1000 | T+1 | 海龟 |
+| 159915.SZ | 创业板 | T+1 | 海龟 |
+| 588000.SH | 科创50 | T+1 | 海龟 |
+| 513100.SH | 纳指ETF | **T+0** | 海龟 |
+| 518880.SH | 黄金ETF | **T+0** | 海龟 |
+| 511010.SH | 国债ETF | **T+0** | 现金管理 |
+
+### 测试状态
+
+```
+tests/test_data_pipeline.py     20 passed  ✅
+tests/test_turtle_core.py       52 passed  ✅
+tests/test_turtle_strategy.py   17 passed  ✅
+─────────────────────────────────────────
+合计                            89 passed  ✅
+```
+
+---
+
+## 三、开发规范
+
+### 版本控制
+
+- 完成一个阶段后必须 `git add -A && git commit -m "消息"`
+- `git commit -m` 消息体**禁止包含换行**、`task_progress:`、checklist（违反会触发 PowerShell 解析错误）
+- 提交消息格式：`S{N}: 阶段名 — 简要说明`
+
+### 测试
+
+- 每个阶段必须包含对应的 `tests/test_*.py`
+- 提交前必须跑 `py -m pytest tests/ -q` 确认全部通过
+
+### 数据
+
+- 未设置 `TUSHARE_TOKEN` 环境变量时，数据管道会抛出 `ValueError`
+- Parquet 缓存位于 `data/etf_daily/{code}.parquet`

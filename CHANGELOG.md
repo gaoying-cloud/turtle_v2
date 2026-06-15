@@ -1,5 +1,17 @@
 # Changelog
 
+## [S3] - 2026-06-15
+### Backtrader 策略层
+- `strategies/turtle_trading.py`: TurtleStrategy (bt.Strategy) 回测策略
+  - 入场: 20日突破 + 可选55日过滤 + SignalFilter + 仓位集中度熔断
+  - 退出: 2N固定止损 / 移动止损 / 10日反向突破（取更早触发者）
+  - 加仓: 每0.5N加仓，最多4单位 (S2 pyramid_add)
+  - T+1约束: 4只A股ETF当日买入不可止损，3只T+0品种可自由交易
+  - 空仓→国债ETF切换，连续亏损暂停机制
+- `scripts/run_backtest.py`: 回测CLI入口，5分析器，支持--mode A/B
+- `tests/test_turtle_strategy.py`: 17 项单元测试
+- [S3] `已完成`
+
 ## [S2] - 2026-06-15
 ### 海龟核心模块移植
 - `src/turtle_core.py`: 从 automated_trading/src/strategy_engine.py 提取并重构
