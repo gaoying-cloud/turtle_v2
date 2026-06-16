@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -461,7 +461,7 @@ class TurtleStrategy(bt.Strategy):
         self._trade_count += 1
         if not was_win:
             self._consecutive_losses += 1
-            self._cumulative_loss_pct += abs(pnl) / self._equity()
+            self._cumulative_loss_pct += abs(pnl) / self.broker.startingcash
             # 连续亏损暂停
             if self._consecutive_losses >= self.params.max_consecutive_losses:
                 self._enter_pause(f"连续亏损 {self._consecutive_losses} 次")
@@ -528,10 +528,6 @@ class TurtleStrategy(bt.Strategy):
 
     def _update_trailing_stop(self, code: str, pos: Position):
         """每日更新移动止损线（只上移不下移）。"""
-        if pos.stop_type == "trailing" and pos.trail_high > 0:
-            # 移动止损已激活，由下一次 _should_exit 判断
-            return
-
         idx = self._next_idx(code)
         si = self._signals[code]
         trail_high = si["trail_high_10"].iloc[idx]
@@ -591,8 +587,9 @@ class TurtleStrategy(bt.Strategy):
         """进入交易暂停状态。"""
         pause_days = self.params.pause_days
         current = self.datas[0].datetime.date(0)
-        self._paused_until = current + __import__("datetime").timedelta(days=pause_days)
+        self._paused_until = current + timedelta(days=pause_days)
         self._consecutive_losses = 0
+        self._cumulative_loss_pct = 0.0
         logger.warning("[风控] 暂停交易 %d 天（至 %s）: %s",
                        pause_days, self._paused_until, reason)
 

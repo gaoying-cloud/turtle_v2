@@ -1,5 +1,15 @@
 # Changelog
 
+## [Audit-fix] - 2026-06-16
+### 策略核心逻辑审查修复 — 2 项严重缺陷 + 2 项编码规范
+- **P0-1 累计亏损百分比永不复位**（`_enter_pause` 增加 `self._cumulative_loss_pct = 0.0`）：暂停期结束后可恢复新开仓，消除永久冻结 bug
+- **P0-2 移动止损首次激活后冻结**（`_update_trailing_stop` 删除提前返回逻辑）：移动止损线每日随价格上涨上移，恢复趋势跟踪利润保护能力
+- **#3 盈亏百分比使用固定基准**：`self._equity()` → `self.broker.startingcash`，与设计文档 §6.2「累计亏损 > 总资金 15%」的固定基准语义一致
+- **#4 运行时动态导入**：顶部增加 `timedelta`，`__import__("datetime").timedelta()` → `timedelta()`，消除编码规范问题
+- `docs/strategy_design_v3.0.md`: 新增 §1.3 架构局限标注 + §5.7.6 累计亏损基准说明
+- 全部 22 项策略测试通过，无回归
+- [Audit-fix] `已完成`
+
 ## [Bugfix-6failed] - 2026-06-16
 ### 修复 6 个已知失败测试（185 passed, 0 failed）
 - `tests/test_gen_report.py` — mock `best_params.json` 不存在，使占位符降级分支可到达
