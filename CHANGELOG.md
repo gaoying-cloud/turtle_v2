@@ -1,5 +1,26 @@
 # Changelog
 
+## [S5-bugfix] - 2026-06-16
+### B4 兼容性修复（Python 3.14 + Backtrader）
+- 修复 3 个 Backtrader 内部兼容性 bug：
+  - `self._trades: List[dict] = []` 覆盖 Backtrader 内部 `self._trades` dict，导致 `PandasData` 对象被用作 list 索引
+    → 重命名为 `self._my_trades`
+  - `_next_idx()` 使用 `len(self)-1` 在 runonce 模式第 0 个 bar 返回 -1，超出预计算数组长度
+    → 增加负值和越界保护
+  - `next()` 首次调用时 len(self)=0 数据不全
+    → 增加 `len(self) < 2: return` 防护
+- B4 在 `run_comparison.py` 中改用独立 Cerebro 实例，避免多轮回测状态残留
+- S5 四个基准全部成功运行：
+
+  | 基准 | 最终净值 | 总收益率 |
+  |:--|:--:|:--:|
+  | B1 买入等权持有 | ¥360,666 | +80.33% |
+  | B2 等权再平衡 | ¥409,609 | +104.80% |
+  | B3 ATR等风险 | ¥201,956 | +0.98% |
+  | B4 海龟+国债 | ¥196,951 | -1.52% |
+
+- [S5-bugfix] `已完成`
+
 ## [S8] - 2026-06-16
 ### 综合报告 + 测试
 - `scripts/gen_report.py`: 综合报告生成脚本
