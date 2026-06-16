@@ -1,5 +1,14 @@
 # Changelog
 
+## [Bugfix-6failed] - 2026-06-16
+### 修复 6 个已知失败测试（185 passed, 0 failed）
+- `tests/test_gen_report.py` — mock `best_params.json` 不存在，使占位符降级分支可到达
+- `tests/test_grid_search.py` — 烟雾测试日期从 `2020-2021` 调整为 `2023-2024`，避免 159845.SZ 早期数据不足
+- `tests/test_turtle_strategy.py` — fixture 中 `_trades` → `_my_trades`（属性名与策略代码不匹配）
+- `tests/test_turtle_strategy.py` — 2 个 S4 测试补充 `_close_series` 填充
+- `tests/test_turtle_strategy.py` — `test_pause_after_losses` 中 `_trades` → `_my_trades`
+- [Bugfix-6failed] `已完成`
+
 ## [S5-bugfix] - 2026-06-16
 ### B4 兼容性修复（Python 3.14 + Backtrader）
 - 修复 3 个 Backtrader 内部兼容性 bug：

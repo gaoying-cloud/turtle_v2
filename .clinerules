@@ -102,8 +102,11 @@ tests/test_turtle_core.py       52 passed  ✅
 tests/test_turtle_strategy.py   22 passed  ✅
 tests/test_risk_parity.py       22 passed  ✅
 tests/test_benchmarks.py        10 passed  ✅
+tests/test_gen_report.py        10 passed  ✅
+tests/test_grid_search.py       14 passed  ✅
+tests/test_stress_test.py       32 passed  ✅
 ─────────────────────────────────────────
-合计                           126 passed  ✅
+合计                           185 passed  ✅
 ```
 
 ---

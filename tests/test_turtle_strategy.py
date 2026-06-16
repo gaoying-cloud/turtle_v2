@@ -113,7 +113,7 @@ def strat():
     s.__dict__["_paused_until"] = None
     s.__dict__["_in_bond"] = False
     s.__dict__["_trade_count"] = 0
-    s.__dict__["_trades"] = []
+    s.__dict__["_my_trades"] = []
     # S4 状态字段
     s.__dict__["_alpha_risk_pcts"] = None
     s.__dict__["_last_rebalance_day"] = None
@@ -330,7 +330,7 @@ class TestRisk:
             Position(symbol="510500.SH", entry_price=10.0, shares_per_unit=800))
 
         assert strat._paused_until is not None
-        assert strat._trades[-1]["was_win"] is False
+        assert strat._my_trades[-1]["was_win"] is False
 
     def test_concentration_count(self, strat):
         """4品种持仓 → 满足集中度条件。"""
@@ -377,6 +377,7 @@ class TestAlphaWeighting:
             n_series = pd.Series(np.random.uniform(0.5, 2.0, n_bars))
             close_series = pd.Series(np.random.uniform(1.0, 100.0, n_bars))
             strat._signals[code] = {"n": n_series, "close": close_series}
+            strat._close_series[code] = close_series
 
         # 模拟当前 bar 位置
         with patch.object(strat, "_next_idx", return_value=n_bars - 1):
@@ -397,6 +398,7 @@ class TestAlphaWeighting:
         for code in strat.params.symbols:
             close_series = pd.Series(np.random.uniform(10.0, 100.0, n_bars))
             strat._signals[code] = {"close": close_series, "n": pd.Series(np.ones(n_bars))}
+            strat._close_series[code] = close_series
 
         with patch.object(strat, "_next_idx", return_value=n_bars - 1):
             returns = strat._build_returns_matrix()

@@ -242,7 +242,7 @@ class TestRunSingleBacktestSmoke:
             "stop_atr_multiple": 2.0,
             "alpha": 0.05,
         }
-        result = run_single_backtest(params, "A", "2020-01-01", "2021-01-01", run_id=999)
+        result = run_single_backtest(params, "A", "2023-01-01", "2024-01-01", run_id=999)
 
         assert result is not None
         assert result["run_id"] == 999
@@ -266,7 +266,7 @@ class TestRunSingleBacktestSmoke:
             "stop_atr_multiple": 2.0,
             "alpha": 0.05,
         }
-        result = run_single_backtest(params, "B", "2020-01-01", "2021-01-01", run_id=100)
+        result = run_single_backtest(params, "B", "2023-01-01", "2024-01-01", run_id=100)
 
         expected_keys = {
             "run_id", "mode", "atr_period", "breakout_period",

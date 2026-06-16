@@ -114,7 +114,11 @@ class TestGeneratePerformanceTable:
 
 class TestGenerateParamsSection:
     def test_fallback_when_no_data(self):
-        section = generate_params_section(None, None)
+        from unittest.mock import patch
+        from scripts.gen_report import GRID_DIR
+        best_path = GRID_DIR / "best_params.json"
+        with patch.object(Path, "exists", return_value=False):
+            section = generate_params_section(None, None)
         assert "⚠️" in section or "尚未运行" in section
 
     def test_with_mock_data(self):
