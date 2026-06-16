@@ -390,7 +390,8 @@ class TurtleStrategy(bt.Strategy):
         # ── 执行买入 ──
         dt = data.datetime.date(0)
         self.buy(data=data, size=shares)
-        stop_loss = calc_fixed_stop(price, n)
+        stop_atr_multiple = float(self.params.turtle_params.get("stop_atr_multiple", 2.0))
+        stop_loss = calc_fixed_stop(price, n, stop_atr_multiple)
         self._positions.open(
             code,
             system="filtered" if self.params.use_55_filter else "primary",
