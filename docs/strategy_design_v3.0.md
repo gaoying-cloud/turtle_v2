@@ -1,18 +1,28 @@
 ---
-version: "3.5"
+version: "3.6"
 date: "2026-06-16"
-based_on: "V3.4 (2026-06-16)"
+based_on: "V3.5 (2026-06-16)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V3.5
+# 跨市场ETF海龟组合策略 — 设计文件 V3.6
+
+**V3.6 变更**：
+- B4 兼容性修复（Python 3.14 + Backtrader 内部属性冲突）：
+  - `self._trades` → `self._my_trades`：避免覆盖 Backtrader 内部 `self._trades` dict
+  - `_next_idx()` 增加负值和越界保护：`len(self)=0` 时返回 0
+  - `next()` 增加 `len(self) < 2: return`：跳过第 0 个 bar 数据不全
+  - B4 在 `run_comparison.py` 中改用独立 Cerebro 实例
+- S5 四个基准全部成功运行：
+
+  | 基准 | 最终净值 | 总收益率 |
+  |:--|:--:|:--:|
+  | B1 买入等权持有 | ¥360,666 | +80.33% |
+  | B2 等权再平衡 | ¥409,609 | +104.80% |
+  | B3 ATR等风险 | ¥201,956 | +0.98% |
+  | B4 海龟+国债 | ¥196,951 | -1.52% |
 
 **V3.5 变更**：
-- 修复 data_pipeline 拉取数据后回测引擎的 3 个兼容性 bug：
-  - `df_to_feed()` 删除冲突的 `datetime` 参数（Backtrader PandasData 列名映射冲突）
-  - `len(data)` 在 `__init__` 中返回 0 → 改为 `len(data.close.array)`（Backtrader preload 机制差异）
-  - `_close_series` 初始化顺序问题 → 移到循环之前，防止被后续空 dict 覆盖
-  - `_build_returns_matrix()` 从错误 dict `signals["close"]` 读数据 → 改用 `_close_series[code]`
-- S5 基准对比 B1/B2/B3 已成功运行，B4 存在残留 bug 待修复
+- 修复 data_pipeline 拉取数据后回测引擎的 4 个兼容性 bug
 - `docs/MarkdownMcp 配置手册（AI 助手专用）.md` 新增文档索引
 
 **V3.4 变更**：
@@ -726,7 +736,7 @@ results/                         # 回测输出
 
 | 文件 | 内容 |
 |:--|:--|
-| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.5） |
+| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.6） |
 | `docs/governance_model.md` | 项目管控模型 |
 | `docs/analysis/t+0_t+1_impact.md` | T+0/T+1 结算规则差异对策略的完整影响分析 |
 | `docs/MarkdownMcp 配置手册（AI 助手专用）.md` | MarkdownMcp 安装与配置指南 |
