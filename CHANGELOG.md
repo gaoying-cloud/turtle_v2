@@ -34,15 +34,38 @@
 - 全量测试 150/150 passed ✅（+10 新增，无回归）
 - [S8] `已完成`
 
-## [S7] - 2026-06-15
-### 极端情景回测 + 压力测试
-- `docs/strategy_design_v3.0.md`: 升级 V3.3，新增 §5.9 S7 施工图设计 + §5.10 滚动相关性监控
-- 4 个历史极端情景（A1 COVID 熔断 / A2 俄乌冲突 / A3 A股二次探底 / A4 完整2022年）
-- 2 个合成压力情景（B1 每月同步暴跌 3%/5%/7% / B2 连续 3 日跌停）
-- 通过/失败判定标准：最大回撤 ≤25%、回撤持续 ≤60 日、99% VaR ≤5%、月亏 ≤15%、止损保护触发
-- `scripts/run_correlation_monitor.py`: 独立模块 — 60 日滚动相关性计算 + 阈值预警 + 事件检测
-- `scripts/run_stress_test.py`: 主脚本设计方案（待后续实现）
-- [S7] `已完成（施工图设计）`
+## [S7] - 2026-06-16
+### 极端情景回测 + 压力测试 — 完整实现
+- `scripts/run_stress_test.py`: 完整实现（§5.9 施工图落地）
+  - `define_scenarios()`: 4 个历史情景（A1 COVID 熔断 / A2 俄乌冲突 / A3 A股二次探底 / A4 完整2022年）+ 2 个合成情景（B1 每月同步暴跌 / B2 连续3日跌停）
+  - `load_best_params()`: 从 S6 best_params.json 加载，文件不存在时回退 config 默认值
+  - `run_historical_scenario()`: Backtrader 回测 + 含 VaR/相关性/T+1 止损延迟等 18 项指标
+  - `run_synthetic_shock()`: B1 — 每月首日注入 -3%/-5%/-7% 冲击矩阵
+  - `run_liquidity_stress()`: B2 — 满仓 4 单位 × 3 日跌停不可抗损失计算
+  - `_check_stress_pass()`: 5 项通过线判定（MDD≤25% / 回撤持续≤60日 / VaR99≤5% / 月亏≤15% / 止损保护触发）
+  - `generate_report()`: Markdown 完整报告 + 综合判定
+  - `save_results()`: 输出 5 个产物文件 + conclusion JSON
+  - CLI: `--params/--scenarios/--mode/--workers/--output`
+  - 并行支持: `ProcessPoolExecutor`（A1-A4 可同时回测）
+- `scripts/run_correlation_monitor.py`: 完整实现（§5.10 要求）
+  - `load_price_matrix()`: 从 Parquet 加载 6 品种价格，内连接对齐公共交易日
+  - `compute_rolling_correlation()`: 对数收益率 → rolling().corr() → 上三角聚合
+  - `detect_correlation_events()`: 连续阈值突破合并为预警事件
+  - `plot_correlation_timeseries()`: 折线图 + 阈值线 + 预警区域填充 + 峰值标注
+  - `generate_report()`: Markdown 报告（总体统计 + 事件列表 + 结论）
+  - CLI: `--start/--end/--window/--threshold/--plot`
+- `tests/test_stress_test.py`: 32 项测试全部通过
+  - 场景定义完整性 / 最优参数加载+fallback / 历史回测输出格式 / B1 矩阵结构 / B2 计算正确性 / 相关性计算 / 通过判定逻辑 / 报告生成 / 文件保存 / CLI 主函数
+- `scripts/gen_report.py`: 对接 S7 — 消除占位符
+  - `load_stress_conclusion()`: 读取 `stress_conclusion.json`
+  - `load_stress_report()`: 读取 `stress_report.md` 摘要
+  - `generate_stress_section()`: 替代硬编码占位符，存在 S7 结果时内联判定 + 场景表格
+- `results/stress_test/` 输出产物（运行时生成）:
+  - `stress_report.md` / `scenario_summary.csv` / `historical_{s}.csv` / `synthetic_shock.csv` / `stress_conclusion.json`
+  - `correlation_series.csv` / `correlation_events.csv` / `correlation_report.md` / `correlation_plot.png`（--plot）
+- `docs/strategy_design_v3.0.md`: 升级 V3.7
+- 全量测试: 179 passed, 6 failed（6 个已有问题，S7 无回归）
+- [S7] `已完成`
 
 ## [S6] - 2026-06-15
 ### 参数网格搜索
