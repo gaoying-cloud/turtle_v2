@@ -265,6 +265,58 @@ def run_comparison(
         logger.info("运行 %s %s", name, strategy_labels[name])
         logger.info("=" * 50)
 
+        if name == "B4":
+            # B4 使用独立 Cerebro 避免与前序策略状态冲突
+            _cerebro4 = bt.Cerebro()
+            for _s in SIX_SYMBOLS:
+                _cerebro4.adddata(feeds[_s], name=_s)
+            _cerebro4.broker.setcash(config["initial_cash"])
+            _cerebro4.addstrategy(TurtleStrategy,
+                turtle_params=config["turtle"], symbols=SIX_SYMBOLS,
+                use_55_filter=(mode == "B"),
+                risk_per_unit=config["turtle"]["risk_per_unit"],
+                concentration_trigger=config["risk"]["concentration_trigger"],
+                max_consecutive_losses=config["risk"]["max_consecutive_losses"],
+                max_cumulative_loss_pct=config["risk"]["max_cumulative_loss_pct"],
+                pause_days=config["risk"]["pause_days"],
+                alpha=config["weighting"]["alpha"],
+                cov_lookback_days=config["weighting"]["cov_lookback_days"],
+                rebalance_quarterly=config["weighting"]["rebalance_quarterly"],
+                atr_change_threshold=config["weighting"]["atr_change_threshold"],
+            )
+            _cerebro4.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)
+            _cerebro4.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+            _cerebro4.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+            _cerebro4.addanalyzer(bt.analyzers.Returns, _name="returns")
+            try:
+                _res4 = _cerebro4.run(runonce=False)
+            except Exception as _e4:
+                logger.error("[B4] 运行失败: %s", _e4); continue
+            if not _res4:
+                logger.error("[B4] 无结果"); continue
+            _strat4 = _res4[0]
+            fv = _cerebro4.broker.getvalue()
+            _trades4 = _strat4.analyzers.trades.get_analysis() or {}
+            _total4 = _trades4.get("total", {}).get("total", 0)
+            _won4 = _trades4.get("won", {}).get("total", 0)
+            result = {
+                "strategy": "B4",
+                "initial_cash": config["initial_cash"],
+                "final_value": round(fv, 2),
+                "total_return_pct": round((fv / config["initial_cash"] - 1) * 100, 2),
+                "annual_return_pct": None, "sharpe_ratio": None,
+                "max_drawdown_pct": None, "annual_volatility_pct": None,
+                "total_trades": _total4,
+                "win_rate_pct": round(_won4 / _total4 * 100, 2) if _total4 > 0 else 0,
+                "profit_factor": None,
+            }
+            results.append(result)
+            print(f"B4 B4 海龟+国债: 最终 {fv:>10.2f} | "
+                  f"收益 {result['total_return_pct']:>7.2f}% | "
+                  f"夏普 N/A     | 回撤 N/A   | "
+                  f"交易 {_total4:>4}次")
+            continue
+
         result = run_single(name, feeds, config, mode)
         if result is None:
             logger.error("[%s] 失败，跳过", name)

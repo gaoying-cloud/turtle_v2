@@ -132,12 +132,19 @@ class TurtleStrategy(bt.Strategy):
         self._bond_data = None
         self._last_equity: float = self.broker.getvalue()
         self._trade_count: int = 0
-        self._trades: List[dict] = []
+        self._my_trades: List[dict] = []
 
 
     def _next_idx(self, code: str) -> int:
-        """获取当前行在预计算序列中的索引。"""
-        return len(self) - 1  # Backtrader len(self) 当前 bar 位置
+        """获取安全索引，防止 runonce 模式下 len(self) 与信号数组长度不匹配。"""
+        idx = len(self) - 1
+        if idx < 0:
+            return 0
+        if code in self._signals and "n" in self._signals[code]:
+            max_idx = len(self._signals[code]["n"]) - 1
+            if idx > max_idx:
+                return max_idx
+        return idx
 
     def _is_new_day(self) -> bool:
         """检测是否进入新的交易日（用于重置 T+1 标记）。"""
@@ -263,6 +270,10 @@ class TurtleStrategy(bt.Strategy):
     # ════════════════════════════════════════════════════════
 
     def next(self):
+        # ── 确保有足够的数据（runonce 模式下第 0 个 bar 可能数据不全）──
+        if len(self) < 2:
+            return
+
         # ── 检查是否在暂停期 ──
         if self._paused_until is not None:
             if self.datas[0].datetime.date(0) < self._paused_until:
@@ -457,7 +468,7 @@ class TurtleStrategy(bt.Strategy):
             self._consecutive_losses = 0
 
         # 记录交易
-        self._trades.append({
+        self._my_trades.append({
             "symbol": code,
             "entry_date": pos.entry_date.isoformat() if pos.entry_date else "",
             "exit_date": dt.isoformat(),
@@ -590,11 +601,11 @@ class TurtleStrategy(bt.Strategy):
 
     def stop(self):
         """回测结束输出交易统计。"""
-        total_trades = len(self._trades)
-        wins = sum(1 for t in self._trades if t["was_win"])
+        total_trades = len(self._my_trades)
+        wins = sum(1 for t in self._my_trades if t["was_win"])
         losses = total_trades - wins
         win_rate = wins / total_trades if total_trades > 0 else 0
-        total_pnl = sum(t["pnl"] for t in self._trades)
+        total_pnl = sum(t["pnl"] for t in self._my_trades)
 
         logger.info("=" * 50)
         logger.info("回测结束 — 交易统计")
@@ -613,5 +624,5 @@ class TurtleStrategy(bt.Strategy):
             "win_rate": win_rate,
             "total_pnl": total_pnl,
             "final_value": self._equity(),
-            "trades": pd.DataFrame(self._trades) if self._trades else pd.DataFrame(),
+            "trades": pd.DataFrame(self._my_trades) if self._my_trades else pd.DataFrame(),
         }
