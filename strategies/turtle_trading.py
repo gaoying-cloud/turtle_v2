@@ -284,12 +284,11 @@ class TurtleStrategy(bt.Strategy):
         for pos in self._positions.all_positions():
             pos.holding_days += 1
 
-        # ── Step 2: 逐个品种处理（仅处理 symbols 中声明的品种，跳过额外数据如国债ETF） ──
+        # ── Step 2: 逐个品种处理 ──
         n_symbols = len(self.params.symbols)
-        for i, data in enumerate(self.datas):
-            if i >= n_symbols:
-                break
+        for i in range(n_symbols):
             code = self.params.symbols[i]
+            data = self.datas[i]
             if not self._positions.has_position(code):
                 # 检查入场
                 self._check_entry(code, data)

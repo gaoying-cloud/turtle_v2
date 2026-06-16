@@ -1,0 +1,20 @@
+{
+  "mode": "A",
+  "start_date": "2020-01-01",
+  "end_date": "2026-06-10",
+  "initial_cash": 200000,
+  "final_value": 0,
+  "total_return": 0,
+  "cagr": 0,
+  "sharpe": null,
+  "max_drawdown": 0,
+  "win_rate": 0,
+  "profit_factor": 0,
+  "total_trades": 0,
+  "annual_vol": 0,
+  "calmar": 0,
+  "concentration_cut": 0,
+  "dd_warning": 0,
+  "loss_pause": 0,
+  "t1_stop_delay": 0
+}
