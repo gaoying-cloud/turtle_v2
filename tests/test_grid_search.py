@@ -43,19 +43,14 @@ class TestBuildParamGrid:
 
     def test_grid_size(self):
         grid = build_param_grid()
-        expected = (
-            len(PARAM_GRID["atr_period"])
-            * len(PARAM_GRID["breakout_period"])
-            * len(PARAM_GRID["stop_period"])
-            * len(PARAM_GRID["stop_atr_multiple"])
-            * len(PARAM_GRID["alpha"])
-        )
+        expected = 1
+        for vals in PARAM_GRID.values():
+            expected *= len(vals)
         assert len(grid) == expected, f"期望 {expected} 组，实际 {len(grid)}"
 
     def test_each_entry_has_all_keys(self):
         grid = build_param_grid()
-        required_keys = {"atr_period", "breakout_period", "stop_period",
-                         "stop_atr_multiple", "alpha"}
+        required_keys = set(PARAM_GRID.keys())
         for entry in grid:
             assert set(entry.keys()) == required_keys, f"缺少键: {set(required_keys) - set(entry.keys())}"
 
@@ -79,9 +74,12 @@ class TestBuildParamGrid:
         assert PARAM_GRID["breakout_period"] == [15, 20, 25]
         assert PARAM_GRID["stop_period"] == [8, 10, 12]
         assert PARAM_GRID["stop_atr_multiple"] == [1.5, 2.0, 2.5]
-        # α 包含用户指定的 5 个值
         assert PARAM_GRID["alpha"] == [0, 0.05, 0.10, 0.15, 0.20]
         assert len(PARAM_GRID["alpha"]) == 5
+        # 新增风控参数
+        assert PARAM_GRID["max_cumulative_loss_pct"] == [0.10, 0.15, 0.20]
+        assert PARAM_GRID["max_consecutive_losses"] == [5, 8, 10]
+        assert len(PARAM_GRID) == 7  # 共 7 个维度
 
 
 # ════════════════════════════════════════════════════════════
@@ -241,6 +239,8 @@ class TestRunSingleBacktestSmoke:
             "stop_period": 10,
             "stop_atr_multiple": 2.0,
             "alpha": 0.05,
+            "max_cumulative_loss_pct": 0.15,
+            "max_consecutive_losses": 8,
         }
         result = run_single_backtest(params, "A", "2023-01-01", "2024-01-01", run_id=999)
 
@@ -265,12 +265,15 @@ class TestRunSingleBacktestSmoke:
             "stop_period": 10,
             "stop_atr_multiple": 2.0,
             "alpha": 0.05,
+            "max_cumulative_loss_pct": 0.15,
+            "max_consecutive_losses": 8,
         }
         result = run_single_backtest(params, "B", "2023-01-01", "2024-01-01", run_id=100)
 
         expected_keys = {
             "run_id", "mode", "atr_period", "breakout_period",
             "stop_period", "stop_atr_multiple", "alpha",
+            "max_cumulative_loss_pct", "max_consecutive_losses",
             "total_return", "cagr", "sharpe", "max_drawdown",
             "win_rate", "profit_factor", "total_trades",
             "annual_vol", "calmar", "final_value", "date_range",

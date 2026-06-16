@@ -79,6 +79,8 @@ PARAM_GRID = {
     "stop_period": [8, 10, 12],
     "stop_atr_multiple": [1.5, 2.0, 2.5],
     "alpha": [0, 0.05, 0.10, 0.15, 0.20],
+    "max_cumulative_loss_pct": [0.10, 0.15, 0.20],
+    "max_consecutive_losses": [5, 8, 10],
 }
 
 MODES = ["A", "B"]
@@ -94,8 +96,9 @@ def build_param_grid() -> List[dict]:
     Returns
     -------
     list[dict]
-        405 组参数组合，每组包含 5 个键：
-        atr_period, breakout_period, stop_period, stop_atr_multiple, alpha.
+        3645 组参数组合，每组包含 7 个键：
+        atr_period, breakout_period, stop_period, stop_atr_multiple, alpha,
+        max_cumulative_loss_pct, max_consecutive_losses.
     """
     keys = list(PARAM_GRID.keys())
     values = list(PARAM_GRID.values())
@@ -201,7 +204,7 @@ def run_single_backtest(
         失败返回 None。
     """
     # ── 验证参数 ──
-    for key in ["atr_period", "breakout_period", "stop_period", "stop_atr_multiple", "alpha"]:
+    for key in ["atr_period", "breakout_period", "stop_period", "stop_atr_multiple", "alpha", "max_cumulative_loss_pct", "max_consecutive_losses"]:
         if key not in params:
             logger.error("参数缺少 %s", key)
             return None
@@ -254,8 +257,8 @@ def run_single_backtest(
         use_55_filter=(mode == "B"),
         risk_per_unit=config["turtle"]["risk_per_unit"],
         concentration_trigger=config["risk"]["concentration_trigger"],
-        max_consecutive_losses=config["risk"]["max_consecutive_losses"],
-        max_cumulative_loss_pct=config["risk"]["max_cumulative_loss_pct"],
+        max_consecutive_losses=params["max_consecutive_losses"],
+        max_cumulative_loss_pct=params["max_cumulative_loss_pct"],
         pause_days=config["risk"]["pause_days"],
         alpha=params["alpha"],
         cov_lookback_days=config["weighting"]["cov_lookback_days"],
@@ -333,6 +336,8 @@ def run_single_backtest(
         "stop_period": params["stop_period"],
         "stop_atr_multiple": params["stop_atr_multiple"],
         "alpha": params["alpha"],
+        "max_cumulative_loss_pct": params["max_cumulative_loss_pct"],
+        "max_consecutive_losses": params["max_consecutive_losses"],
         "total_return": round(total_return, 4),
         "cagr": round(cagr, 4),
         "sharpe": round(sharpe_val, 4) if sharpe_val is not None else None,
@@ -455,6 +460,8 @@ def run_grid_search(
             "stop_period": int(row["stop_period"]),
             "stop_atr_multiple": float(row["stop_atr_multiple"]),
             "alpha": float(row["alpha"]),
+            "max_cumulative_loss_pct": float(row.get("max_cumulative_loss_pct", 0.15)),
+            "max_consecutive_losses": int(row.get("max_consecutive_losses", 8)),
         }
         for mode in modes:
             oos_tasks.append((params, mode, split_date, end_date, run_id))
@@ -584,6 +591,7 @@ def evaluate_results(df: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
     cols = [
         "run_id", "mode",
         "atr_period", "breakout_period", "stop_period", "stop_atr_multiple", "alpha",
+        "max_cumulative_loss_pct", "max_consecutive_losses",
         "total_return", "cagr", "sharpe", "max_drawdown",
         "win_rate", "profit_factor", "total_trades", "annual_vol", "calmar",
         "robustness_score",
@@ -623,6 +631,8 @@ def _save_best_params_json(df_best: pd.DataFrame, path: Path):
     for r in records:
         output.append({
             "mode": r.get("mode"),
+            "max_cumulative_loss_pct": float(r.get("max_cumulative_loss_pct", 0.15)),
+            "max_consecutive_losses": int(r.get("max_consecutive_losses", 8)),
             "atr_period": int(r.get("atr_period", 20)),
             "breakout_period": int(r.get("breakout_period", 20)),
             "stop_period": int(r.get("stop_period", 10)),
