@@ -143,7 +143,6 @@ def df_to_feed(df: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
     feed_df.set_index("date", inplace=True)
     return bt.feeds.PandasData(
         dataname=feed_df,
-        datetime="date",
         open="open",
         high="high",
         low="low",

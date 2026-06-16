@@ -110,9 +110,12 @@ def run_single(
     """
     cerebro = bt.Cerebro()
 
-    # 添加数据（所有策略都不加国债数据，国债管理是 TurtleStrategy 内部逻辑）
+    # 添加数据
     for symbol in SIX_SYMBOLS:
         cerebro.adddata(feeds[symbol], name=symbol)
+    # B4(海龟+国债) 需要国债数据供 _bond_switch 使用
+    if strategy_name == "B4":
+        cerebro.adddata(feeds[BOND_SYMBOL], name=BOND_SYMBOL)
 
     # 资金与成本
     cerebro.broker.setcash(config["initial_cash"])

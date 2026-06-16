@@ -1,15 +1,22 @@
 ---
-version: "3.4"
+version: "3.5"
 date: "2026-06-16"
-based_on: "V3.3 (2026-06-15)"
+based_on: "V3.4 (2026-06-16)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V3.4
+# 跨市场ETF海龟组合策略 — 设计文件 V3.5
+
+**V3.5 变更**：
+- 修复 data_pipeline 拉取数据后回测引擎的 3 个兼容性 bug：
+  - `df_to_feed()` 删除冲突的 `datetime` 参数（Backtrader PandasData 列名映射冲突）
+  - `len(data)` 在 `__init__` 中返回 0 → 改为 `len(data.close.array)`（Backtrader preload 机制差异）
+  - `_close_series` 初始化顺序问题 → 移到循环之前，防止被后续空 dict 覆盖
+  - `_build_returns_matrix()` 从错误 dict `signals["close"]` 读数据 → 改用 `_close_series[code]`
+- S5 基准对比 B1/B2/B3 已成功运行，B4 存在残留 bug 待修复
+- `docs/MarkdownMcp 配置手册（AI 助手专用）.md` 新增文档索引
 
 **V3.4 变更**：
 - 新增 §5.11 S8 综合报告生成施工图设计（scripts/gen_report.py）
-- 全量测试从 140→150（+10 新增，无回归）
-- 更新实施路线图 S8 状态为 ✅
 
 **V3.3 变更**：
 - 新增 §5.9 S7 极端情景回测 + 压力测试施工图设计
@@ -719,9 +726,10 @@ results/                         # 回测输出
 
 | 文件 | 内容 |
 |:--|:--|
-| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.4） |
+| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.5） |
 | `docs/governance_model.md` | 项目管控模型 |
 | `docs/analysis/t+0_t+1_impact.md` | T+0/T+1 结算规则差异对策略的完整影响分析 |
+| `docs/MarkdownMcp 配置手册（AI 助手专用）.md` | MarkdownMcp 安装与配置指南 |
 | `CHANGELOG.md` | 版本变更记录 |
 | `config/turtle_config.yaml` | 回测参数配置 |
 
