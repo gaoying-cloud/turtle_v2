@@ -1,10 +1,18 @@
 ---
-version: "3.6"
+version: "3.7"
 date: "2026-06-16"
-based_on: "V3.5 (2026-06-16)"
+based_on: "V3.6 (2026-06-16)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V3.6
+# 跨市场ETF海龟组合策略 — 设计文件 V3.7
+
+**V3.7 变更**：
+- S7 压力测试模块完整实现（§5.9 + §5.10）：
+  - `scripts/run_stress_test.py` — 4 个历史情景回放 + 2 个合成情景（B1 冲击矩阵、B2 流动性枯竭）
+  - `scripts/run_correlation_monitor.py` — 60 日滚动两两相关性 + 预警事件检测
+  - `tests/test_stress_test.py` — 32 个测试全部通过
+  - `scripts/gen_report.py` — 对接 stress_conclusion.json，消除 S8 报告中的 S7 占位符
+  - 输出：`results/stress_test/` 下 5 个产物文件 + 相关性报告
 
 **V3.6 变更**：
 - B4 兼容性修复（Python 3.14 + Backtrader 内部属性冲突）：
@@ -736,7 +744,7 @@ results/                         # 回测输出
 
 | 文件 | 内容 |
 |:--|:--|
-| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.6） |
+| `docs/strategy_design_v3.0.md` | 本文件 — 策略全量设计（当前版本 V3.7） |
 | `docs/governance_model.md` | 项目管控模型 |
 | `docs/analysis/t+0_t+1_impact.md` | T+0/T+1 结算规则差异对策略的完整影响分析 |
 | `docs/MarkdownMcp 配置手册（AI 助手专用）.md` | MarkdownMcp 安装与配置指南 |
