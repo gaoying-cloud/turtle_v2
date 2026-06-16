@@ -307,6 +307,81 @@ def generate_params_section(df_full: Optional[pd.DataFrame], df_oos: Optional[pd
     return "\n".join(lines)
 
 
+def load_stress_conclusion() -> Optional[dict]:
+    """从 S7 stress_conclusion.json 加载压力测试结论。"""
+    path = STRESS_DIR / "stress_conclusion.json"
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def load_stress_report() -> Optional[str]:
+    """从 S7 stress_report.md 加载压力测试报告摘要。"""
+    path = STRESS_DIR / "stress_report.md"
+    if path.exists():
+        report_text = path.read_text(encoding="utf-8")
+        # 提取前 40 行作为摘要（包含表格和结论）
+        lines = report_text.splitlines()
+        summary_lines = []
+        # 取 # 标题、参数行、历史情景表格、综合判定、B1/B2 结论行
+        for line in lines:
+            if any(line.startswith(h) for h in ["#", "|", "*", "-", ">", "**"]):
+                summary_lines.append(line)
+            elif "通过" in line or "不通过" in line or "条件通过" in line:
+                summary_lines.append(line)
+        return "\n".join(summary_lines[:50]) if summary_lines else None
+    return None
+
+
+def generate_stress_section() -> str:
+    """生成压力测试章节，存在结果时内联摘要，否则优雅降级。"""
+    conclusion = load_stress_conclusion()
+    report_summary = load_stress_report()
+
+    if conclusion is None:
+        return (
+            "## 5. 压力测试\n"
+            "> ⚠️ 压力测试尚未运行。包含 A1-A4 历史情景 + B1-B2 合成情景。\n"
+            "请先执行 `py scripts/run_stress_test.py` 和 `py scripts/run_correlation_monitor.py`。\n"
+        )
+
+    lines = ["## 5. 压力测试\n"]
+    overall = conclusion.get("overall", {})
+    status_map = {
+        "pass": "✅ 全部通过",
+        "conditional_pass": "⚠️ 条件通过",
+        "fail": "❌ 不通过",
+        "no_data": "⚪ 无数据",
+    }
+    status_str = status_map.get(overall.get("status", "no_data"), "⚪ 无数据")
+    lines.append(f"**综合判定**: {status_str}  |  "
+                 f"通过 {overall.get('passed', 0)}/{overall.get('total', 0)} 项检查\n")
+
+    # 各场景摘要
+    scenarios = conclusion.get("scenarios", [])
+    if scenarios:
+        lines.append("| 场景 | MDD% | CAGR% | Sharpe | 通过? |")
+        lines.append("|:--|:--:|:--:|:--:|:--:|")
+        for sc in scenarios:
+            ms = sc.get("metrics_summary", {})
+            status = "✅" if sc.get("passed") else "❌"
+            lines.append(
+                f"| {sc.get('scenario_name', sc['scenario'])} "
+                f"| {ms.get('max_drawdown', 'N/A')} "
+                f"| {ms.get('cagr', 'N/A')} "
+                f"| {ms.get('sharpe', 'N/A')} "
+                f"| {status} |"
+            )
+
+    # 内联部分报告摘要
+    if report_summary:
+        lines.append("\n**报告摘要**:\n")
+        lines.append(f"> 详细报告: `{STRESS_DIR / 'stress_report.md'}`\n")
+
+    return "\n".join(lines)
+
+
 def generate_report(metrics: dict, df_full: Optional[pd.DataFrame] = None,
                     df_oos: Optional[pd.DataFrame] = None, mode: str = "A",
                     start_date: str = "2020-01-01", end_date: str = "2026-06-10") -> str:
@@ -329,8 +404,7 @@ def generate_report(metrics: dict, df_full: Optional[pd.DataFrame] = None,
         "\n---\n",
         generate_params_section(df_full, df_oos),
         "\n---\n",
-        "## 5. 压力测试\n> ⚠️ 压力测试尚未运行。包含 A1-A4 历史情景 + B1-B2 合成情景。\n"
-        "请先实现并运行 `scripts/run_stress_test.py`。\n",
+        generate_stress_section(),
         "\n---\n",
         "*报告由 `scripts/gen_report.py` 自动生成*\n",
     ]
