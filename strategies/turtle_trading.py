@@ -36,7 +36,6 @@ from src.turtle_core import (
     SignalFilter,
     calc_position_size,
     calc_fixed_stop,
-    calc_trailing_stop,
     calc_pyramid_trigger,
     pyramid_add,
     Position,
@@ -306,13 +305,10 @@ class TurtleStrategy(bt.Strategy):
             else:
                 pos = self._positions.get(code)
 
-                # 检查退出（止损）
+                # 检查退出（10日低点 — 经典 Turtle 系统退出）
                 if self._should_exit(code, data, pos):
                     self._execute_exit(code, data, pos)
                 else:
-                    # 更新移动止损（每日）
-                    self._update_trailing_stop(code, pos)
-
                     # 检查加仓
                     self._check_pyramid(code, data, pos)
 
@@ -433,11 +429,7 @@ class TurtleStrategy(bt.Strategy):
             # 买入与止损同一天触发的场景 → 推迟至下一交易日
             return False
 
-        # 规则 1 & 2: 止损线触发
-        if close <= pos.stop_loss and pos.stop_loss > 0:
-            return True
-
-        # 规则 3: 10日反向突破
+        # 规则: 10日反向突破（经典 Turtle 系统退出）
         stop_low = si["stop_low_10"].iloc[idx]
         if not pd.isna(stop_low) and low <= stop_low:
             return True
@@ -515,34 +507,15 @@ class TurtleStrategy(bt.Strategy):
         shares = pos.shares_per_unit
         self.buy(data=data, size=shares)
 
-        # 更新移动止损
-        new_stop = calc_trailing_stop(trigger, n, pos.stop_loss)
-        self._positions.add_unit(code, new_stop)
+        # 加仓后止损线不变（退出由10日低点决定）
+        self._positions.add_unit(code, pos.stop_loss)
 
         logger.info("[加仓] %s → +%d 股 @ %.4f now %d units SL=%.4f",
-                    code, shares, trigger, pos.units + 1, new_stop)
+                    code, shares, trigger, pos.units + 1, pos.stop_loss)
 
     # ════════════════════════════════════════════════════════
     #  移动止损（每日更新）
     # ════════════════════════════════════════════════════════
-
-    def _update_trailing_stop(self, code: str, pos: Position):
-        """每日更新移动止损线（只上移不下移）。"""
-        idx = self._next_idx(code)
-        si = self._signals[code]
-        trail_high = si["trail_high_10"].iloc[idx]
-        n = si["n"].iloc[idx]
-
-        if pd.isna(trail_high) or pd.isna(n) or n <= 0:
-            return
-
-        # 更新 trail_high
-        self._positions.update_trail_high(code, trail_high)
-
-        # 计算移动止损线
-        new_stop = calc_trailing_stop(trail_high, n, pos.stop_loss)
-        if new_stop > 0:
-            self._positions.update_stop_loss(code, new_stop, "trailing")
 
     # ════════════════════════════════════════════════════════
     #  空仓 → 国债ETF 切换

@@ -197,12 +197,14 @@ class TestEntry:
 
 class TestExit:
     def test_fixed_stop(self, strat):
-        """跌破2N止损 → 退出。"""
-        strat._signals["510500.SH"] = sig(high=10.5, low=10.0, close=10.5, n=0.5)
+        """跌破10日低点 → 退出（经典 Turtle 系统退出规则）。"""
+        s = sig(high=10.5, low=10.0, close=10.5, n=0.5)
+        s["stop_low_10"] = pd.Series([np.nan, np.nan, 9.5], index=pd.RangeIndex(3))
+        strat._signals["510500.SH"] = s
         pos = strat._positions.open("510500.SH", entry_price=10.0, shares=800,
-                                     n_at_entry=0.5, stop_loss=9.0)  # 10-2*0.5
+                                     n_at_entry=0.5, stop_loss=9.0)
         d = strat.datas[0]
-        d.close[0] = 8.9   # ≤ 9.0
+        d.low[0] = 9.4   # ≤ 9.5 (stop_low_10)
 
         with patch.object(strat, "_next_idx", return_value=2):
             assert strat._should_exit("510500.SH", d, pos)
@@ -250,25 +252,29 @@ class TestTPlusOne:
             assert not strat._should_exit("510500.SH", d, pos)
 
     def test_t0_can_exit_same_day(self, strat):
-        """T+0 当日买入 → 可同日止损。"""
+        """T+0 当日买入 → 可同日退出（由10日低点触发）。"""
         strat._buy_today["518880.SH"] = True  # T+0 不受约束
-        strat._signals["518880.SH"] = sig(high=102, low=98, close=101, n=1.0)
+        s = sig(high=102, low=98, close=101, n=1.0)
+        s["stop_low_10"] = pd.Series([np.nan, np.nan, 99.0], index=pd.RangeIndex(3))
+        strat._signals["518880.SH"] = s
         pos = strat._positions.open("518880.SH", entry_price=101, shares=500,
                                      n_at_entry=1.0, stop_loss=99.0)
         d = strat.datas[0]
-        d.close[0] = 98.0   # ≤ 99
+        d.low[0] = 98.0   # ≤ 99.0 (stop_low_10)
 
         with patch.object(strat, "_next_idx", return_value=2):
             assert strat._should_exit("518880.SH", d, pos)
 
     def test_t1_next_day_can_exit(self, strat):
-        """T+1 隔日 → 可止损。"""
+        """T+1 隔日 → 可退出（由10日低点触发）。"""
         strat._buy_today = {}   # 无当日买入记录
-        strat._signals["510500.SH"] = sig(high=10.5, low=10.0, close=10.5, n=0.5)
+        s = sig(high=10.5, low=10.0, close=10.5, n=0.5)
+        s["stop_low_10"] = pd.Series([np.nan, np.nan, 10.0], index=pd.RangeIndex(3))
+        strat._signals["510500.SH"] = s
         pos = strat._positions.open("510500.SH", entry_price=10.5, shares=800,
                                      n_at_entry=0.5, stop_loss=10.0)
         d = strat.datas[0]
-        d.close[0] = 9.5
+        d.low[0] = 9.5   # ≤ 10.0 (stop_low_10)
 
         with patch.object(strat, "_next_idx", return_value=2):
             assert strat._should_exit("510500.SH", d, pos)
