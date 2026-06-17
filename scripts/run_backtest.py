@@ -59,6 +59,24 @@ BOND_SYMBOL = "511010.SH"
 
 ALL_SYMBOLS = SIX_SYMBOLS + [BOND_SYMBOL]
 
+# 期货品种（12 个，跨市场不相关）
+FUTURES_SYMBOLS = [
+    "CU.SHF",   # 沪铜
+    "RB.SHF",   # 螺纹钢
+    "RU.SHF",   # 橡胶
+    "M.DCE",    # 豆粕
+    "Y.DCE",    # 豆油
+    "P.DCE",    # 棕榈油
+    "JM.DCE",   # 焦煤
+    "CF.CZC",   # 棉花
+    "SR.CZC",   # 白糖
+    "TA.CZC",   # PTA
+    "I.DCE",    # 铁矿石
+    "SC.INE",   # 原油
+]
+
+FUTURES_DATA_DIR = ROOT / "data" / "futures_daily"
+
 
 # ════════════════════════════════════════════════════════════
 #  数据加载
@@ -68,6 +86,7 @@ def load_data(
     symbol: str,
     start_date: str,
     end_date: str,
+    data_dir: Path = DATA_DIR,
 ) -> Optional[pd.DataFrame]:
     """从 Parquet 缓存加载单个品种的数据。
 
@@ -79,16 +98,20 @@ def load_data(
         起始日期 "YYYY-MM-DD"。
     end_date : str
         截止日期 "YYYY-MM-DD"。
+    data_dir : Path
+        数据目录，默认 ETF 数据。
 
     Returns
     -------
     pd.DataFrame or None
-        数据帧，包含 date, open, high, low, close, volume, amount, pre_close。
+        数据帧，包含 date, open, high, low, close, volume, amount。
         缓存不存在或未覆盖请求区间时返回 None。
     """
-    path = DATA_DIR / f"{symbol}.parquet"
+    is_futures = data_dir == FUTURES_DATA_DIR
+    pull_script = "py scripts/pull_futures.py" if is_futures else "py scripts/pull_data.py"
+    path = data_dir / f"{symbol}.parquet"
     if not path.exists():
-        logger.error("缓存文件不存在: %s\n请先运行 py scripts/pull_data.py", path)
+        logger.error("缓存文件不存在: %s\n请先运行 %s", path, pull_script)
         return None
 
     df = pd.read_parquet(path)
@@ -150,6 +173,7 @@ def run_backtest(
     plot: bool = False,
     verbose: bool = False,
     t0_only: bool = False,
+    futures: bool = False,
 ) -> Optional[dict]:
     """运行海龟策略回测。
 
@@ -165,6 +189,10 @@ def run_backtest(
         是否绘制图表。
     verbose : bool
         是否输出 DEBUG 级别日志。
+    t0_only : bool
+        仅使用 T+0 ETF 品种。
+    futures : bool
+        使用期货品种（覆盖 t0_only）。
 
     Returns
     -------
@@ -175,14 +203,26 @@ def run_backtest(
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    # ── 选择品种列表 ──
-    trading_symbols = T0_SYMBOLS if t0_only else SIX_SYMBOLS
-    all_symbols = trading_symbols + [BOND_SYMBOL]
+    # ── 选择品种列表与数据目录 ──
+    if futures:
+        trading_symbols = list(FUTURES_SYMBOLS)
+        data_dir = FUTURES_DATA_DIR
+        # 期货不需要国债ETF
+        all_symbols = list(trading_symbols)
+        use_bond = False
+        # 期货使用专门的资金参数
+        initial_cash = config.get("futures", {}).get("initial_cash", 1000000)
+    else:
+        trading_symbols = T0_SYMBOLS if t0_only else SIX_SYMBOLS
+        data_dir = DATA_DIR
+        all_symbols = trading_symbols + [BOND_SYMBOL]
+        use_bond = True
+        initial_cash = config["initial_cash"]
 
     # ── 加载所有品种的数据 ──
     feeds: dict[str, bt.feeds.PandasData] = {}
     for symbol in all_symbols:
-        df = load_data(symbol, start_date, end_date)
+        df = load_data(symbol, start_date, end_date, data_dir=data_dir)
         if df is None:
             logger.error("品种 %s 数据加载失败，终止回测", symbol)
             return None
@@ -196,13 +236,14 @@ def run_backtest(
     # 添加数据
     for symbol in trading_symbols:
         cerebro.adddata(feeds[symbol], name=symbol)
-    # 国债ETF 加到最后
-    cerebro.adddata(feeds[BOND_SYMBOL], name=BOND_SYMBOL)
+    # 国债ETF 仅在 ETF 模式下添加
+    if use_bond:
+        cerebro.adddata(feeds[BOND_SYMBOL], name=BOND_SYMBOL)
 
     # 资金与成本
-    cerebro.broker.setcash(config["initial_cash"])
+    cerebro.broker.setcash(initial_cash)
     commission = config["commission_pct"]
-    slippage = config["slippage_pct"]
+    slippage = config["slippage_pct"] if not futures else 0.0005
     # 滑点通过 commission 模拟（单边）
     cerebro.broker.setcommission(commission=commission + slippage)
 
@@ -231,10 +272,12 @@ def run_backtest(
     cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
 
     # ── 运行 ──
+    mode_label = "期货双向" if futures else f"ETF模式 {'T+0' if t0_only else '全品种'}"
+    symbol_str = ", ".join(trading_symbols)
     logger.info("=" * 50)
-    logger.info("开始回测 | 模式 %s | %s ~ %s | 初始资金 %.0f",
-                mode, start_date, end_date, config["initial_cash"])
-    logger.info("品种: %s + %s(国债)", ", ".join(trading_symbols), BOND_SYMBOL)
+    logger.info("开始回测 | %s | %s ~ %s | 初始资金 %.0f",
+                mode_label, start_date, end_date, initial_cash)
+    logger.info("品种: %s", symbol_str)
     logger.info("=" * 50)
 
     results = cerebro.run()
@@ -251,7 +294,6 @@ def run_backtest(
     print("=" * 60)
 
     final_value = cerebro.broker.getvalue()
-    initial_cash = config["initial_cash"]
     print(f"初始资金: {initial_cash:>10.2f}")
     print(f"最终净值: {final_value:>10.2f}")
     print(f"总收益率: {(final_value / initial_cash - 1) * 100:>9.2f}%")
@@ -321,6 +363,12 @@ def main():
         help="仅使用 T+0 品种（纳指+黄金）运行双向回测，验证做空信号净收益",
     )
     parser.add_argument(
+        "--futures",
+        action="store_true",
+        default=False,
+        help="使用期货品种（12个跨市场）运行双向回测",
+    )
+    parser.add_argument(
         "--start",
         type=str,
         default="2020-01-01",
@@ -363,6 +411,7 @@ def main():
         plot=args.plot,
         verbose=args.verbose,
         t0_only=args.t0_only,
+        futures=args.futures,
     )
 
     if result is None:
