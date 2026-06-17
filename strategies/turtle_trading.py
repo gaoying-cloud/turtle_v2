@@ -324,6 +324,14 @@ class TurtleStrategy(bt.Strategy):
     #  入场
     # ════════════════════════════════════════════════════════
 
+    def _should_enter_short(self, code: str, si: dict, idx: int, close: float, n: float) -> bool:
+        """检查是否触发空头入场信号。"""
+        dc_low = si.get("entry_low_20")
+        if dc_low is None:
+            return False
+        entry_low = dc_low.iloc[idx]
+        return pd.notna(entry_low) and close < entry_low
+
     def _check_entry(self, code: str, data: bt.feeds.PandasData):
         """检查并执行入场信号。"""
         if self._paused_until is not None:
@@ -337,13 +345,20 @@ class TurtleStrategy(bt.Strategy):
         if pd.isna(n) or n <= 0:
             return
 
-        # ── 20日突破（对齐 automated_trading：用 close > entry_high）
+        # ── 判断方向（多头或空头） ──
         entry_high = si["entry_high_20"].iloc[idx]
-        if pd.isna(entry_high) or close <= entry_high:
+        is_long = pd.notna(entry_high) and close > entry_high
+        entry_low_20 = si.get("entry_low_20")
+        is_short = False
+        if entry_low_20 is not None:
+            el = entry_low_20.iloc[idx]
+            if pd.notna(el) and close < el:
+                is_short = True
+        if not is_long and not is_short:
             return
 
-        # ── 55日过滤（模式 B） ──
-        if self.params.use_55_filter:
+        # ── 55日过滤（模式 B，仅多头） ──
+        if is_long and self.params.use_55_filter:
             filter_high = si["entry_high_55"].iloc[idx]
             if pd.isna(filter_high) or close <= filter_high:
                 return
@@ -385,6 +400,8 @@ class TurtleStrategy(bt.Strategy):
         # ── P0: 三层敞口校验 ──
         equity = self._equity()
         price = data.close[0]
+        if not np.isfinite(risk) or risk <= 0:
+            risk = self.params.risk_per_unit
         shares = calc_position_size(equity, n, price, risk)
         if shares == 0:
             return
@@ -421,14 +438,23 @@ class TurtleStrategy(bt.Strategy):
         if code in T_PLUS_ONE_SYMBOLS and self._buy_today.get(code, False):
             return
 
-        # ── 执行买入 ──
+        # ── 执行入场（多头或空头） ──
         dt = data.datetime.date(0)
-        self.buy(data=data, size=shares)
+        direction = "long" if is_long else "short"
         stop_atr_multiple = float(self.params.turtle_params.get("stop_atr_multiple", 2.0))
-        stop_loss = calc_fixed_stop(price, n, stop_atr_multiple)
+        stop_loss = calc_fixed_stop(price, n, stop_atr_multiple, direction)
+
+        if is_long:
+            self.buy(data=data, size=shares)
+            action = "买入"
+        else:
+            self.sell(data=data, size=shares)
+            action = "卖出"
+
         self._positions.open(
             code,
             system="filtered" if self.params.use_55_filter else "primary",
+            direction=direction,
             entry_date=dt,
             entry_price=price,
             shares=shares,
@@ -438,8 +464,8 @@ class TurtleStrategy(bt.Strategy):
         if code in T_PLUS_ONE_SYMBOLS:
             self._buy_today[code] = True
 
-        logger.info("[入场] %s → 买入 %d 股 @ %.4f (N=%.4f SL=%.4f)",
-                    code, shares, price, n, stop_loss)
+        logger.info("[入场] %s → %s %d 股 @ %.4f (N=%.4f SL=%.4f %s)",
+                    code, action, shares, price, n, stop_loss, direction)
 
     # ════════════════════════════════════════════════════════
     #  移动止损（每日更新）
@@ -500,32 +526,38 @@ class TurtleStrategy(bt.Strategy):
         """判断是否触发退出条件。
 
         规则（任一满足即退出，取更早触发者）：
-            1. 固定止损：close ≤ stop_loss（stop_type=fixed）
-            2. 移动止损：close ≤ stop_loss（stop_type=trailing）
-            3. 10日反向突破（经典 Turtle 退出）：low ≤ stop_low_10
+            1. 固定止损/移动止损
+            2. 10日反向突破
         """
         idx = self._next_idx(code)
         si = self._signals[code]
+        high = data.high[0]
         low = data.low[0]
-        close = data.close[0]
         n = si["n"].iloc[idx]
 
         if pd.isna(n) or n <= 0:
             return False
 
-        # ── T+1 约束：当日买入不可卖出 ──
+        # ── T+1 约束 ──
         if code in T_PLUS_ONE_SYMBOLS and self._buy_today.get(code, False):
-            # 买入与止损同一天触发的场景 → 推迟至下一交易日
             return False
 
-        # 规则1 + 2：检查止损线（固定止损或移动止损）
-        if pos.stop_loss > 0 and low <= pos.stop_loss:
-            return True
-
-        # 规则3：10日反向突破（经典 Turtle 系统退出）
-        stop_low = si["stop_low_10"].iloc[idx]
-        if not pd.isna(stop_low) and low <= stop_low:
-            return True
+        if pos.direction == "short":
+            # 规则1 + 2：空头止损（high >= stop_loss）
+            if pos.stop_loss > 0 and high >= pos.stop_loss:
+                return True
+            # 规则3：10日向上突破（high >= stop_high_10）
+            stop_high = si["stop_high_10"].iloc[idx]
+            if not pd.isna(stop_high) and high >= stop_high:
+                return True
+        else:
+            # 规则1 + 2：多头止损（low <= stop_loss）
+            if pos.stop_loss > 0 and low <= pos.stop_loss:
+                return True
+            # 规则3：10日反向突破（low <= stop_low_10）
+            stop_low = si["stop_low_10"].iloc[idx]
+            if not pd.isna(stop_low) and low <= stop_low:
+                return True
 
         return False
 
@@ -533,7 +565,10 @@ class TurtleStrategy(bt.Strategy):
         """执行平仓。"""
         dt = data.datetime.date(0)
         price = data.close[0]
-        pnl = (price - pos.entry_price) * pos.total_shares
+        if pos.direction == "short":
+            pnl = (pos.entry_price - price) * pos.total_shares
+        else:
+            pnl = (price - pos.entry_price) * pos.total_shares
         was_win = pnl > 0
 
         self.close(data=data)

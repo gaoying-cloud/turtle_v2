@@ -200,31 +200,29 @@ class TestCalcFixedStop:
 class TestCalcTrailingStop:
     def test_trailing_stop_basic(self):
         """基础移动止损计算。"""
-        stop = calc_trailing_stop(trail_high=11.0, n_value=0.5, stop_mult=2.0)
+        stop = calc_trailing_stop(trail_price=11.0, n_value=0.5, stop_mult=2.0)
         assert stop == 10.0  # 11 - 2*0.5
 
     def test_trailing_only_goes_up(self):
         """只上移不下移。"""
-        stop = calc_trailing_stop(trail_high=11.0, n_value=0.5, prev_stop=10.2, stop_mult=2.0)
-        # raw = 11 - 1 = 10.0, prev = 10.2 → max(10.0, 10.2) = 10.2
+        stop = calc_trailing_stop(trail_price=11.0, n_value=0.5, prev_stop=10.2, stop_mult=2.0)
         assert stop == 10.2
 
     def test_trailing_goes_up(self):
         """新计算值高于旧值时上移。"""
-        stop = calc_trailing_stop(trail_high=12.0, n_value=0.5, prev_stop=10.2, stop_mult=2.0)
-        # raw = 12 - 1 = 11.0, prev = 10.2 → max = 11.0
+        stop = calc_trailing_stop(trail_price=12.0, n_value=0.5, prev_stop=10.2, stop_mult=2.0)
         assert stop == 11.0
 
     def test_nan_n_value_fallback(self):
-        stop = calc_trailing_stop(trail_high=10.0, n_value=float("nan"), prev_stop=9.5)
+        stop = calc_trailing_stop(trail_price=10.0, n_value=float("nan"), prev_stop=9.5)
         assert stop == 9.5
 
     def test_negative_n_value_fallback(self):
-        stop = calc_trailing_stop(trail_high=10.0, n_value=-1.0, prev_stop=9.0)
+        stop = calc_trailing_stop(trail_price=10.0, n_value=-1.0, prev_stop=9.0)
         assert stop == 9.0
 
     def test_all_nan_returns_zero(self):
-        stop = calc_trailing_stop(trail_high=float("nan"), n_value=float("nan"))
+        stop = calc_trailing_stop(trail_price=float("nan"), n_value=float("nan"))
         assert stop == 0.0
 
 
@@ -274,6 +272,7 @@ class TestTurtleSignals:
             "n", "entry_high_20", "entry_low_20",
             "entry_high_55", "entry_low_55",
             "stop_high_10", "stop_low_10", "trail_high_10",
+            "trail_low_10",
         }
         assert set(result.keys()) == expected_keys
 

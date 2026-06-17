@@ -101,6 +101,11 @@ def trail_high_close(close: pd.Series, period: int = 10) -> pd.Series:
     return close.rolling(window=period, min_periods=period).max()
 
 
+def trail_low_close(close: pd.Series, period: int = 10) -> pd.Series:
+    """移动止损参考线（空头）：最近 M 日最低收盘价。"""
+    return close.rolling(window=period, min_periods=period).min()
+
+
 def calc_position_size(
     equity: float,
     n_value: float,
@@ -134,11 +139,13 @@ def calc_position_size(
     int
         股数，100 的整数倍。
     """
-    if n_value <= 0:
+    if not np.isfinite(n_value) or n_value <= 0:
         return 0
 
     risk_amount = equity * risk_pct
     per_share_risk = stop_mult * n_value
+    if not np.isfinite(per_share_risk) or per_share_risk <= 0:
+        return 0
     theoretical = risk_amount / per_share_risk
     lots = int(theoretical / 100)
     return max(0, lots * 100)
@@ -148,8 +155,9 @@ def calc_fixed_stop(
     entry_price: float,
     n_value: float,
     stop_mult: float = 2.0,
+    direction: str = "long",
 ) -> float:
-    """固定止损线 = 入场价 - stop_mult × N。
+    """固定止损线。
 
     Parameters
     ----------
@@ -159,38 +167,45 @@ def calc_fixed_stop(
         入场时的 N 值。
     stop_mult : float
         N 的倍数，默认 2.0（2N 止损）。
+    direction : str
+        交易方向，"long" 或 "short"。
 
     Returns
     -------
     float
-        止损价格。
+        止损价格。多头=入场价-2N，空头=入场价+2N。
     """
+    if direction == "short":
+        return round(entry_price + stop_mult * n_value, 4)
     return round(entry_price - stop_mult * n_value, 4)
 
 
 def calc_trailing_stop(
-    trail_high: float,
+    trail_price: float,
     n_value: float,
     prev_stop: Optional[float] = None,
     stop_mult: float = 2.0,
+    direction: str = "long",
 ) -> float:
-    """移动止损线 = max(trail_high - stop_mult × N, prev_stop)。
+    """移动止损线。
 
     Parameters
     ----------
-    trail_high : float
-        最近 M 日最高收盘价（预计算值）。
+    trail_price : float
+        最近 M 日最高收盘价（多头）或最低收盘价（空头）。
     n_value : float
         当前 N 值。
     prev_stop : float, optional
         前一日移动止损线。
     stop_mult : float
         N 的倍数，默认 2.0。
+    direction : str
+        交易方向，"long" 或 "short"。
 
     Returns
     -------
     float
-        当前移动止损价格。只上移不下移。
+        当前移动止损价格。多头只上移，空头只下移。
     """
     if not np.isfinite(n_value) or n_value <= 0:
         logger.warning(
@@ -199,14 +214,20 @@ def calc_trailing_stop(
         )
         return prev_stop if (prev_stop is not None and np.isfinite(prev_stop)) else 0.0
 
-    if not np.isfinite(trail_high):
+    if not np.isfinite(trail_price):
         logger.warning(
-            "calc_trailing_stop: trail_high=%.4f 非法，回退到 prev_stop=%.4f",
-            trail_high, prev_stop or 0,
+            "calc_trailing_stop: trail_price=%.4f 非法，回退到 prev_stop=%.4f",
+            trail_price, prev_stop or 0,
         )
         return prev_stop if (prev_stop is not None and np.isfinite(prev_stop)) else 0.0
 
-    raw_stop = round(float(trail_high) - stop_mult * float(n_value), 4)
+    if direction == "short":
+        raw_stop = round(float(trail_price) + stop_mult * float(n_value), 4)
+        if prev_stop is not None and np.isfinite(prev_stop):
+            return min(raw_stop, prev_stop)  # 空头：只下移
+        return raw_stop
+
+    raw_stop = round(float(trail_price) - stop_mult * float(n_value), 4)
 
     if not np.isfinite(raw_stop):
         safe = prev_stop if (prev_stop is not None and np.isfinite(prev_stop)) else 0.0
@@ -451,6 +472,7 @@ class TurtleSignals:
             "stop_high_10": donchian_high(high, self.stop_period),
             "stop_low_10": donchian_low(low, self.stop_period),
             "trail_high_10": trail_high_close(close, self.stop_period),
+            "trail_low_10": trail_low_close(close, self.stop_period),
         }
 
 
