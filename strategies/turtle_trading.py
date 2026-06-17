@@ -36,8 +36,10 @@ from src.turtle_core import (
     SignalFilter,
     calc_position_size,
     calc_fixed_stop,
+    calc_trailing_stop,
     calc_pyramid_trigger,
     pyramid_add,
+    should_activate_trailing_stop,
     Position,
 )
 from src.risk_parity import compute_alpha_weights
@@ -305,7 +307,10 @@ class TurtleStrategy(bt.Strategy):
             else:
                 pos = self._positions.get(code)
 
-                # 检查退出（10日低点 — 经典 Turtle 系统退出）
+                # 先更新移动止损线
+                self._update_trailing_stop(code, pos)
+
+                # 再检查退出
                 if self._should_exit(code, data, pos):
                     self._execute_exit(code, data, pos)
                 else:
@@ -326,21 +331,21 @@ class TurtleStrategy(bt.Strategy):
 
         idx = self._next_idx(code)
         si = self._signals[code]
-        high = data.high[0]
+        close = data.close[0]
         n = si["n"].iloc[idx]
 
         if pd.isna(n) or n <= 0:
             return
 
-        # ── 20日突破 ──
+        # ── 20日突破（对齐 automated_trading：用 close > entry_high）
         entry_high = si["entry_high_20"].iloc[idx]
-        if pd.isna(entry_high) or high <= entry_high:
+        if pd.isna(entry_high) or close <= entry_high:
             return
 
         # ── 55日过滤（模式 B） ──
         if self.params.use_55_filter:
             filter_high = si["entry_high_55"].iloc[idx]
-            if pd.isna(filter_high) or high <= filter_high:
+            if pd.isna(filter_high) or close <= filter_high:
                 return
 
         # ── 盈利过滤器 ──
@@ -356,28 +361,61 @@ class TurtleStrategy(bt.Strategy):
         else:
             base_risk = self.params.risk_per_unit
 
-        # 仓位集中度熔断
-        if self._positions.count >= self.params.concentration_trigger:
-            risk = base_risk / 2
-            logger.debug("[入场] %s 仓位集中%d≥%d，风险降为 %.2f%% (α权重 %.4f)",
-                         code, self._positions.count,
-                         self.params.concentration_trigger, risk * 100, base_risk)
-        else:
-            risk = base_risk
+        # ── P1: 渐进式集中度熔断 ──
+        pos_count = self._positions.count
+        fade_table = {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.8, 4: 0.6}
+        fade = fade_table.get(pos_count, 0.5)
+        risk = base_risk * fade
+        if fade < 1.0:
+            logger.debug("[入场] %s 仓位集中%d，风险降为 %.2f%% (原 %.2f%%)",
+                         code, pos_count, risk * 100, base_risk * 100)
 
-        # 累计亏损暂停
-        if self._cumulative_loss_pct >= self.params.max_cumulative_loss_pct:
-            logger.warning("[入场] %s 累计亏损 %.2f%% ≥ %.2f%%，禁止开新仓",
-                           code, self._cumulative_loss_pct * 100,
+        # ── P2: 滑动窗口累计亏损暂停（检查最近 15 笔） ──
+        recent_trades = self._my_trades[-15:] if len(self._my_trades) >= 15 else self._my_trades
+        recent_loss_pct = sum(
+            abs(t["pnl"]) for t in recent_trades if t["pnl"] < 0
+        ) / self.broker.startingcash if self._my_trades else 0.0
+        if recent_loss_pct >= self.params.max_cumulative_loss_pct:
+            logger.warning("[入场] %s 近%d笔累计亏损 %.2f%% ≥ %.2f%%，禁止开新仓",
+                           code, len(recent_trades) if self._my_trades else 15,
+                           recent_loss_pct * 100,
                            self.params.max_cumulative_loss_pct * 100)
             return
 
-        # ── 计算仓位 ──
+        # ── P0: 三层敞口校验 ──
         equity = self._equity()
         price = data.close[0]
         shares = calc_position_size(equity, n, price, risk)
         if shares == 0:
             return
+        # P0: 校验单品种风险敞口 ≤ 4% (max_single_risk=0.04)
+        per_share_risk = 2.0 * n
+        requested_risk = shares * per_share_risk
+        # 已有该品种的敞口
+        existing_risk = 0.0
+        pos = self._positions.get(code)
+        if pos is not None:
+            existing_risk = pos.total_shares * 2.0 * pos.n_at_entry
+        total_symbol_risk_pct = (existing_risk + requested_risk) / equity if equity > 0 else 0
+        if total_symbol_risk_pct > 0.04:
+            max_new = equity * 0.04 - existing_risk
+            adjusted = int(max_new / per_share_risk / 100) * 100
+            if adjusted <= 0:
+                logger.debug("[入场] %s 单品种风险敞口已达 4%% (%.2f%%)", code, total_symbol_risk_pct * 100)
+                return
+            shares = adjusted
+        # P0: 校验全账户风险敞口 ≤ 15% (max_total_risk=0.15)
+        total_existing_risk = 0.0
+        for existing_pos in self._positions.all_positions():
+            total_existing_risk += existing_pos.total_shares * 2.0 * existing_pos.n_at_entry
+        total_new_risk_pct = (total_existing_risk + shares * per_share_risk) / equity if equity > 0 else 0
+        if total_new_risk_pct > 0.15:
+            max_new = equity * 0.15 - total_existing_risk
+            adjusted = int(max_new / per_share_risk / 100) * 100
+            if adjusted <= 0:
+                logger.debug("[入场] %s 全账户风险敞口已达 15%% (%.2f%%)", code, total_new_risk_pct * 100)
+                return
+            shares = adjusted
 
         # ── T+1 约束：当日已买入的同品种不可再买 ──
         if code in T_PLUS_ONE_SYMBOLS and self._buy_today.get(code, False):
@@ -404,16 +442,67 @@ class TurtleStrategy(bt.Strategy):
                     code, shares, price, n, stop_loss)
 
     # ════════════════════════════════════════════════════════
+    #  移动止损（每日更新）
+    # ════════════════════════════════════════════════════════
+
+    def _update_trailing_stop(self, code: str, pos: Position):
+        """每日更新移动止损线，只上移不下移。
+
+        切换条件（满足任一即可）：
+            1. 浮盈 ≥ 2N
+            2. 持仓天数 ≥ 20 日
+        """
+        if pos.stop_type == "trailing":
+            # 已激活移动止损 → 检查是否需要上移止损线
+            idx = self._next_idx(code)
+            trail_high = self._signals[code]["trail_high_10"].iloc[idx]
+            if pd.notna(trail_high) and trail_high > pos.trail_high:
+                self._positions.update_trail_high(code, float(trail_high))
+                new_stop = calc_trailing_stop(
+                    float(trail_high),
+                    float(self._signals[code]["n"].iloc[idx]),
+                    pos.stop_loss,
+                )
+                if new_stop > pos.stop_loss:
+                    self._positions.update_stop_loss(code, new_stop, "trailing")
+                    logger.debug("[移动止损] %s 上移至 %.4f (trail_high=%.4f)",
+                                 code, new_stop, trail_high)
+        else:
+            # 固定止损 → 检查是否应切换为移动止损
+            idx = self._next_idx(code)
+            n = self._signals[code]["n"].iloc[idx]
+            if pd.notna(n) and n > 0:
+                close = self._close_series[code].iloc[
+                    min(idx, len(self._close_series[code]) - 1)
+                ]
+                if should_activate_trailing_stop(
+                    float(close), pos.entry_price, float(n),
+                    pos.holding_days,
+                ):
+                    # 切换为移动止损
+                    trail_high = self._signals[code]["trail_high_10"].iloc[idx]
+                    if pd.notna(trail_high):
+                        self._positions.update_trail_high(code, float(trail_high))
+                        new_stop = calc_trailing_stop(
+                            float(trail_high), float(n), pos.stop_loss,
+                        )
+                        self._positions.update_stop_loss(code, new_stop, "trailing")
+                        logger.info("[移动止损] %s 激活 (floatPn=%.2fN, hold=%d天) SL=%.4f",
+                                    code,
+                                    (float(close) - pos.entry_price) / float(n),
+                                    pos.holding_days, new_stop)
+
+    # ════════════════════════════════════════════════════════
     #  退出（止损 + 退出）
     # ════════════════════════════════════════════════════════
 
     def _should_exit(self, code: str, data: bt.feeds.PandasData, pos: Position) -> bool:
         """判断是否触发退出条件。
 
-        规则（取更早触发者）：
-            1. 固定止损：价格 ≤ stop_loss（stop_type=fixed）
-            2. 移动止损：价格 ≤ stop_loss（stop_type=trailing）
-            3. 10日反向突破：最低价 ≤ stop_low_10
+        规则（任一满足即退出，取更早触发者）：
+            1. 固定止损：close ≤ stop_loss（stop_type=fixed）
+            2. 移动止损：close ≤ stop_loss（stop_type=trailing）
+            3. 10日反向突破（经典 Turtle 退出）：low ≤ stop_low_10
         """
         idx = self._next_idx(code)
         si = self._signals[code]
@@ -429,7 +518,11 @@ class TurtleStrategy(bt.Strategy):
             # 买入与止损同一天触发的场景 → 推迟至下一交易日
             return False
 
-        # 规则: 10日反向突破（经典 Turtle 系统退出）
+        # 规则1 + 2：检查止损线（固定止损或移动止损）
+        if pos.stop_loss > 0 and low <= pos.stop_loss:
+            return True
+
+        # 规则3：10日反向突破（经典 Turtle 系统退出）
         stop_low = si["stop_low_10"].iloc[idx]
         if not pd.isna(stop_low) and low <= stop_low:
             return True
@@ -512,10 +605,6 @@ class TurtleStrategy(bt.Strategy):
 
         logger.info("[加仓] %s → +%d 股 @ %.4f now %d units SL=%.4f",
                     code, shares, trigger, pos.units + 1, pos.stop_loss)
-
-    # ════════════════════════════════════════════════════════
-    #  移动止损（每日更新）
-    # ════════════════════════════════════════════════════════
 
     # ════════════════════════════════════════════════════════
     #  空仓 → 国债ETF 切换

@@ -155,10 +155,10 @@ class TestEntry:
             assert strat._positions.has_position("510500.SH")
 
     def test_no_breakout_skips(self, strat):
-        """未突破 → 不入场。"""
+        """未突破 → 不入场（入场逻辑改为 close > entry_high）。"""
         strat._signals["510500.SH"] = sig(high=10.5, low=10.0, close=10.5)
         d = strat.datas[0]
-        d.high[0] = 10.3          # < entry_high_20 = 10.4
+        d.close[0] = 10.3          # < entry_high_20 = 10.4
 
         with patch.object(strat, "_next_idx", return_value=2):
             strat._check_entry("510500.SH", d)
@@ -172,7 +172,7 @@ class TestEntry:
         strat._signals["510500.SH"] = s
 
         d = strat.datas[0]
-        d.high[0] = 10.6          # > entry_high_20(10.4) 但 < entry_high_55(11.0)
+        d.close[0] = 10.6          # > entry_high_20(10.4) 但 < entry_high_55(11.0)
 
         with patch.object(strat, "_next_idx", return_value=2):
             strat._check_entry("510500.SH", d)

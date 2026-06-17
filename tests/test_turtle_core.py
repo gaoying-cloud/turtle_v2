@@ -161,21 +161,23 @@ class TestCalcPositionSize:
     def test_basic(self):
         """标准计算。"""
         shares = calc_position_size(equity=100000, n_value=0.5, price=10.0, risk_pct=0.01)
-        # theory = 100000 * 0.01 / 0.5 = 2000
-        # lots = floor(2000 / 10 / 100) * 100 = floor(2) * 100 = 200
-        assert shares == 200
+        # theory = 100000 * 0.01 / (2 * 0.5) = 1000
+        # lots = floor(1000 / 100) * 100 = 1000
+        assert shares == 1000
 
     def test_large_equity(self):
         shares = calc_position_size(equity=1000000, n_value=0.2, price=50.0, risk_pct=0.01)
-        # theory = 1000000 * 0.01 / 0.2 = 50000
-        # lots = floor(50000 / 50 / 100) * 100 = floor(10) * 100 = 1000
-        assert shares == 1000
+        # theory = 1000000 * 0.01 / (2 * 0.2) = 25000
+        # lots = floor(25000 / 100) * 100 = 25000
+        assert shares == 25000
 
     def test_n_value_zero_returns_zero(self):
         assert calc_position_size(100000, 0, 10.0) == 0
 
     def test_price_zero_returns_zero(self):
-        assert calc_position_size(100000, 0.5, 0) == 0
+        # price 参数在新公式中不再使用，n_value为正时返回非零值
+        shares = calc_position_size(100000, 0.5, 0)
+        assert shares == 1000
 
     def test_no_lot_return_zero(self):
         """理论值不足 1 手时返回 0。"""

@@ -106,15 +106,15 @@ def calc_position_size(
     n_value: float,
     price: float,
     risk_pct: float = 0.01,
+    stop_mult: float = 2.0,
 ) -> int:
     """计算头寸规模（股数）。
 
-    公式：
-        理论仓位 = equity × risk_pct / N
-        股数 = floor(理论仓位 / 价格 / 100) × 100
+    对齐 automated_trading 旧版公式：
+        每股风险 = stop_mult × N
+        理论头寸 = equity × risk_pct / 每股风险
+        股数 = floor(理论头寸 / 100) × 100
         最小为 0
-
-    返回 100 的整数倍的股数（A 股最小交易单位）。
 
     Parameters
     ----------
@@ -123,21 +123,24 @@ def calc_position_size(
     n_value : float
         当前 ATR(N) 值。
     price : float
-        当前价格（入场价）。
+        当前价格（入场价，保留用于兼容，实际不使用）。
     risk_pct : float
         单位风险比例，默认 0.01（1%）。
+    stop_mult : float
+        N 的倍数定义"一股的风险"，默认 2.0。
 
     Returns
     -------
     int
         股数，100 的整数倍。
     """
-    if n_value <= 0 or price <= 0:
+    if n_value <= 0:
         return 0
 
     risk_amount = equity * risk_pct
-    theoretical = risk_amount / n_value
-    lots = int(theoretical / price / 100)
+    per_share_risk = stop_mult * n_value
+    theoretical = risk_amount / per_share_risk
+    lots = int(theoretical / 100)
     return max(0, lots * 100)
 
 
@@ -291,6 +294,53 @@ def pyramid_add(
 
     trigger = calc_pyramid_trigger(base_price, current_units, n_at_entry, step)
     return True, trigger
+
+
+def should_activate_trailing_stop(
+    current_price: float,
+    entry_price: float,
+    n_value: float,
+    holding_days: int = 0,
+    profit_threshold_n: float = 2.0,
+    days_threshold: int = 20,
+) -> bool:
+    """判断是否应从固定止损切换为移动止损。
+
+    切换条件（任一满足即切换）：
+        1. 浮盈 ≥ profit_threshold_N × N（默认 2N）
+        2. 持仓天数 ≥ days_threshold（默认 20 日）
+
+    Parameters
+    ----------
+    current_price : float
+        当前价格。
+    entry_price : float
+        入场价格。
+    n_value : float
+        当前的 N 值。
+    holding_days : int
+        持仓天数。
+    profit_threshold_n : float
+        浮盈 N 值倍数阈值，默认 2.0。
+    days_threshold : int
+        持仓天数阈值，默认 20。
+
+    Returns
+    -------
+    bool
+        True 应切换为移动止损。
+    """
+    if n_value <= 0:
+        return False
+
+    floating_profit_n = (current_price - entry_price) / n_value
+
+    if floating_profit_n >= profit_threshold_n:
+        return True
+    if holding_days >= days_threshold:
+        return True
+
+    return False
 
 
 # ════════════════════════════════════════════════════════════
