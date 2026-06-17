@@ -1,5 +1,25 @@
 # Changelog
 
+## [V5.0-期货版+空头修复] - 2026-06-17
+### 期货基础设施 + 空头方向 Bug 修复 + 策略失效判决
+- **期货基础设施**（全新建）：
+  - `scripts/pull_futures.py`: 从 Tushare `fut_daily` 拉取 12 品种主力连续日线，Parquet 缓存（与 ETF 版 Schema 一致）
+  - `config/turtle_config.yaml`: 新增 `futures:` 节（初始资金 ¥1,000,000、保证金 15%）
+  - `scripts/run_backtest.py`: 新增 `--futures` 模式，自动切换数据目录和资金参数
+  - 核心代码零改动：`turtle_core.py` / `risk_parity.py` / `turtle_trading.py`
+- **空头方向 3 个 Bug 修复**：
+  | Bug | 位置 | 问题 | 影响 |
+  |:---|:---|:---|:---:|
+  | A | `should_activate_trailing_stop` | 空头浮盈计算 `(entry - current)/N` 应为 `(current - entry)/N` | 空头永远无法激活移动止损 |
+  | B | `calc_pyramid_trigger` / `pyramid_add` | 加仓公式固定 `base + N×0.5`，空头应是 `base − N×0.5` | 空头在不利方向上加仓放大亏损 |
+  | C | `_check_pyramid` | 条件 `high < trigger` 固定为多头逻辑 | 空头每天在上涨方向上加仓 |
+- **A 股 ETF 版本失效判决**：6 品种 2020~2026 全品种回测亏损 -74.7%，胜率 22.2%
+- **T+0 验证**：仅纳指+黄金回测 +2.49%（修复做空后减亏 66%，T+0 约束消除）
+- **期货回测证明成功**：12 品种 2020~2022 +32.31%，年化 ~9.8%，夏普 1.53，最大回撤 12.71%，盈亏比 2.62（做空单笔最大盈利 +¥17.6 万）
+- `docs/turtle_v2 完整总结.md`: 升级 V5.0
+- 全量 185 测试通过，无回归（核心代码零改动确）
+- [V5.0-期货版+空头修复] `已完成`
+
 ## [V4.0-绩效归因] - 2026-06-17
 ### 退出逻辑重构 + 入场/止损对齐 automated_trading + 三层风控升级
 - **退出逻辑**：从「仅10日低点退出」升级为三重退出保护（2N固定止损 + 移动止损只上移 + 10日反向突破），与 automated_trading 等价
