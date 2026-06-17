@@ -247,14 +247,15 @@ def calc_pyramid_trigger(
     current_units: int,
     n_at_entry: float,
     step: float = 0.5,
+    direction: str = "long",
 ) -> float:
     """计算下一次加仓触发价。
 
-    公式：base_price + current_units × step × n_at_entry
+    公式：
+        多头：base_price + current_units × step × n_at_entry
+        空头：base_price - current_units × step × n_at_entry
 
-    其中 step = 0.5 表示每上涨 0.5N 加仓一次。
-    首个单位的加仓触发价为 base_price + 1 × 0.5N。
-    第 2 单位加仓触发价为 base_price + 2 × 0.5N，以此类推。
+    其中 step = 0.5 表示每上涨（多头）/ 下跌（空头）0.5N 加仓一次。
 
     Parameters
     ----------
@@ -266,6 +267,8 @@ def calc_pyramid_trigger(
         入场时的 N 值。
     step : float
         加仓步长（N 的倍数），默认 0.5。
+    direction : str
+        交易方向，"long" 或 "short"。
 
     Returns
     -------
@@ -274,7 +277,10 @@ def calc_pyramid_trigger(
     """
     if current_units < 1:
         return base_price
-    return round(float(base_price) + float(current_units) * float(step) * float(n_at_entry), 4)
+    offset = float(current_units) * float(step) * float(n_at_entry)
+    if direction == "short":
+        return round(float(base_price) - offset, 4)
+    return round(float(base_price) + offset, 4)
 
 
 def pyramid_add(
@@ -283,12 +289,13 @@ def pyramid_add(
     base_price: float = 0.0,
     n_at_entry: float = 0.0,
     step: float = 0.5,
+    direction: str = "long",
 ) -> Tuple[bool, float]:
     """检查是否满足加仓条件并返回新的触发价。
 
     用法在 S3 策略层：
-        can_add, trigger_price = pyramid_add(pos.units, 4, pos.base_price, pos.n_at_entry)
-        if can_add and high >= trigger_price:
+        can_add, trigger_price = pyramid_add(pos.units, 4, pos.base_price, pos.n_at_entry, direction=pos.direction)
+        if can_add and ((direction == "short" and low <= trigger_price) or high >= trigger_price):
             # 执行加仓
 
     Parameters
@@ -303,6 +310,8 @@ def pyramid_add(
         入场时的 N 值。
     step : float
         加仓步长，默认 0.5。
+    direction : str
+        交易方向，"long" 或 "short"。
 
     Returns
     -------
@@ -313,7 +322,7 @@ def pyramid_add(
     if current_units >= max_units:
         return False, 0.0
 
-    trigger = calc_pyramid_trigger(base_price, current_units, n_at_entry, step)
+    trigger = calc_pyramid_trigger(base_price, current_units, n_at_entry, step, direction)
     return True, trigger
 
 
@@ -324,12 +333,16 @@ def should_activate_trailing_stop(
     holding_days: int = 0,
     profit_threshold_n: float = 2.0,
     days_threshold: int = 20,
+    direction: str = "long",
 ) -> bool:
     """判断是否应从固定止损切换为移动止损。
 
     切换条件（任一满足即切换）：
         1. 浮盈 ≥ profit_threshold_N × N（默认 2N）
         2. 持仓天数 ≥ days_threshold（默认 20 日）
+
+    多头：浮盈 = (当前价 - 入场价) / N
+    空头：浮盈 = (入场价 - 当前价) / N
 
     Parameters
     ----------
@@ -345,6 +358,8 @@ def should_activate_trailing_stop(
         浮盈 N 值倍数阈值，默认 2.0。
     days_threshold : int
         持仓天数阈值，默认 20。
+    direction : str
+        交易方向，"long" 或 "short"。
 
     Returns
     -------
@@ -354,7 +369,10 @@ def should_activate_trailing_stop(
     if n_value <= 0:
         return False
 
-    floating_profit_n = (current_price - entry_price) / n_value
+    if direction == "short":
+        floating_profit_n = (entry_price - current_price) / n_value
+    else:
+        floating_profit_n = (current_price - entry_price) / n_value
 
     if floating_profit_n >= profit_threshold_n:
         return True

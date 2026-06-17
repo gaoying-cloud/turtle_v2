@@ -517,6 +517,7 @@ class TurtleStrategy(bt.Strategy):
             ]
             if should_activate_trailing_stop(
                 float(close), pos.entry_price, float(n), pos.holding_days,
+                direction=pos.direction,
             ):
                 if direction == "short":
                     trail_low = self._signals[code].get("trail_low_10")
@@ -641,29 +642,44 @@ class TurtleStrategy(bt.Strategy):
         idx = self._next_idx(code)
         si = self._signals[code]
         high = data.high[0]
+        low = data.low[0]
         n = si["n"].iloc[idx]
 
         if pd.isna(n) or n <= 0:
             return
 
         can_add, trigger = pyramid_add(
-            pos.units, 4, pos.base_price, pos.n_at_entry
+            pos.units, 4, pos.base_price, pos.n_at_entry,
+            direction=pos.direction,
         )
-        if not can_add or high < trigger:
+        if not can_add:
             return
+
+        # 空头：价格下跌触发加仓；多头：价格上涨触发加仓
+        if pos.direction == "short":
+            if low > trigger:
+                return
+        else:
+            if high < trigger:
+                return
 
         # T+1 约束：标记当日已买（不影响 T+0 品种）
         if code in T_PLUS_ONE_SYMBOLS:
             self._buy_today[code] = True
 
+        # 空头加仓用 sell，多头用 buy
         shares = pos.shares_per_unit
-        self.buy(data=data, size=shares)
+        if pos.direction == "short":
+            self.sell(data=data, size=shares)
+        else:
+            self.buy(data=data, size=shares)
 
-        # 加仓后止损线不变（退出由10日低点决定）
+        # 加仓后止损线不变（退出由10日高低点决定）
         self._positions.add_unit(code, pos.stop_loss)
 
-        logger.info("[加仓] %s → +%d 股 @ %.4f now %d units SL=%.4f",
-                    code, shares, trigger, pos.units + 1, pos.stop_loss)
+        direction_label = "做空加仓" if pos.direction == "short" else "加仓"
+        logger.info("[%s] %s → +%d 股 @ %.4f now %d units SL=%.4f",
+                    direction_label, code, shares, trigger, pos.units + 1, pos.stop_loss)
 
     # ════════════════════════════════════════════════════════
     #  空仓 → 国债ETF 切换
