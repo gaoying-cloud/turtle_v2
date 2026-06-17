@@ -472,40 +472,64 @@ class TurtleStrategy(bt.Strategy):
     # ════════════════════════════════════════════════════════
 
     def _update_trailing_stop(self, code: str, pos: Position):
-        """每日更新移动止损线，只上移不下移。
+        """每日更新移动止损线，只上移不下移（多头）或只下移不下移（空头）。
 
         切换条件（满足任一即可）：
             1. 浮盈 ≥ 2N
             2. 持仓天数 ≥ 20 日
         """
+        direction = pos.direction
+        idx = self._next_idx(code)
+        n = self._signals[code]["n"].iloc[idx]
+        if pd.isna(n) or n <= 0:
+            return
+
         if pos.stop_type == "trailing":
-            # 已激活移动止损 → 检查是否需要上移止损线
-            idx = self._next_idx(code)
-            trail_high = self._signals[code]["trail_high_10"].iloc[idx]
-            if pd.notna(trail_high) and trail_high > pos.trail_high:
-                self._positions.update_trail_high(code, float(trail_high))
-                new_stop = calc_trailing_stop(
-                    float(trail_high),
-                    float(self._signals[code]["n"].iloc[idx]),
-                    pos.stop_loss,
-                )
-                if new_stop > pos.stop_loss:
-                    self._positions.update_stop_loss(code, new_stop, "trailing")
-                    logger.debug("[移动止损] %s 上移至 %.4f (trail_high=%.4f)",
-                                 code, new_stop, trail_high)
+            # 已激活移动止损 → 检查是否需要更新止损线
+            if direction == "short":
+                trail_low = self._signals[code].get("trail_low_10")
+                if trail_low is not None:
+                    tl = trail_low.iloc[idx]
+                    if pd.notna(tl) and tl < pos.trail_high:
+                        self._positions.update_trail_high(code, float(tl))
+                        new_stop = calc_trailing_stop(
+                            float(tl), float(n), pos.stop_loss, direction="short",
+                        )
+                        if new_stop < pos.stop_loss:
+                            self._positions.update_stop_loss(code, new_stop, "trailing")
+                            logger.debug("[移动止损] %s 下移至 %.4f (trail_low=%.4f)",
+                                         code, new_stop, tl)
+            else:
+                trail_high = self._signals[code]["trail_high_10"].iloc[idx]
+                if pd.notna(trail_high) and trail_high > pos.trail_high:
+                    self._positions.update_trail_high(code, float(trail_high))
+                    new_stop = calc_trailing_stop(
+                        float(trail_high), float(n), pos.stop_loss,
+                    )
+                    if new_stop > pos.stop_loss:
+                        self._positions.update_stop_loss(code, new_stop, "trailing")
+                        logger.debug("[移动止损] %s 上移至 %.4f (trail_high=%.4f)",
+                                     code, new_stop, trail_high)
         else:
             # 固定止损 → 检查是否应切换为移动止损
-            idx = self._next_idx(code)
-            n = self._signals[code]["n"].iloc[idx]
-            if pd.notna(n) and n > 0:
-                close = self._close_series[code].iloc[
-                    min(idx, len(self._close_series[code]) - 1)
-                ]
-                if should_activate_trailing_stop(
-                    float(close), pos.entry_price, float(n),
-                    pos.holding_days,
-                ):
-                    # 切换为移动止损
+            close = self._close_series[code].iloc[
+                min(idx, len(self._close_series[code]) - 1)
+            ]
+            if should_activate_trailing_stop(
+                float(close), pos.entry_price, float(n), pos.holding_days,
+            ):
+                if direction == "short":
+                    trail_low = self._signals[code].get("trail_low_10")
+                    if trail_low is not None:
+                        tl = trail_low.iloc[idx]
+                        if pd.notna(tl):
+                            self._positions.update_trail_high(code, float(tl))
+                            new_stop = calc_trailing_stop(
+                                float(tl), float(n), pos.stop_loss, direction="short",
+                            )
+                            self._positions.update_stop_loss(code, new_stop, "trailing")
+                            logger.info("[移动止损] %s 空头激活 SL=%.4f", code, new_stop)
+                else:
                     trail_high = self._signals[code]["trail_high_10"].iloc[idx]
                     if pd.notna(trail_high):
                         self._positions.update_trail_high(code, float(trail_high))

@@ -49,6 +49,12 @@ SIX_SYMBOLS = [
     "518880.SH",  # 黄金ETF
 ]
 
+# T+0 品种（纳指 + 黄金），做空不受 T+1 约束
+T0_SYMBOLS = [
+    "513100.SH",  # 纳指ETF
+    "518880.SH",  # 黄金ETF
+]
+
 BOND_SYMBOL = "511010.SH"
 
 ALL_SYMBOLS = SIX_SYMBOLS + [BOND_SYMBOL]
@@ -143,6 +149,7 @@ def run_backtest(
     mode: str = "A",
     plot: bool = False,
     verbose: bool = False,
+    t0_only: bool = False,
 ) -> Optional[dict]:
     """运行海龟策略回测。
 
@@ -168,9 +175,13 @@ def run_backtest(
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
+    # ── 选择品种列表 ──
+    trading_symbols = T0_SYMBOLS if t0_only else SIX_SYMBOLS
+    all_symbols = trading_symbols + [BOND_SYMBOL]
+
     # ── 加载所有品种的数据 ──
     feeds: dict[str, bt.feeds.PandasData] = {}
-    for symbol in ALL_SYMBOLS:
+    for symbol in all_symbols:
         df = load_data(symbol, start_date, end_date)
         if df is None:
             logger.error("品种 %s 数据加载失败，终止回测", symbol)
@@ -183,7 +194,7 @@ def run_backtest(
     cerebro = bt.Cerebro()
 
     # 添加数据
-    for symbol in SIX_SYMBOLS:
+    for symbol in trading_symbols:
         cerebro.adddata(feeds[symbol], name=symbol)
     # 国债ETF 加到最后
     cerebro.adddata(feeds[BOND_SYMBOL], name=BOND_SYMBOL)
@@ -199,7 +210,7 @@ def run_backtest(
     cerebro.addstrategy(
         TurtleStrategy,
         turtle_params=config["turtle"],
-        symbols=SIX_SYMBOLS,  # 不含国债（国债是现金管理工具）
+        symbols=trading_symbols,  # 不含国债（国债是现金管理工具）
         use_55_filter=(mode == "B"),
         risk_per_unit=config["turtle"]["risk_per_unit"],
         concentration_trigger=config["risk"]["concentration_trigger"],
@@ -223,7 +234,7 @@ def run_backtest(
     logger.info("=" * 50)
     logger.info("开始回测 | 模式 %s | %s ~ %s | 初始资金 %.0f",
                 mode, start_date, end_date, config["initial_cash"])
-    logger.info("品种: %s + %s(国债)", ", ".join(SIX_SYMBOLS), BOND_SYMBOL)
+    logger.info("品种: %s + %s(国债)", ", ".join(trading_symbols), BOND_SYMBOL)
     logger.info("=" * 50)
 
     results = cerebro.run()
@@ -304,6 +315,12 @@ def main():
         help="模式 A=无55日过滤(默认), B=55日过滤",
     )
     parser.add_argument(
+        "--t0-only",
+        action="store_true",
+        default=False,
+        help="仅使用 T+0 品种（纳指+黄金）运行双向回测，验证做空信号净收益",
+    )
+    parser.add_argument(
         "--start",
         type=str,
         default="2020-01-01",
@@ -345,6 +362,7 @@ def main():
         mode=args.mode,
         plot=args.plot,
         verbose=args.verbose,
+        t0_only=args.t0_only,
     )
 
     if result is None:
