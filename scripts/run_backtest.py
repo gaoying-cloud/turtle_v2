@@ -68,9 +68,9 @@ FUTURES_SYMBOLS = [
     "Y.DCE",    # 豆油
     "P.DCE",    # 棕榈油
     "JM.DCE",   # 焦煤
-    "CF.CZC",   # 棉花
-    "SR.CZC",   # 白糖
-    "TA.CZC",   # PTA
+    "CF.ZCE",   # 棉花（郑商所主连后缀 .ZCE）
+    "SR.ZCE",   # 白糖
+    "TA.ZCE",   # PTA
     "I.DCE",    # 铁矿石
     "SC.INE",   # 原油
 ]
