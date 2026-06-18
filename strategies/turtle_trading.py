@@ -357,11 +357,16 @@ class TurtleStrategy(bt.Strategy):
         if not is_long and not is_short:
             return
 
-        # ── 55日过滤（模式 B，仅多头） ──
-        if is_long and self.params.use_55_filter:
-            filter_high = si["entry_high_55"].iloc[idx]
-            if pd.isna(filter_high) or close <= filter_high:
-                return
+        # ── 55日过滤（模式 B，多头+空头对称） ──
+        if self.params.use_55_filter:
+            if is_long:
+                filter_high = si["entry_high_55"].iloc[idx]
+                if pd.isna(filter_high) or close <= filter_high:
+                    return
+            elif is_short:
+                filter_low = si["entry_low_55"].iloc[idx]
+                if pd.isna(filter_low) or close >= filter_low:
+                    return
 
         # ── 盈利过滤器 ──
         ok, reason = self._filter.check_entry(code, self._positions.has_position(code))
