@@ -12,7 +12,7 @@
     │   ├── _check_exits()     — 止损/退出
     │   ├── _check_entries()   — 突破入场 + 55日过滤 + SignalFilter
     │   ├── _check_pyramid()   — 加仓
-    │   └── _bond_switch()     — 空仓→国债ETF 切换
+    │   └── [[国债切换已移除 v5.3]]
     └── stop(): 输出统计
 """
 
@@ -54,6 +54,12 @@ T_PLUS_ONE_SYMBOLS = {
     "588000.SH",
 }
 
+# ── 可做空品种（仅 T+0 ETF，A股ETF无融券机制） ──
+SHORTABLE_SYMBOLS = {
+    "513100.SH",  # 纳指ETF（T+0）
+    "518880.SH",  # 黄金ETF（T+0）
+}
+
 
 # ════════════════════════════════════════════════════════════
 #  TurtleStrategy
@@ -91,6 +97,7 @@ class TurtleStrategy(bt.Strategy):
         ("max_consecutive_losses", 8),
         ("max_cumulative_loss_pct", 0.15),
         ("pause_days", 5),
+        ("max_5day_drawdown_pct", 0.08),   # 5日最大回撤阈值，超阈值暂停交易
         ("alpha", 0.05),                  # α 风险平价偏移系数
         ("cov_lookback_days", 252),       # 协方差矩阵估计窗口
         ("rebalance_quarterly", True),    # 每季度再平衡
@@ -127,10 +134,8 @@ class TurtleStrategy(bt.Strategy):
         self._current_day = None          # 当前交易日（用于 T+1 标记重置）
         self._buy_today: Dict[str, bool] = {}  # T+1 品种当日是否已买入
         self._consecutive_losses: int = 0
-        self._cumulative_loss_pct: float = 0.0
         self._paused_until: Optional[date] = None
-        self._in_bond: bool = False
-        self._bond_data = None
+        self._equity_history: List[Tuple[date, float]] = []  # 5日回撤监控用
         self._last_equity: float = self.broker.getvalue()
         self._trade_count: int = 0
         self._my_trades: List[dict] = []
@@ -282,6 +287,9 @@ class TurtleStrategy(bt.Strategy):
             self._paused_until = None
             logger.info("[风控] 暂停期结束，恢复交易")
 
+        # ── 回撤预警（5日滚动） ──
+        self._check_5day_drawdown()
+
         # ── 重置 T+1 标记（新交易日） ──
         if self._is_new_day():
             self._buy_today.clear()
@@ -317,15 +325,16 @@ class TurtleStrategy(bt.Strategy):
                     # 检查加仓
                     self._check_pyramid(code, data, pos)
 
-        # ── Step 3: 空仓→国债切换（当日所有品种处理完后） ──
-        self._bond_switch()
+        # ── Step 3: [[空仓→国债切换已移除（V5.3）]] ──
 
     # ════════════════════════════════════════════════════════
     #  入场
     # ════════════════════════════════════════════════════════
 
     def _should_enter_short(self, code: str, si: dict, idx: int, close: float, n: float) -> bool:
-        """检查是否触发空头入场信号。"""
+        """检查是否触发空头入场信号。仅对 SHORTABLE_SYMBOLS 返回 True。"""
+        if code not in SHORTABLE_SYMBOLS:
+            return False
         dc_low = si.get("entry_low_20")
         if dc_low is None:
             return False
@@ -350,7 +359,7 @@ class TurtleStrategy(bt.Strategy):
         is_long = pd.notna(entry_high) and close > entry_high
         entry_low_20 = si.get("entry_low_20")
         is_short = False
-        if entry_low_20 is not None:
+        if entry_low_20 is not None and code in SHORTABLE_SYMBOLS:
             el = entry_low_20.iloc[idx]
             if pd.notna(el) and close < el:
                 is_short = True
@@ -615,7 +624,6 @@ class TurtleStrategy(bt.Strategy):
         self._trade_count += 1
         if not was_win:
             self._consecutive_losses += 1
-            self._cumulative_loss_pct += abs(pnl) / self.broker.startingcash
             # 连续亏损暂停
             if self._consecutive_losses >= self.params.max_consecutive_losses:
                 self._enter_pause(f"连续亏损 {self._consecutive_losses} 次")
@@ -692,43 +700,24 @@ class TurtleStrategy(bt.Strategy):
                     direction_label, code, shares, trigger, pos.units + 1, pos.stop_loss)
 
     # ════════════════════════════════════════════════════════
-    #  空仓 → 国债ETF 切换
-    # ════════════════════════════════════════════════════════
-
-    def _bond_switch(self):
-        """空仓期买入国债ETF，有海龟信号时优先卖出。"""
-        # 找国债ETF data（有持仓控制器的品种列表中最后一个）
-        bond_data = None
-        for d in self.datas:
-            if hasattr(d, "_name") and d._name == "511010.SH":
-                bond_data = d
-                break
-        if bond_data is None:
-            return
-
-        if self._positions.count == 0 and not self._in_bond:
-            # 无持仓 → 买入国债ETF（用 90% 现金）
-            equity = self._equity()
-            cash = self.broker.getcash()
-            if cash > 0:
-                target = cash * 0.9
-                price = bond_data.close[0]
-                if price > 0:
-                    shares = int(target / price / 100) * 100
-                    if shares > 0:
-                        self.buy(data=bond_data, size=shares)
-                        self._in_bond = True
-                        logger.info("[国债] 空仓 → 买入 %d 股 @ %.4f", shares, price)
-
-        elif self._positions.count > 0 and self._in_bond:
-            # 有海龟持仓 → 卖出国债ETF 腾出资金
-            self.close(data=bond_data)
-            self._in_bond = False
-            logger.info("[国债] 卖出全部国债ETF，腾出资金")
-
-    # ════════════════════════════════════════════════════════
     #  风控暂停
     # ════════════════════════════════════════════════════════
+
+    def _check_5day_drawdown(self):
+        """5日滚动最大回撤监控，超阈值暂停交易。"""
+        today = self.datas[0].datetime.date(0)
+        equity = self._equity()
+        self._equity_history.append((today, equity))
+        if len(self._equity_history) > 6:
+            self._equity_history.pop(0)
+        if len(self._equity_history) < 5:
+            return
+        peak = max(e for _, e in self._equity_history)
+        if peak <= 0:
+            return
+        drawdown = (peak - equity) / peak
+        if drawdown >= self.params.max_5day_drawdown_pct:
+            self._enter_pause(f"5日回撤 {drawdown*100:.1f}% ≥ {self.params.max_5day_drawdown_pct*100:.0f}%")
 
     def _enter_pause(self, reason: str):
         """进入交易暂停状态。"""
@@ -736,7 +725,7 @@ class TurtleStrategy(bt.Strategy):
         current = self.datas[0].datetime.date(0)
         self._paused_until = current + timedelta(days=pause_days)
         self._consecutive_losses = 0
-        self._cumulative_loss_pct = 0.0
+        self._equity_history.clear()
         logger.warning("[风控] 暂停交易 %d 天（至 %s）: %s",
                        pause_days, self._paused_until, reason)
 

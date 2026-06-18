@@ -91,6 +91,7 @@ def strat():
         "max_consecutive_losses": 8,
         "max_cumulative_loss_pct": 0.15,
         "pause_days": 5,
+        "max_5day_drawdown_pct": 0.08,
         "alpha": 0.05,
         "cov_lookback_days": 252,
         "rebalance_quarterly": True,
@@ -109,9 +110,8 @@ def strat():
     s.__dict__["_current_day"] = None
     s.__dict__["_buy_today"] = {}
     s.__dict__["_consecutive_losses"] = 0
-    s.__dict__["_cumulative_loss_pct"] = 0.0
     s.__dict__["_paused_until"] = None
-    s.__dict__["_in_bond"] = False
+    s.__dict__["_equity_history"] = []
     s.__dict__["_trade_count"] = 0
     s.__dict__["_my_trades"] = []
     # S4 状态字段
@@ -417,7 +417,6 @@ class TestAlphaWeighting:
         strat._alpha_risk_pcts = np.array([0.005, 0.01])
 
         # 模拟入场条件（突破 + 足够 equity）
-        strat._cumulative_loss_pct = 0.0
         strat._filter.check_entry = lambda c, hp: (True, "")
 
         # 模拟数据

@@ -1,5 +1,14 @@
 # Changelog
 
+## [V5.2-风控修复] - 2026-06-18
+### P0 修复：累计亏损计算错误 + 5日回撤预警
+- `strategies/turtle_trading.py`: 删除 `_cumulative_loss_pct` 废弃字段（原本用 `abs(pnl)` 错误累加盈利），统一从 `_my_trades` 实时计算，仅统计亏损交易
+- `strategies/turtle_trading.py`: 新增 `_check_5day_drawdown()` 方法，监控 5 日滚动峰值回撤，超 8% 阈值自动暂停交易
+- `strategies/turtle_trading.py`: 新增 `max_5day_drawdown_pct` 参数（默认 0.08），`_equity_history` 净值历史缓存
+- `tests/test_turtle_strategy.py`: fixture 同步删除 `_cumulative_loss_pct`，新增 `_equity_history`；params 新增 `max_5day_drawdown_pct`
+- 合计 2 文件修改，25 行新增 / 6 行删除，git diff 确认无额外影响
+- [V5.2-风控修复] `已完成`
+
 ## [V5.1-S6双向回测] - 2026-06-18
 ### S6: T+0 双向回测 — 添加 direction 字段 + 品种级多空明细输出
 - `strategies/turtle_trading.py`: `_execute_exit` 交易记录新增 `direction` 字段（long/short），支持按品种和方向分别统计盈亏
