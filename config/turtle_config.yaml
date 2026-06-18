@@ -31,21 +31,33 @@ symbols:
   - code: "510500.SH"   # 中证500ETF
     name: "中证500"
     market: "A股"
+    shortable: false
+    t_plus_one: true
   - code: "159845.SZ"   # 中证1000ETF
     name: "中证1000"
     market: "A股"
+    shortable: false
+    t_plus_one: true
   - code: "159915.SZ"   # 创业板ETF
     name: "创业板"
     market: "A股"
+    shortable: false
+    t_plus_one: true
   - code: "588000.SH"   # 科创50ETF
     name: "科创50"
     market: "A股"
+    shortable: false
+    t_plus_one: true
   - code: "513100.SH"   # 纳指ETF
     name: "纳指ETF"
     market: "跨境"
+    shortable: true
+    t_plus_one: false
   - code: "518880.SH"   # 黄金ETF
     name: "黄金ETF"
     market: "商品"
+    shortable: true
+    t_plus_one: false
 
 # ── 国债ETF (空仓期现金管理) ──
 bond:

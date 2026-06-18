@@ -46,20 +46,6 @@ from src.risk_parity import compute_alpha_weights
 
 logger = logging.getLogger(__name__)
 
-# ── T+1 品种（A 股 ETF） ──
-T_PLUS_ONE_SYMBOLS = {
-    "510500.SH",
-    "159845.SZ",
-    "159915.SZ",
-    "588000.SH",
-}
-
-# ── 可做空品种（仅 T+0 ETF，A股ETF无融券机制） ──
-SHORTABLE_SYMBOLS = {
-    "513100.SH",  # 纳指ETF（T+0）
-    "518880.SH",  # 黄金ETF（T+0）
-}
-
 
 # ════════════════════════════════════════════════════════════
 #  TurtleStrategy
@@ -98,6 +84,8 @@ class TurtleStrategy(bt.Strategy):
         ("max_cumulative_loss_pct", 0.15),
         ("pause_days", 5),
         ("max_5day_drawdown_pct", 0.08),   # 5日最大回撤阈值，超阈值暂停交易
+        ("t_plus_one_symbols", set()),     # T+1 品种集合（从配置传入）
+        ("shortable_symbols", set()),      # 可做空品种集合（从配置传入）
         ("alpha", 0.05),                  # α 风险平价偏移系数
         ("cov_lookback_days", 252),       # 协方差矩阵估计窗口
         ("rebalance_quarterly", True),    # 每季度再平衡
