@@ -90,6 +90,7 @@ class TurtleStrategy(bt.Strategy):
         ("cov_lookback_days", 252),       # 协方差矩阵估计窗口
         ("rebalance_quarterly", True),    # 每季度再平衡
         ("atr_change_threshold", 0.30),   # ATR 变动 30% 强制再平衡
+        ("min_unit", 1),                  # 最小交易单位（ETF=100，期货=1）
     )
 
     def __init__(self):
@@ -128,6 +129,13 @@ class TurtleStrategy(bt.Strategy):
         self._trade_count: int = 0
         self._my_trades: List[dict] = []
 
+        # ── 调试计数器（排查信号不足用） ──
+        self._signal_count: Dict[str, int] = {}          # 突破信号次数
+        self._filter_reject_count: Dict[str, int] = {}   # SignalFilter 拒绝次数
+        self._pause_reject_count: Dict[str, int] = {}    # 风控暂停拒绝次数
+        self._loss_lockout_count: Dict[str, int] = {}    # 累计亏损封禁次数
+        self._risk_reject_count: Dict[str, int] = {}     # 敞口校验拒绝次数
+        self._enter_count: Dict[str, int] = {}           # 实际入场次数
 
     def _next_idx(self, code: str) -> int:
         """获取安全索引，防止 runonce 模式下 len(self) 与信号数组长度不匹配。"""
@@ -334,6 +342,7 @@ class TurtleStrategy(bt.Strategy):
         # ── 按品种暂停检查 ──
         paused = self._paused_until.get(code)
         if paused is not None:
+            self._pause_reject_count[code] = self._pause_reject_count.get(code, 0) + 1
             return
 
         idx = self._next_idx(code)
@@ -356,6 +365,9 @@ class TurtleStrategy(bt.Strategy):
         if not is_long and not is_short:
             return
 
+        # ── 突破信号计数 ──
+        self._signal_count[code] = self._signal_count.get(code, 0) + 1
+
         # ── 55日过滤（模式 B，多头+空头对称） ──
         if self.params.use_55_filter:
             if is_long:
@@ -370,6 +382,7 @@ class TurtleStrategy(bt.Strategy):
         # ── 盈利过滤器 ──
         ok, reason = self._filter.check_entry(code, self._positions.has_position(code))
         if not ok:
+            self._filter_reject_count[code] = self._filter_reject_count.get(code, 0) + 1
             logger.debug("[入场] %s 被过滤器拒绝: %s", code, reason)
             return
 
@@ -394,8 +407,9 @@ class TurtleStrategy(bt.Strategy):
         recent_code_trades = code_trades[-15:] if len(code_trades) >= 15 else code_trades
         recent_loss_pct = sum(
             abs(t["pnl"]) for t in recent_code_trades if t["pnl"] < 0
-        ) / self.broker.startingcash if recent_code_trades else 0.0
+        ) / self._equity() if recent_code_trades else 0.0
         if recent_loss_pct >= self.params.max_cumulative_loss_pct:
+            self._loss_lockout_count[code] = self._loss_lockout_count.get(code, 0) + 1
             logger.warning("[入场] %s 近%d笔(该品种)累计亏损 %.2f%% ≥ %.2f%%，禁止开新仓",
                            code, len(recent_code_trades) if code_trades else 15,
                            recent_loss_pct * 100,
@@ -407,7 +421,7 @@ class TurtleStrategy(bt.Strategy):
         price = data.close[0]
         if not np.isfinite(risk) or risk <= 0:
             risk = self.params.risk_per_unit
-        shares = calc_position_size(equity, n, price, risk)
+        shares = calc_position_size(equity, n, price, risk, min_unit=self.params.min_unit)
         if shares == 0:
             return
         # P0: 校验单品种风险敞口 ≤ 4% (max_single_risk=0.04)
@@ -469,6 +483,7 @@ class TurtleStrategy(bt.Strategy):
         if code in self.params.t_plus_one_symbols:
             self._buy_today[code] = True
 
+        self._enter_count[code] = self._enter_count.get(code, 0) + 1
         logger.info("[入场] %s → %s %d 股 @ %.4f (N=%.4f SL=%.4f %s)",
                     code, action, shares, price, n, stop_loss, direction)
 
@@ -764,6 +779,32 @@ class TurtleStrategy(bt.Strategy):
                 logger.info("%16s %6s %5d %10.0f %10.0f %10.0f %5.1f%%",
                             code, dir_label, cnt, profit, loss, total, dir_win_rate)
         logger.info("-" * 70)
+
+        # ── 调试计数器输出 ──
+        logger.info("")
+        logger.info("=" * 50)
+        logger.info("入场拦截统计（按品种）")
+        logger.info("%16s %7s %7s %7s %7s %7s",
+                     "品种", "突破信号", "Filter拒", "暂停拒",
+                     "爆仓封禁", "实际入场")
+        logger.info("-" * 60)
+        for code in sorted(self.params.symbols):
+            sig = self._signal_count.get(code, 0)
+            fil = self._filter_reject_count.get(code, 0)
+            pau = self._pause_reject_count.get(code, 0)
+            loc = self._loss_lockout_count.get(code, 0)
+            ent = self._enter_count.get(code, 0)
+            logger.info("%16s %7d %7d %7d %7d %7d",
+                        code, sig, fil, pau, loc, ent)
+        logger.info("-" * 60)
+        sig_t = sum(self._signal_count.values())
+        fil_t = sum(self._filter_reject_count.values())
+        pau_t = sum(self._pause_reject_count.values())
+        loc_t = sum(self._loss_lockout_count.values())
+        ent_t = sum(self._enter_count.values())
+        logger.info("%16s %7d %7d %7d %7d %7d",
+                    "合计", sig_t, fil_t, pau_t, loc_t, ent_t)
+        logger.info("=" * 50)
 
         # 存入实例属性供外部分析器获取
         self._trade_summary = {

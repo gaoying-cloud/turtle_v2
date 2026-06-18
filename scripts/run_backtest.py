@@ -274,6 +274,7 @@ def run_backtest(
         atr_change_threshold=config["weighting"]["atr_change_threshold"],
         shortable_symbols=shortable,
         t_plus_one_symbols=t_plus_one,
+        min_unit=1 if futures else 100,
     )
 
     # ── 添加分析器 ──
