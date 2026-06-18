@@ -586,6 +586,10 @@ class TurtleStrategy(bt.Strategy):
 
         return False
 
+    # ════════════════════════════════════════════════════════
+    #  退出（执行）
+    # ════════════════════════════════════════════════════════
+
     def _execute_exit(self, code: str, data: bt.feeds.PandasData, pos: Position):
         """执行平仓。"""
         dt = data.datetime.date(0)
@@ -616,6 +620,7 @@ class TurtleStrategy(bt.Strategy):
         # 记录交易
         self._my_trades.append({
             "symbol": code,
+            "direction": pos.direction,
             "entry_date": pos.entry_date.isoformat() if pos.entry_date else "",
             "exit_date": dt.isoformat(),
             "entry_price": pos.entry_price,
@@ -735,7 +740,7 @@ class TurtleStrategy(bt.Strategy):
     # ════════════════════════════════════════════════════════
 
     def stop(self):
-        """回测结束输出交易统计。"""
+        """回测结束输出交易统计及品种级明细。"""
         total_trades = len(self._my_trades)
         wins = sum(1 for t in self._my_trades if t["was_win"])
         losses = total_trades - wins
@@ -750,6 +755,28 @@ class TurtleStrategy(bt.Strategy):
         logger.info("总盈亏: %.2f", total_pnl)
         logger.info("最终净值: %.2f", self._equity())
         logger.info("=" * 50)
+
+        # ── 品种级 × 多空分项明细 ──
+        logger.info("")
+        logger.info("品种级盈亏明细")
+        logger.info("%16s %6s %5s %10s %10s %10s %6s",
+                     "品种", "方向", "次数", "盈利", "亏损", "净盈亏", "胜率")
+        logger.info("-" * 70)
+        for code in sorted(set(t["symbol"] for t in self._my_trades)):
+            for direction in ("long", "short"):
+                trades = [t for t in self._my_trades if t["symbol"] == code and t["direction"] == direction]
+                if not trades:
+                    continue
+                cnt = len(trades)
+                total = sum(t["pnl"] for t in trades)
+                profit = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+                loss = sum(t["pnl"] for t in trades if t["pnl"] < 0)
+                dir_wins = sum(1 for t in trades if t["was_win"])
+                dir_win_rate = dir_wins / cnt * 100 if cnt > 0 else 0.0
+                dir_label = "多头" if direction == "long" else "空头"
+                logger.info("%16s %6s %5d %10.0f %10.0f %10.0f %5.1f%%",
+                            code, dir_label, cnt, profit, loss, total, dir_win_rate)
+        logger.info("-" * 70)
 
         # 存入实例属性供外部分析器获取
         self._trade_summary = {
