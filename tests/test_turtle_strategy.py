@@ -26,7 +26,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from strategies.turtle_trading import TurtleStrategy, T_PLUS_ONE_SYMBOLS
+from strategies.turtle_trading import TurtleStrategy
 from src.turtle_core import Position, TurtlePositions, SignalFilter
 
 
@@ -92,6 +92,8 @@ def strat():
         "max_cumulative_loss_pct": 0.15,
         "pause_days": 5,
         "max_5day_drawdown_pct": 0.08,
+        "t_plus_one_symbols": {"510500.SH", "159845.SZ", "159915.SZ", "588000.SH"},
+        "shortable_symbols": {"513100.SH", "518880.SH"},
         "alpha": 0.05,
         "cov_lookback_days": 252,
         "rebalance_quarterly": True,

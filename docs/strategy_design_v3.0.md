@@ -1,10 +1,28 @@
 ---
-version: "5.0"
+version: "5.3"
 date: "2026-06-18"
-based_on: "V4.0 (2026-06-17)"
+based_on: "V5.2 (2026-06-18)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V5.0
+# 跨市场ETF海龟组合策略 — 设计文件 V5.3
+
+**V5.3 变更**：
+- 全品种配置从 `config/turtle_config.yaml` 统一读取，新增 `shortable`、`t_plus_one` 字段
+- 新建 `src/config_loader.py` — 6 个配置读取函数，消除所有代码中的硬编码品种列表
+- `strategies/turtle_trading.py`: 删除 `T_PLUS_ONE_SYMBOLS`、`SHORTABLE_SYMBOLS` 模块常量，改为 `self.params.t_plus_one_symbols`、`self.params.shortable_symbols`，从外部传入
+- `_bond_switch()` 方法移除（`_in_bond`、`_bond_data` 字段一并删除）
+- `_should_enter_short` 和 `_check_entry` 的空头判断改为 `code in self.params.shortable_symbols`
+- 6 个脚本均改为 `from src.config_loader import load_config, get_*, ...`
+- 新增 `config/` 数据源：品种属性由 yaml 声明，扩展只需追加记录
+
+**V5.2 变更**：
+- P0 修复累计亏损计算错误：删除 `_cumulative_loss_pct` 废弃字段，统一从 `_my_trades` 实时计算
+- P0 新增 5 日滚动回撤预警 `_check_5day_drawdown()`，超 `max_5day_drawdown_pct`（默认 8%）阈值暂停交易 5 天
+- 新增参数 `max_5day_drawdown_pct` 和 `_equity_history` 净值历史缓存
+
+**V5.1 变更**：
+- P1 移除国债切换死代码：`_bond_switch()`、`_in_bond`、`_bond_data` 全部删除
+- P1 ETF 禁止空头：仅 `SHORTABLE_SYMBOLS`（纳指+黄金）可做空，A 股 ETF 禁止空头入场
 
 **V5.0 变更**：
 - S6: T+0 双向回测 — 添加 `direction` 字段到交易记录 + 品种级多空明细输出

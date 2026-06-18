@@ -1,13 +1,32 @@
 # Changelog
 
-## [V5.2-风控修复] - 2026-06-18
-### P0 修复：累计亏损计算错误 + 5日回撤预警
+## [V5.4-config_loader] - 2026-06-18
+### 全局硬编码消除：所有品种列表从 config/turtle_config.yaml 统一读取
+- `src/config_loader.py`: 新建模块，6 个配置读取函数（load_config, get_trading_symbols, get_bond_symbol, get_all_symbols, get_shortable_symbols, get_t_plus_one_symbols, get_t0_symbols, get_futures_symbols）
+- `config/turtle_config.yaml`: `symbols` 每项新增 `shortable`、`t_plus_one` 字段
+- `strategies/turtle_trading.py`: 删除 `T_PLUS_ONE_SYMBOLS`、`SHORTABLE_SYMBOLS` 模块常量，改为 `self.params.t_plus_one_symbols`、`self.params.shortable_symbols`
+- `strategies/turtle_trading.py`: 删除 `_bond_switch()` 方法及 `_in_bond`、`_bond_data` 字段
+- `scripts/run_backtest.py`: 改用 `from src.config_loader import ...` 导入品种列表
+- `scripts/run_comparison.py`: 同上
+- `scripts/run_grid_search.py`: 同上
+- `scripts/run_stress_test.py`: 同上
+- `scripts/run_correlation_monitor.py`: 同上
+- `scripts/gen_report.py`: 同上
+- `tests/test_turtle_strategy.py`: fixture 新增 `t_plus_one_symbols`、`shortable_symbols` params，删除 `T_PLUS_ONE_SYMBOLS` import
+- `docs/strategy_design_v3.0.md`: 升级 V5.3，新增 V5.1~V5.3 变更记录
+- 全量 22 策略测试 + 所有模块测试通过
+- [V5.4-config_loader] `已完成`
+
+## [V5.3-风控+空头修复] - 2026-06-18
+### P0 修复：累计亏损计算错误 + 5日回撤预警 + P1 国债死代码+ETF禁止空头
 - `strategies/turtle_trading.py`: 删除 `_cumulative_loss_pct` 废弃字段（原本用 `abs(pnl)` 错误累加盈利），统一从 `_my_trades` 实时计算，仅统计亏损交易
 - `strategies/turtle_trading.py`: 新增 `_check_5day_drawdown()` 方法，监控 5 日滚动峰值回撤，超 8% 阈值自动暂停交易
 - `strategies/turtle_trading.py`: 新增 `max_5day_drawdown_pct` 参数（默认 0.08），`_equity_history` 净值历史缓存
+- `strategies/turtle_trading.py`: 删除 `_bond_switch()`（国债切换死代码）、`_in_bond`、`_bond_data`
+- `strategies/turtle_trading.py`: 新增 `SHORTABLE_SYMBOLS`，仅纳指+黄金可做空
 - `tests/test_turtle_strategy.py`: fixture 同步删除 `_cumulative_loss_pct`，新增 `_equity_history`；params 新增 `max_5day_drawdown_pct`
-- 合计 2 文件修改，25 行新增 / 6 行删除，git diff 确认无额外影响
-- [V5.2-风控修复] `已完成`
+- 合计 2+ 文件修改，git diff 确认无额外影响
+- [V5.3-风控+空头修复] `已完成`
 
 ## [V5.1-S6双向回测] - 2026-06-18
 ### S6: T+0 双向回测 — 添加 direction 字段 + 品种级多空明细输出

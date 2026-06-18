@@ -320,8 +320,8 @@ class TurtleStrategy(bt.Strategy):
     # ════════════════════════════════════════════════════════
 
     def _should_enter_short(self, code: str, si: dict, idx: int, close: float, n: float) -> bool:
-        """检查是否触发空头入场信号。仅对 SHORTABLE_SYMBOLS 返回 True。"""
-        if code not in SHORTABLE_SYMBOLS:
+        """检查是否触发空头入场信号。仅对 shortable_symbols 返回 True。"""
+        if code not in self.params.shortable_symbols:
             return False
         dc_low = si.get("entry_low_20")
         if dc_low is None:
@@ -347,7 +347,7 @@ class TurtleStrategy(bt.Strategy):
         is_long = pd.notna(entry_high) and close > entry_high
         entry_low_20 = si.get("entry_low_20")
         is_short = False
-        if entry_low_20 is not None and code in SHORTABLE_SYMBOLS:
+        if entry_low_20 is not None and code in self.params.shortable_symbols:
             el = entry_low_20.iloc[idx]
             if pd.notna(el) and close < el:
                 is_short = True
@@ -437,7 +437,7 @@ class TurtleStrategy(bt.Strategy):
             shares = adjusted
 
         # ── T+1 约束：当日已买入的同品种不可再买 ──
-        if code in T_PLUS_ONE_SYMBOLS and self._buy_today.get(code, False):
+        if code in self.params.t_plus_one_symbols and self._buy_today.get(code, False):
             return
 
         # ── 执行入场（多头或空头） ──
@@ -463,7 +463,7 @@ class TurtleStrategy(bt.Strategy):
             n_at_entry=n,
             stop_loss=stop_loss,
         )
-        if code in T_PLUS_ONE_SYMBOLS:
+        if code in self.params.t_plus_one_symbols:
             self._buy_today[code] = True
 
         logger.info("[入场] %s → %s %d 股 @ %.4f (N=%.4f SL=%.4f %s)",
@@ -566,7 +566,7 @@ class TurtleStrategy(bt.Strategy):
             return False
 
         # ── T+1 约束 ──
-        if code in T_PLUS_ONE_SYMBOLS and self._buy_today.get(code, False):
+        if code in self.params.t_plus_one_symbols and self._buy_today.get(code, False):
             return False
 
         if pos.direction == "short":
@@ -670,7 +670,7 @@ class TurtleStrategy(bt.Strategy):
                 return
 
         # T+1 约束：标记当日已买（不影响 T+0 品种）
-        if code in T_PLUS_ONE_SYMBOLS:
+        if code in self.params.t_plus_one_symbols:
             self._buy_today[code] = True
 
         # 空头加仓用 sell，多头用 buy
