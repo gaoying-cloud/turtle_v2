@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.turtle_core import TurtleSignals
 from strategies.turtle_trading import TurtleStrategy
+from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +248,15 @@ def run_backtest(
     # 滑点通过 commission 模拟（单边）
     cerebro.broker.setcommission(commission=commission + slippage)
 
+    # ── 品种属性 ──
+    if futures:
+        # 期货全部可做空，无 T+1 约束
+        shortable = set(trading_symbols)
+        t_plus_one = set()
+    else:
+        shortable = get_shortable_symbols(config)
+        t_plus_one = get_t_plus_one_symbols(config)
+
     # ── 添加策略（含 S4 风险平价权重参数） ──
     cerebro.addstrategy(
         TurtleStrategy,
@@ -262,6 +272,8 @@ def run_backtest(
         cov_lookback_days=config["weighting"]["cov_lookback_days"],
         rebalance_quarterly=config["weighting"]["rebalance_quarterly"],
         atr_change_threshold=config["weighting"]["atr_change_threshold"],
+        shortable_symbols=shortable,
+        t_plus_one_symbols=t_plus_one,
     )
 
     # ── 添加分析器 ──

@@ -36,6 +36,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.risk_parity import compute_alpha_weights
 from strategies.turtle_trading import TurtleStrategy
+from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,8 @@ def run_backtest_with_best(params: dict, start_date: str = "2020-01-01",
         cov_lookback_days=config["weighting"]["cov_lookback_days"],
         rebalance_quarterly=config["weighting"]["rebalance_quarterly"],
         atr_change_threshold=config["weighting"]["atr_change_threshold"],
+        shortable_symbols=get_shortable_symbols(config),
+        t_plus_one_symbols=get_t_plus_one_symbols(config),
     )
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")

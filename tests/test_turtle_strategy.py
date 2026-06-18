@@ -111,8 +111,8 @@ def strat():
     s.__dict__["_filter"] = SignalFilter(max_rejections=3)
     s.__dict__["_current_day"] = None
     s.__dict__["_buy_today"] = {}
-    s.__dict__["_consecutive_losses"] = 0
-    s.__dict__["_paused_until"] = None
+    s.__dict__["_consecutive_losses"] = {}
+    s.__dict__["_paused_until"] = {}
     s.__dict__["_equity_history"] = []
     s.__dict__["_trade_count"] = 0
     s.__dict__["_my_trades"] = []
@@ -329,15 +329,15 @@ class TestPyramid:
 
 class TestRisk:
     def test_pause_after_losses(self, strat):
-        """连续亏损达阈值 → 暂停。"""
-        strat._consecutive_losses = 7  # 阈值=8
+        """连续亏损达阈值 → 该品种暂停。"""
+        strat._consecutive_losses["510500.SH"] = 7  # 阈值=8
         d = strat.datas[0]
         d.close[0] = 8.0  # 亏损
 
         strat._execute_exit("510500.SH", d,
             Position(symbol="510500.SH", entry_price=10.0, shares_per_unit=800))
 
-        assert strat._paused_until is not None
+        assert strat._paused_until.get("510500.SH") is not None
         assert strat._my_trades[-1]["was_win"] is False
 
     def test_concentration_count(self, strat):

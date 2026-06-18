@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 from src.benchmarks import BuyAndHold, EqualWeightRebalance, ATREqualRisk
 from strategies.turtle_trading import TurtleStrategy
 from scripts.run_backtest import load_data, df_to_feed, SIX_SYMBOLS, BOND_SYMBOL, ALL_SYMBOLS
+from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +284,8 @@ def run_comparison(
                 cov_lookback_days=config["weighting"]["cov_lookback_days"],
                 rebalance_quarterly=config["weighting"]["rebalance_quarterly"],
                 atr_change_threshold=config["weighting"]["atr_change_threshold"],
+                shortable_symbols=get_shortable_symbols(config),
+                t_plus_one_symbols=get_t_plus_one_symbols(config),
             )
             _cerebro4.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)
             _cerebro4.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")

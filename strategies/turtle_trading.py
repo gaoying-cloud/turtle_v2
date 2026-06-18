@@ -121,8 +121,8 @@ class TurtleStrategy(bt.Strategy):
         self._risk_events: dict = {}
         self._current_day = None          # 当前交易日（用于 T+1 标记重置）
         self._buy_today: Dict[str, bool] = {}  # T+1 品种当日是否已买入
-        self._consecutive_losses: int = 0
-        self._paused_until: Optional[date] = None
+        self._consecutive_losses: Dict[str, int] = {}  # 多品种连续亏损计数
+        self._paused_until: Dict[str, Optional[date]] = {}  # 按品种暂停截止日期
         self._equity_history: List[Tuple[date, float]] = []  # 5日回撤监控用
         self._last_equity: float = self.broker.getvalue()
         self._trade_count: int = 0
@@ -268,12 +268,13 @@ class TurtleStrategy(bt.Strategy):
         if len(self) < 2:
             return
 
-        # ── 检查是否在暂停期 ──
-        if self._paused_until is not None:
-            if self.datas[0].datetime.date(0) < self._paused_until:
-                return  # 暂停中，跳过所有操作
-            self._paused_until = None
-            logger.info("[风控] 暂停期结束，恢复交易")
+        # ── 检查暂停期（按品种） ──
+        today = self.datas[0].datetime.date(0)
+        for code in list(self._paused_until.keys()):
+            until = self._paused_until[code]
+            if until is not None and today >= until:
+                self._paused_until[code] = None
+                logger.info("[风控] %s 暂停期结束，恢复交易", code)
 
         # ── 回撤预警（5日滚动） ──
         self._check_5day_drawdown()
@@ -283,7 +284,6 @@ class TurtleStrategy(bt.Strategy):
             self._buy_today.clear()
 
         # ── Step 0: 检查是否需要重新计算风险平价权重 ──
-        today = self.datas[0].datetime.date(0)
         if self._should_rebalance_weights(today):
             self._recalc_alpha_weights()
             self._last_rebalance_day = today
@@ -331,7 +331,9 @@ class TurtleStrategy(bt.Strategy):
 
     def _check_entry(self, code: str, data: bt.feeds.PandasData):
         """检查并执行入场信号。"""
-        if self._paused_until is not None:
+        # ── 按品种暂停检查 ──
+        paused = self._paused_until.get(code)
+        if paused is not None:
             return
 
         idx = self._next_idx(code)
@@ -387,14 +389,15 @@ class TurtleStrategy(bt.Strategy):
             logger.debug("[入场] %s 仓位集中%d，风险降为 %.2f%% (原 %.2f%%)",
                          code, pos_count, risk * 100, base_risk * 100)
 
-        # ── P2: 滑动窗口累计亏损暂停（检查最近 15 笔） ──
-        recent_trades = self._my_trades[-15:] if len(self._my_trades) >= 15 else self._my_trades
+        # ── P2: 按品种滑动窗口累计亏损暂停（检查该品种最近 15 笔） ──
+        code_trades = [t for t in self._my_trades if t["symbol"] == code]
+        recent_code_trades = code_trades[-15:] if len(code_trades) >= 15 else code_trades
         recent_loss_pct = sum(
-            abs(t["pnl"]) for t in recent_trades if t["pnl"] < 0
-        ) / self.broker.startingcash if self._my_trades else 0.0
+            abs(t["pnl"]) for t in recent_code_trades if t["pnl"] < 0
+        ) / self.broker.startingcash if recent_code_trades else 0.0
         if recent_loss_pct >= self.params.max_cumulative_loss_pct:
-            logger.warning("[入场] %s 近%d笔累计亏损 %.2f%% ≥ %.2f%%，禁止开新仓",
-                           code, len(recent_trades) if self._my_trades else 15,
+            logger.warning("[入场] %s 近%d笔(该品种)累计亏损 %.2f%% ≥ %.2f%%，禁止开新仓",
+                           code, len(recent_code_trades) if code_trades else 15,
                            recent_loss_pct * 100,
                            self.params.max_cumulative_loss_pct * 100)
             return
@@ -608,15 +611,17 @@ class TurtleStrategy(bt.Strategy):
         # 更新过滤器
         self._filter.record_result(code, was_win)
 
-        # 更新风控状态
+        # 更新风控状态（按品种）
         self._trade_count += 1
+        cl = self._consecutive_losses.get(code, 0)
         if not was_win:
-            self._consecutive_losses += 1
-            # 连续亏损暂停
-            if self._consecutive_losses >= self.params.max_consecutive_losses:
-                self._enter_pause(f"连续亏损 {self._consecutive_losses} 次")
+            cl += 1
+            self._consecutive_losses[code] = cl
+            # 连续亏损暂停（仅该品种）
+            if cl >= self.params.max_consecutive_losses:
+                self._enter_pause(code, f"{code} 连续亏损 {cl} 次")
         else:
-            self._consecutive_losses = 0
+            self._consecutive_losses[code] = 0
 
         # 记录交易
         self._my_trades.append({
@@ -705,17 +710,17 @@ class TurtleStrategy(bt.Strategy):
             return
         drawdown = (peak - equity) / peak
         if drawdown >= self.params.max_5day_drawdown_pct:
-            self._enter_pause(f"5日回撤 {drawdown*100:.1f}% ≥ {self.params.max_5day_drawdown_pct*100:.0f}%")
+            logger.warning("[风控] 5日回撤 %.1f%% ≥ %.0f%%，暂停逻辑已移除，仅预警",
+                           drawdown * 100, self.params.max_5day_drawdown_pct * 100)
 
-    def _enter_pause(self, reason: str):
-        """进入交易暂停状态。"""
+    def _enter_pause(self, code: str, reason: str):
+        """按品种进入交易暂停状态。"""
         pause_days = self.params.pause_days
         current = self.datas[0].datetime.date(0)
-        self._paused_until = current + timedelta(days=pause_days)
-        self._consecutive_losses = 0
-        self._equity_history.clear()
-        logger.warning("[风控] 暂停交易 %d 天（至 %s）: %s",
-                       pause_days, self._paused_until, reason)
+        self._paused_until[code] = current + timedelta(days=pause_days)
+        self._consecutive_losses[code] = 0
+        logger.warning("[风控] %s 暂停交易 %d 天（至 %s）: %s",
+                       code, pause_days, self._paused_until[code], reason)
 
     # ════════════════════════════════════════════════════════
     #  stop() — 回测结束输出

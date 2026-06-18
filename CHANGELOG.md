@@ -1,5 +1,21 @@
 # Changelog
 
+## [V5.5-暂停按品种+做空修复] - 2026-06-18
+### 暂停粒度从全局改为按品种 + 6脚本 `shortable_symbols`/`t_plus_one_symbols` 传参修复
+- `strategies/turtle_trading.py`: 暂停机制从全局单点改为按品种独立控制；`_consecutive_losses`、`_paused_until` 从 `int`/`Optional[date]` 改为 `Dict[str, int]`/`Dict[str, Optional[date]]`
+- `strategies/turtle_trading.py`: `_check_entry` 累计亏损暂停从跨品种最近15笔改为按品种过滤
+- `strategies/turtle_trading.py`: `_execute_exit` 连续亏损计数改为 per-symbol
+- `strategies/turtle_trading.py`: `_enter_pause` 新增 `code` 参数
+- `strategies/turtle_trading.py`: 删除全局 `T_PLUS_ONE_SYMBOLS`/`SHORTABLE_SYMBOLS` 常量，改为 `self.params.*`
+- `tests/test_turtle_strategy.py`: fixture 同步更新 `_consecutive_losses`/`_paused_until` 类型，`_check_entry` 暂停测试改为按品种
+- `scripts/run_backtest.py`: 新增 `shortable_symbols`、`t_plus_one_symbols` 传参；期货模式全部可做空
+- `scripts/run_comparison.py`: B4 `addstrategy` 补充两个参数
+- `scripts/run_grid_search.py`: import + `addstrategy` 补充
+- `scripts/run_stress_test.py`: import + `addstrategy` 补充
+- `scripts/gen_report.py`: import + `addstrategy` 补充
+- 全量测试 185/185 passed ✅，无回归
+- [V5.5-暂停按品种+做空修复] `已完成`
+
 ## [V5.4-config_loader] - 2026-06-18
 ### 全局硬编码消除：所有品种列表从 config/turtle_config.yaml 统一读取
 - `src/config_loader.py`: 新建模块，6 个配置读取函数（load_config, get_trading_symbols, get_bond_symbol, get_all_symbols, get_shortable_symbols, get_t_plus_one_symbols, get_t0_symbols, get_futures_symbols）
