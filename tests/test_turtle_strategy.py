@@ -116,6 +116,13 @@ def strat():
     s.__dict__["_equity_history"] = []
     s.__dict__["_trade_count"] = 0
     s.__dict__["_my_trades"] = []
+    # 调试计数器（新加）
+    s.__dict__["_signal_count"] = {}
+    s.__dict__["_filter_reject_count"] = {}
+    s.__dict__["_pause_reject_count"] = {}
+    s.__dict__["_loss_lockout_count"] = {}
+    s.__dict__["_risk_reject_count"] = {}
+    s.__dict__["_enter_count"] = {}
     # S4 状态字段
     s.__dict__["_alpha_risk_pcts"] = None
     s.__dict__["_last_rebalance_day"] = None

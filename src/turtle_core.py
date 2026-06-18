@@ -112,15 +112,10 @@ def calc_position_size(
     price: float,
     risk_pct: float = 0.01,
     stop_mult: float = 2.0,
-    min_unit: int = 1,
+    min_unit: int = 100,
+    multiplier: int = 1,
 ) -> int:
     """计算头寸规模（股数/手数）。
-
-    对齐 automated_trading 旧版公式：
-        每股风险 = stop_mult × N
-        理论头寸 = equity × risk_pct / 每股风险
-        最终股数 = floor(理论头寸 / min_unit) × min_unit
-        最小为 0
 
     Parameters
     ----------
@@ -135,21 +130,23 @@ def calc_position_size(
     stop_mult : float
         N 的倍数定义"一股的风险"，默认 2.0。
     min_unit : int
-        最小交易单位（ETF=100，期货=1），默认 1。
+        最小交易单位（ETF=100，期货=1），默认 100。
+    multiplier : int
+        合约乘数（ETF=1，期货每手吨数/桶数），默认 1。
 
     Returns
     -------
     int
-        股数/手数，min_unit 的整数倍。
+        股数/手数，min_unit 的整数倍。最小为 0。
     """
     if not np.isfinite(n_value) or n_value <= 0:
         return 0
 
     risk_amount = equity * risk_pct
-    per_share_risk = stop_mult * n_value
-    if not np.isfinite(per_share_risk) or per_share_risk <= 0:
+    per_unit_risk = stop_mult * n_value * multiplier
+    if not np.isfinite(per_unit_risk) or per_unit_risk <= 0:
         return 0
-    theoretical = risk_amount / per_share_risk
+    theoretical = risk_amount / per_unit_risk
     lots = int(theoretical / min_unit)
     return max(0, lots * min_unit)
 

@@ -90,7 +90,9 @@ class TurtleStrategy(bt.Strategy):
         ("cov_lookback_days", 252),       # 协方差矩阵估计窗口
         ("rebalance_quarterly", True),    # 每季度再平衡
         ("atr_change_threshold", 0.30),   # ATR 变动 30% 强制再平衡
-        ("min_unit", 1),                  # 最小交易单位（ETF=100，期货=1）
+        ("futures_mode", False),          # 期货模式特殊处理
+        ("multipliers", {}),              # 品种→合约乘数（期货用）
+        ("min_unit", 100),                # 最小交易单位（ETF=100，期货=1）
     )
 
     def __init__(self):
@@ -379,12 +381,13 @@ class TurtleStrategy(bt.Strategy):
                 if pd.isna(filter_low) or close >= filter_low:
                     return
 
-        # ── 盈利过滤器 ──
-        ok, reason = self._filter.check_entry(code, self._positions.has_position(code))
-        if not ok:
-            self._filter_reject_count[code] = self._filter_reject_count.get(code, 0) + 1
-            logger.debug("[入场] %s 被过滤器拒绝: %s", code, reason)
-            return
+        # ── 盈利过滤器（期货模式禁用） ──
+        if not self.params.futures_mode:
+            ok, reason = self._filter.check_entry(code, self._positions.has_position(code))
+            if not ok:
+                self._filter_reject_count[code] = self._filter_reject_count.get(code, 0) + 1
+                logger.debug("[入场] %s 被过滤器拒绝: %s", code, reason)
+                return
 
         # ── S4: α 融合风险权重 ──
         if self._alpha_risk_pcts is not None:
@@ -402,26 +405,29 @@ class TurtleStrategy(bt.Strategy):
             logger.debug("[入场] %s 仓位集中%d，风险降为 %.2f%% (原 %.2f%%)",
                          code, pos_count, risk * 100, base_risk * 100)
 
-        # ── P2: 按品种滑动窗口累计亏损暂停（检查该品种最近 15 笔） ──
-        code_trades = [t for t in self._my_trades if t["symbol"] == code]
-        recent_code_trades = code_trades[-15:] if len(code_trades) >= 15 else code_trades
-        recent_loss_pct = sum(
-            abs(t["pnl"]) for t in recent_code_trades if t["pnl"] < 0
-        ) / self._equity() if recent_code_trades else 0.0
-        if recent_loss_pct >= self.params.max_cumulative_loss_pct:
-            self._loss_lockout_count[code] = self._loss_lockout_count.get(code, 0) + 1
-            logger.warning("[入场] %s 近%d笔(该品种)累计亏损 %.2f%% ≥ %.2f%%，禁止开新仓",
-                           code, len(recent_code_trades) if code_trades else 15,
-                           recent_loss_pct * 100,
-                           self.params.max_cumulative_loss_pct * 100)
-            return
+        # ── P2: 按品种滑动窗口累计亏损暂停（期货模式禁用） ──
+        if not self.params.futures_mode:
+            code_trades = [t for t in self._my_trades if t["symbol"] == code]
+            recent_code_trades = code_trades[-15:] if len(code_trades) >= 15 else code_trades
+            recent_loss_pct = sum(
+                abs(t["pnl"]) for t in recent_code_trades if t["pnl"] < 0
+            ) / self.broker.startingcash if recent_code_trades else 0.0
+            if recent_loss_pct >= self.params.max_cumulative_loss_pct:
+                self._loss_lockout_count[code] = self._loss_lockout_count.get(code, 0) + 1
+                logger.warning("[入场] %s 近%d笔(该品种)累计亏损 %.2f%% ≥ %.2f%%，禁止开新仓",
+                               code, len(recent_code_trades) if code_trades else 15,
+                               recent_loss_pct * 100,
+                               self.params.max_cumulative_loss_pct * 100)
+                return
 
         # ── P0: 三层敞口校验 ──
         equity = self._equity()
         price = data.close[0]
         if not np.isfinite(risk) or risk <= 0:
             risk = self.params.risk_per_unit
-        shares = calc_position_size(equity, n, price, risk, min_unit=self.params.min_unit)
+        mu = self.params.min_unit if hasattr(self.params, 'min_unit') else 100
+        ml = self.params.multipliers.get(code, 1)
+        shares = calc_position_size(equity, n, price, risk, min_unit=mu, multiplier=ml)
         if shares == 0:
             return
         # P0: 校验单品种风险敞口 ≤ 4% (max_single_risk=0.04)

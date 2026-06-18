@@ -257,6 +257,15 @@ def run_backtest(
         shortable = get_shortable_symbols(config)
         t_plus_one = get_t_plus_one_symbols(config)
 
+    # ── 期货合约乘数 ──
+    FUTURES_MULTIPLIERS = {
+        "CU.SHF": 5, "RB.SHF": 10, "RU.SHF": 10,
+        "M.DCE": 10, "Y.DCE": 10, "P.DCE": 10,
+        "JM.DCE": 60, "I.DCE": 100,
+        "CF.ZCE": 5, "SR.ZCE": 10, "TA.ZCE": 5,
+        "SC.INE": 1000,
+    }
+
     # ── 添加策略（含 S4 风险平价权重参数） ──
     cerebro.addstrategy(
         TurtleStrategy,
@@ -274,6 +283,8 @@ def run_backtest(
         atr_change_threshold=config["weighting"]["atr_change_threshold"],
         shortable_symbols=shortable,
         t_plus_one_symbols=t_plus_one,
+        futures_mode=futures,
+        multipliers=FUTURES_MULTIPLIERS if futures else {},
         min_unit=1 if futures else 100,
     )
 
