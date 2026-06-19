@@ -32,6 +32,111 @@ logger = logging.getLogger(__name__)
 
 
 # ════════════════════════════════════════════════════════════
+#  信号确认工具函数（成交量 / K线形态 / 近期胜率）
+# ════════════════════════════════════════════════════════════
+
+def volume_confirmation(
+    vol: float,
+    vol_series: pd.Series,
+    lookback: int = 20,
+    threshold: float = 1.5,
+) -> bool:
+    """成交量确认：突破日成交量是否显著大于过去 N 日均量。
+
+    Parameters
+    ----------
+    vol : float
+        当日成交量。
+    vol_series : pd.Series
+        过去一段时间的成交量序列（含当日）。
+    lookback : int
+        均量计算窗口（不含当日），默认 20。
+    threshold : float
+        放量倍数阈值，默认 1.5（即 >1.5 倍均量）。
+
+    Returns
+    -------
+    bool
+        True 表示成交量确认通过。
+    """
+    if len(vol_series) < lookback + 1 or vol <= 0:
+        return False
+    avg_vol = vol_series.iloc[-(lookback + 1):-1].mean()
+    if avg_vol <= 0:
+        return False
+    return (vol / avg_vol) >= threshold
+
+
+def breakout_quality(
+    open_: float, high: float, low: float, close: float,
+    is_long: bool = True,
+    min_body_ratio: float = 0.4,
+) -> bool:
+    """K 线形态确认：突破日的 K 线实体占比和收盘位置。
+
+    多头突破条件：
+        - 实体占比 > min_body_ratio（默认 40%，不是十字星）
+        - 收盘价在当日区间上半部（>60% 位置）
+
+    空头突破条件：
+        - 实体占比 > min_body_ratio
+        - 收盘价在当日区间下半部（<40% 位置）
+
+    Returns
+    -------
+    bool
+        True 表示 K 线形态确认通过。
+    """
+    body = abs(close - open_)
+    candle_range = high - low
+    if candle_range < 1e-10:
+        return False
+
+    body_ratio = body / candle_range
+    close_position = (close - low) / candle_range  # 0=最低, 1=最高
+
+    if body_ratio <= min_body_ratio:
+        return False
+
+    if is_long:
+        return close_position > 0.6
+    else:
+        return close_position < 0.4
+
+
+def recent_batting_avg(
+    recent_trades: list,
+    window: int = 4,
+    max_loss_ratio: float = 0.75,
+) -> bool:
+    """近期胜率监控：近 N 笔中亏损占比未超标 → 放行。
+
+    替代原 P2 累计亏损金额冻结的逻辑——不看亏多少，
+    而看输的次数比例。趋势跟踪亏损正常，
+    但连续亏损意味着该品种当下的趋势判断可能失效。
+
+    Parameters
+    ----------
+    recent_trades : list[dict]
+        最近 N 笔该品种的交易记录（含 pnl 字段）。
+    window : int
+        观察窗口，默认 8 笔。
+    max_loss_ratio : float
+        允许的最大亏损占比，默认 0.75（8 笔中最多 6 笔亏）。
+
+    Returns
+    -------
+    bool
+        True 表示通过（可以继续交易），False 表示暂停。
+    """
+    if len(recent_trades) < window:
+        return True  # 样本不够，不下判断
+    recent = recent_trades[-window:]
+    losses = sum(1 for t in recent if t["pnl"] < 0)
+    return (losses / len(recent)) < max_loss_ratio
+
+
+# ════════════════════════════════════════════════════════════
 #  无状态计算函数
 # ════════════════════════════════════════════════════════════
 
@@ -491,6 +596,7 @@ class TurtleSignals:
             "stop_low_10": donchian_low(low, self.stop_period),
             "trail_high_10": trail_high_close(close, self.stop_period),
             "trail_low_10": trail_low_close(close, self.stop_period),
+            "sma_50": close.rolling(50).mean(),  # 50日均线（趋势判断用）
         }
 
 

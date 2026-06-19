@@ -444,3 +444,130 @@ def check_status() -> pd.DataFrame:
                 "rows": len(df),
             })
     return pd.DataFrame(records)
+
+
+# ════════════════════════════════════════════════════════════
+#  指数日线数据（用于大盘基准对比）
+# ════════════════════════════════════════════════════════════
+
+INDEX_DIR = PROJECT_ROOT / "data" / "index_daily"
+
+INDEX_FIELDS = [
+    "ts_code", "trade_date",
+    "open", "high", "low", "close", "pre_close",
+    "change", "pct_chg", "vol", "amount",
+]
+
+
+def _index_cache_path(code: str) -> Path:
+    """指数 parquet 缓存路径。"""
+    return INDEX_DIR / f"{code}.parquet"
+
+
+def fetch_index_daily(
+    code: str,
+    start_date: str,
+    end_date: str,
+    max_retries: int = 3,
+) -> pd.DataFrame:
+    """从 Tushare index_daily 接口拉取指数日线，存入本地缓存。
+
+    Parameters
+    ----------
+    code : str
+        TS 指数代码，如 '000300.SH'。
+    start_date : str
+        起始日期 "YYYYMMDD"。
+    end_date : str
+        截止日期 "YYYYMMDD"。
+    max_retries : int
+        每次请求最大重试次数。
+
+    Returns
+    -------
+    pd.DataFrame
+        标准化后的日线数据，列为 date, open, high, low, close, volume。
+        失败或无 token 时返回空 DataFrame。
+    """
+    INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = _index_cache_path(code)
+
+    # 若缓存已覆盖区间则直接返回
+    if cache_path.exists():
+        cached = pd.read_parquet(cache_path)
+        if not cached.empty:
+            cached_min = cached["date"].min().strftime("%Y%m%d")
+            cached_max = cached["date"].max().strftime("%Y%m%d")
+            if cached_min <= start_date and cached_max >= end_date:
+                mask = (cached["date"] >= start_date) & (cached["date"] <= end_date)
+                return cached[mask].reset_index(drop=True)
+
+    # 尝试从 Tushare 拉取
+    try:
+        import tushare as ts
+        token = os.environ.get("TUSHARE_TOKEN")
+        if not token:
+            logger.warning("TUSHARE_TOKEN 未设置，跳过指数数据拉取")
+            return _read_existing_index(code, start_date, end_date)
+
+        ts.set_token(token)
+        pro = ts.pro_api()
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                df = pro.index_daily(
+                    ts_code=code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    fields=",".join(INDEX_FIELDS),
+                )
+                if df is None or df.empty:
+                    logger.warning("[指数 %s] %s~%s 无数据返回", code, start_date, end_date)
+                    return _read_existing_index(code, start_date, end_date)
+
+                # 清洗
+                df.rename(columns={"trade_date": "date"}, inplace=True)
+                df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
+                for col in ["open", "high", "low", "close", "pre_close", "vol", "amount"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+                df.sort_values("date", inplace=True)
+                df.drop_duplicates(subset="date", keep="last", inplace=True)
+                df.reset_index(drop=True, inplace=True)
+
+                # 合并缓存
+                if cache_path.exists():
+                    existing = pd.read_parquet(cache_path)
+                    df = pd.concat([existing, df], ignore_index=True)
+                    df.sort_values("date", inplace=True)
+                    df.drop_duplicates(subset="date", keep="last", inplace=True)
+                    df.reset_index(drop=True, inplace=True)
+
+                df.to_parquet(cache_path, index=False, compression="snappy")
+                logger.info("[指数 %s] 已缓存 %d 行", code, len(df))
+
+                mask = (df["date"] >= start_date) & (df["date"] <= end_date)
+                return df[mask].reset_index(drop=True)
+
+            except Exception as e:
+                logger.warning("[指数 %s] 第 %d/%d 次请求失败: %s", code, attempt, max_retries, e)
+                if attempt < max_retries:
+                    from time import sleep
+                    sleep(attempt * 2)
+
+        return _read_existing_index(code, start_date, end_date)
+
+    except ImportError:
+        logger.warning("tushare 未安装，无法拉取指数数据")
+        return _read_existing_index(code, start_date, end_date)
+
+
+def _read_existing_index(code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """从本地缓存读取指数数据（降级路径）。"""
+    cache_path = _index_cache_path(code)
+    if cache_path.exists():
+        df = pd.read_parquet(cache_path)
+        mask = (df["date"] >= start_date) & (df["date"] <= end_date)
+        return df[mask].reset_index(drop=True)
+    return pd.DataFrame()

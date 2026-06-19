@@ -283,6 +283,7 @@ def run_historical_scenario(
         max_consecutive_losses=config["risk"]["max_consecutive_losses"],
         max_cumulative_loss_pct=config["risk"]["max_cumulative_loss_pct"],
         pause_days=config["risk"]["pause_days"],
+        max_portfolio_risk=config["risk"]["max_portfolio_risk"],
         alpha=float(params.get("alpha", 0.05)),
         cov_lookback_days=config["weighting"]["cov_lookback_days"],
         rebalance_quarterly=config["weighting"]["rebalance_quarterly"],

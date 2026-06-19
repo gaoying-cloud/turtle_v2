@@ -9,9 +9,9 @@
     TurtleStrategy (bt.Strategy)
     ├── __init__(): 通过 S2 TurtleSignals 预计算所有信号序列
     ├── next(): 逐日迭代
-    │   ├── _check_exits()     — 止损/退出
-    │   ├── _check_entries()   — 突破入场 + 55日过滤 + SignalFilter
-    │   ├── _check_pyramid()   — 加仓
+    │   ├── _check_entry()    — 突破入场 + 55日过滤 + SignalFilter
+    │   ├── _should_exit()    — 10 日反向突破退出
+    │   ├── _check_pyramid()  — 加仓
     │   └── [[国债切换已移除 v5.3]]
     └── stop(): 输出统计
 """
@@ -35,12 +35,11 @@ from src.turtle_core import (
     TurtlePositions,
     SignalFilter,
     calc_position_size,
-    calc_fixed_stop,
-    calc_trailing_stop,
-    calc_pyramid_trigger,
     pyramid_add,
-    should_activate_trailing_stop,
     Position,
+    volume_confirmation,
+    breakout_quality,
+    recent_batting_avg,
 )
 from src.risk_parity import compute_alpha_weights
 
@@ -81,9 +80,10 @@ class TurtleStrategy(bt.Strategy):
         ("risk_per_unit", 0.01),
         ("concentration_trigger", 4),
         ("max_consecutive_losses", 8),
-        ("max_cumulative_loss_pct", 0.15),
+        ("max_cumulative_loss_pct", 0.15),  # 已废弃：旧P2已删除，保留以兼容外部传参
         ("pause_days", 5),
-        ("max_5day_drawdown_pct", 0.08),   # 5日最大回撤阈值，超阈值暂停交易
+        ("max_5day_drawdown_pct", 0.10),   # 5日最大回撤阈值，超阈值暂停交易
+        ("max_portfolio_risk", 0.20),      # 全账户风险敞口上限
         ("t_plus_one_symbols", set()),     # T+1 品种集合（从配置传入）
         ("shortable_symbols", set()),      # 可做空品种集合（从配置传入）
         ("alpha", 0.05),                  # α 风险平价偏移系数
@@ -93,6 +93,13 @@ class TurtleStrategy(bt.Strategy):
         ("futures_mode", False),          # 期货模式特殊处理
         ("multipliers", {}),              # 品种→合约乘数（期货用）
         ("min_unit", 100),                # 最小交易单位（ETF=100，期货=1）
+        ("min_confirmations", 0),          # 确认规则投票：至少 N 个通过 (0=关闭)
+        ("vol_threshold", 1.5),            # 成交量放量倍数阈值
+        ("kline_min_body", 0.4),           # K线实体占比下限
+        ("p2_mode", "none"),               # "none" | "batting_avg"
+        ("p2_loss_ratio", 0.75),           # batting 模式：允许最大亏损占比
+        ("p2_batting_window", 4),          # batting 模式：观察窗口
+        ("use_signal_filter", True),       # 是否启用 SignalFilter 盈利过滤器
     )
 
     def __init__(self):
@@ -312,11 +319,6 @@ class TurtleStrategy(bt.Strategy):
                 self._check_entry(code, data)
             else:
                 pos = self._positions.get(code)
-
-                # 先更新移动止损线
-                self._update_trailing_stop(code, pos)
-
-                # 再检查退出
                 if self._should_exit(code, data, pos):
                     self._execute_exit(code, data, pos)
                 else:
@@ -382,11 +384,73 @@ class TurtleStrategy(bt.Strategy):
                     return
 
         # ── 盈利过滤器（期货模式禁用） ──
-        if not self.params.futures_mode:
+        if self.params.use_signal_filter and not self.params.futures_mode:
             ok, reason = self._filter.check_entry(code, self._positions.has_position(code))
             if not ok:
                 self._filter_reject_count[code] = self._filter_reject_count.get(code, 0) + 1
                 logger.debug("[入场] %s 被过滤器拒绝: %s", code, reason)
+                return
+
+        # ── 投票式信号确认（成交量 / K线 / 近期胜率） ──
+        if self.params.min_confirmations > 0 and not self.params.futures_mode:
+            confirmations = []
+
+            # ⑤ 成交量确认
+            if self.params.vol_threshold > 0:
+                # 取近 21 个 bar 的 volume 序列
+                vol_count = min(21, len(data.volume.array))
+                vol_series = pd.Series(data.volume.array[-vol_count:])
+                vol_pass = volume_confirmation(
+                    data.volume[0], vol_series,
+                    threshold=self.params.vol_threshold,
+                )
+                if vol_pass:
+                    confirmations.append("vol")
+                else:
+                    logger.debug("[确认] %s 成交量未达标 (%.1f/%.1f)",
+                                 code,
+                                 data.volume[0] / vol_series.iloc[:-1].mean()
+                                 if len(vol_series) > 1 else 0,
+                                 self.params.vol_threshold)
+
+            # ④ K 线形态确认
+            if self.params.kline_min_body > 0:
+                kline_pass = breakout_quality(
+                    data.open[0], data.high[0], data.low[0], data.close[0],
+                    is_long=is_long,
+                    min_body_ratio=self.params.kline_min_body,
+                )
+                if kline_pass:
+                    confirmations.append("kline")
+                else:
+                    body = abs(data.close[0] - data.open[0])
+                    cr = data.high[0] - data.low[0]
+                    body_pct = body / cr * 100 if cr > 0 else 0
+                    logger.debug("[确认] %s K线未达标 (实体%.0f%% %s)",
+                                 code, body_pct,
+                                 "十字星" if body_pct < self.params.kline_min_body * 100 else "位置不对")
+
+            # ③ 近期胜率（替代原 P2 累计亏损金额）
+            if self.params.p2_mode == "batting_avg":
+                code_trades = [t for t in self._my_trades if t["symbol"] == code]
+                win_size = self.params.p2_batting_window
+                batting_pass = recent_batting_avg(
+                    code_trades,
+                    window=win_size,
+                    max_loss_ratio=self.params.p2_loss_ratio,
+                )
+                if batting_pass:
+                    confirmations.append("batting")
+                else:
+                    self._loss_lockout_count[code] = self._loss_lockout_count.get(code, 0) + 1
+                    logger.warning("[确认] %s 近%d笔亏损占比 ≥ %.0f%%，暂停新开仓",
+                                   code, win_size, self.params.p2_loss_ratio * 100)
+
+            # 汇总投票
+            if len(confirmations) < self.params.min_confirmations:
+                logger.debug("[入场] %s 信号确认不足 (%d/%d): %s",
+                             code, len(confirmations),
+                             self.params.min_confirmations, confirmations)
                 return
 
         # ── S4: α 融合风险权重 ──
@@ -405,22 +469,6 @@ class TurtleStrategy(bt.Strategy):
             logger.debug("[入场] %s 仓位集中%d，风险降为 %.2f%% (原 %.2f%%)",
                          code, pos_count, risk * 100, base_risk * 100)
 
-        # ── P2: 按品种滑动窗口累计亏损暂停（期货模式禁用） ──
-        if not self.params.futures_mode:
-            code_trades = [t for t in self._my_trades if t["symbol"] == code]
-            recent_code_trades = code_trades[-15:] if len(code_trades) >= 15 else code_trades
-            recent_loss_pct = sum(
-                abs(t["pnl"]) for t in recent_code_trades if t["pnl"] < 0
-            ) / self.broker.startingcash if recent_code_trades else 0.0
-            if recent_loss_pct >= self.params.max_cumulative_loss_pct:
-                self._loss_lockout_count[code] = self._loss_lockout_count.get(code, 0) + 1
-                logger.warning("[入场] %s 近%d笔(该品种)累计亏损 %.2f%% ≥ %.2f%%，禁止开新仓",
-                               code, len(recent_code_trades) if code_trades else 15,
-                               recent_loss_pct * 100,
-                               self.params.max_cumulative_loss_pct * 100)
-                return
-
-        # ── P0: 三层敞口校验 ──
         equity = self._equity()
         price = data.close[0]
         if not np.isfinite(risk) or risk <= 0:
@@ -430,7 +478,7 @@ class TurtleStrategy(bt.Strategy):
         shares = calc_position_size(equity, n, price, risk, min_unit=mu, multiplier=ml)
         if shares == 0:
             return
-        # P0: 校验单品种风险敞口 ≤ 4% (max_single_risk=0.04)
+        # P0: 校验单品种风险敞口 ≤ 4% (single_max_risk=0.04)
         per_share_risk = 2.0 * n
         requested_risk = shares * per_share_risk
         # 已有该品种的敞口
@@ -451,11 +499,12 @@ class TurtleStrategy(bt.Strategy):
         for existing_pos in self._positions.all_positions():
             total_existing_risk += existing_pos.total_shares * 2.0 * existing_pos.n_at_entry
         total_new_risk_pct = (total_existing_risk + shares * per_share_risk) / equity if equity > 0 else 0
-        if total_new_risk_pct > 0.15:
-            max_new = equity * 0.15 - total_existing_risk
+        if total_new_risk_pct > self.params.max_portfolio_risk:
+            max_new = equity * self.params.max_portfolio_risk - total_existing_risk
             adjusted = int(max_new / per_share_risk / 100) * 100
             if adjusted <= 0:
-                logger.debug("[入场] %s 全账户风险敞口已达 15%% (%.2f%%)", code, total_new_risk_pct * 100)
+                logger.debug("[入场] %s 全账户风险敞口已达 %.0f%% (%.2f%%)",
+                             code, self.params.max_portfolio_risk * 100, total_new_risk_pct * 100)
                 return
             shares = adjusted
 
@@ -466,9 +515,6 @@ class TurtleStrategy(bt.Strategy):
         # ── 执行入场（多头或空头） ──
         dt = data.datetime.date(0)
         direction = "long" if is_long else "short"
-        stop_atr_multiple = float(self.params.turtle_params.get("stop_atr_multiple", 2.0))
-        stop_loss = calc_fixed_stop(price, n, stop_atr_multiple, direction)
-
         if is_long:
             self.buy(data=data, size=shares)
             action = "买入"
@@ -484,102 +530,21 @@ class TurtleStrategy(bt.Strategy):
             entry_price=price,
             shares=shares,
             n_at_entry=n,
-            stop_loss=stop_loss,
+            stop_loss=0.0,
         )
         if code in self.params.t_plus_one_symbols:
             self._buy_today[code] = True
 
         self._enter_count[code] = self._enter_count.get(code, 0) + 1
-        logger.info("[入场] %s → %s %d 股 @ %.4f (N=%.4f SL=%.4f %s)",
-                    code, action, shares, price, n, stop_loss, direction)
+        logger.info("[入场] %s → %s %d 股 @ %.4f (N=%.4f %s)",
+                    code, action, shares, price, n, direction)
 
-    # ════════════════════════════════════════════════════════
-    #  移动止损（每日更新）
-    # ════════════════════════════════════════════════════════
-
-    def _update_trailing_stop(self, code: str, pos: Position):
-        """每日更新移动止损线，只上移不下移（多头）或只下移不下移（空头）。
-
-        切换条件（满足任一即可）：
-            1. 浮盈 ≥ 2N
-            2. 持仓天数 ≥ 20 日
-        """
-        direction = pos.direction
-        idx = self._next_idx(code)
-        n = self._signals[code]["n"].iloc[idx]
-        if pd.isna(n) or n <= 0:
-            return
-
-        if pos.stop_type == "trailing":
-            # 已激活移动止损 → 检查是否需要更新止损线
-            if direction == "short":
-                trail_low = self._signals[code].get("trail_low_10")
-                if trail_low is not None:
-                    tl = trail_low.iloc[idx]
-                    if pd.notna(tl) and tl < pos.trail_high:
-                        self._positions.update_trail_high(code, float(tl))
-                        new_stop = calc_trailing_stop(
-                            float(tl), float(n), pos.stop_loss, direction="short",
-                        )
-                        if new_stop < pos.stop_loss:
-                            self._positions.update_stop_loss(code, new_stop, "trailing")
-                            logger.debug("[移动止损] %s 下移至 %.4f (trail_low=%.4f)",
-                                         code, new_stop, tl)
-            else:
-                trail_high = self._signals[code]["trail_high_10"].iloc[idx]
-                if pd.notna(trail_high) and trail_high > pos.trail_high:
-                    self._positions.update_trail_high(code, float(trail_high))
-                    new_stop = calc_trailing_stop(
-                        float(trail_high), float(n), pos.stop_loss,
-                    )
-                    if new_stop > pos.stop_loss:
-                        self._positions.update_stop_loss(code, new_stop, "trailing")
-                        logger.debug("[移动止损] %s 上移至 %.4f (trail_high=%.4f)",
-                                     code, new_stop, trail_high)
-        else:
-            # 固定止损 → 检查是否应切换为移动止损
-            close = self._close_series[code].iloc[
-                min(idx, len(self._close_series[code]) - 1)
-            ]
-            if should_activate_trailing_stop(
-                float(close), pos.entry_price, float(n), pos.holding_days,
-                direction=pos.direction,
-            ):
-                if direction == "short":
-                    trail_low = self._signals[code].get("trail_low_10")
-                    if trail_low is not None:
-                        tl = trail_low.iloc[idx]
-                        if pd.notna(tl):
-                            self._positions.update_trail_high(code, float(tl))
-                            new_stop = calc_trailing_stop(
-                                float(tl), float(n), pos.stop_loss, direction="short",
-                            )
-                            self._positions.update_stop_loss(code, new_stop, "trailing")
-                            logger.info("[移动止损] %s 空头激活 SL=%.4f", code, new_stop)
-                else:
-                    trail_high = self._signals[code]["trail_high_10"].iloc[idx]
-                    if pd.notna(trail_high):
-                        self._positions.update_trail_high(code, float(trail_high))
-                        new_stop = calc_trailing_stop(
-                            float(trail_high), float(n), pos.stop_loss,
-                        )
-                        self._positions.update_stop_loss(code, new_stop, "trailing")
-                        logger.info("[移动止损] %s 激活 (floatPn=%.2fN, hold=%d天) SL=%.4f",
-                                    code,
-                                    (float(close) - pos.entry_price) / float(n),
-                                    pos.holding_days, new_stop)
-
-    # ════════════════════════════════════════════════════════
-    #  退出（止损 + 退出）
-    # ════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════
+    #  退出（10 日反向突破，唯一退出规则）
+    # ════════════════════════════════════════════════════════════
 
     def _should_exit(self, code: str, data: bt.feeds.PandasData, pos: Position) -> bool:
-        """判断是否触发退出条件。
-
-        规则（任一满足即退出，取更早触发者）：
-            1. 固定止损/移动止损
-            2. 10日反向突破
-        """
+        """判断是否触发退出条件：仅 10 日反向突破（经典海龟退出规则）。"""
         idx = self._next_idx(code)
         si = self._signals[code]
         high = data.high[0]
@@ -594,18 +559,12 @@ class TurtleStrategy(bt.Strategy):
             return False
 
         if pos.direction == "short":
-            # 规则1 + 2：空头止损（high >= stop_loss）
-            if pos.stop_loss > 0 and high >= pos.stop_loss:
-                return True
-            # 规则3：10日向上突破（high >= stop_high_10）
+            # 10日向上突破退出（唯一退出规则）
             stop_high = si["stop_high_10"].iloc[idx]
             if not pd.isna(stop_high) and high >= stop_high:
                 return True
         else:
-            # 规则1 + 2：多头止损（low <= stop_loss）
-            if pos.stop_loss > 0 and low <= pos.stop_loss:
-                return True
-            # 规则3：10日反向突破（low <= stop_low_10）
+            # 10日向下突破退出（唯一退出规则）
             stop_low = si["stop_low_10"].iloc[idx]
             if not pd.isna(stop_low) and low <= stop_low:
                 return True

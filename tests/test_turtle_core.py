@@ -272,7 +272,7 @@ class TestTurtleSignals:
             "n", "entry_high_20", "entry_low_20",
             "entry_high_55", "entry_low_55",
             "stop_high_10", "stop_low_10", "trail_high_10",
-            "trail_low_10",
+            "trail_low_10", "sma_50",
         }
         assert set(result.keys()) == expected_keys
 

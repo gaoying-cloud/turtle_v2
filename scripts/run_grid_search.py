@@ -261,6 +261,7 @@ def run_single_backtest(
         max_consecutive_losses=params["max_consecutive_losses"],
         max_cumulative_loss_pct=params["max_cumulative_loss_pct"],
         pause_days=config["risk"]["pause_days"],
+        max_portfolio_risk=config["risk"]["max_portfolio_risk"],
         alpha=params["alpha"],
         cov_lookback_days=config["weighting"]["cov_lookback_days"],
         rebalance_quarterly=config["weighting"]["rebalance_quarterly"],
