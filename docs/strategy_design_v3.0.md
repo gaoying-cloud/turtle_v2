@@ -1,10 +1,17 @@
 ---
-version: "5.5"
-date: "2026-06-18"
+version: "5.6"
+date: "2026-06-19"
 based_on: "V5.2 (2026-06-18)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V5.3
+# 跨市场ETF海龟组合策略 — 设计文件 V5.6
+
+**V5.6 变更**：
+- 删除旧 P2 累计亏损金额冻结规则（近15笔亏损≥15%封禁），该逻辑对多品种返回相同亏损比例，存在 bug
+- 新增投票式信号确认系统：成交量确认 `volume_confirmation()`、K线形态确认 `breakout_quality()`、近期胜率监控 `recent_batting_avg()`，由 `min_confirmations` 统一控制（0=关闭，默认关闭）
+- `p2_mode` 简化：移除 `"cumulative_loss"`，仅保留 `"none"` 和 `"batting_avg"`，默认 `"none"`
+- 新增 `use_signal_filter` 开关控制 SignalFilter（默认开启）
+- `max_cumulative_loss_pct` 参数废弃保留，兼容网格搜索
 
 **V5.3 变更**：
 - 全品种配置从 `config/turtle_config.yaml` 统一读取，新增 `shortable`、`t_plus_one` 字段
@@ -243,7 +250,8 @@ based_on: "V5.2 (2026-06-18)"
 ### 4.1 入场信号
 
 - **突破入市**：价格突破过去 20 日高点（多单）或低点（空单），使用 `close > entry_high_20` 收盘价确认（V4.0 从 `high` 改为 `close`，过滤盘中假突破）。
-- **盈利过滤器（SignalFilter）**：V5.0 新增。每个品种记录上次交易结果：盈利 → 接受下次信号；亏损 → 跳过，连续跳过 ≥3 次后强制放行（避免永久封禁）。首个信号无条件接受。
+- **盈利过滤器（SignalFilter）**：V5.0 新增。每个品种记录上次交易结果：盈利 → 接受下次信号；亏损 → 跳过，连续跳过 ≥3 次后强制放行（避免永久封禁）。首个信号无条件接受。可通过 `use_signal_filter=False` 关闭。
+- **投票式信号确认（V5.6 新增，默认关闭 `min_confirmations=0`）**：在 SignalFilter 之后、仓位计算之前，提供三层独立确认规则——成交量放大（`volume_confirmation()`, 默认 1.5 倍均量）、K线实体质量（`breakout_quality()`, 默认实体占比 > 40%）、近期胜率（`recent_batting_avg()`, 近 8 笔亏损占比 < 75%）。由 `min_confirmations` 控制最少通过数（0=关闭, 1=至少一个, 2=至少两个, 3=全部）。三规则均通过函数参数独立开关，不独裁仅打分。
 - **过滤条件**：**默认不使用 55 日过滤**（以保证足够的交易频率）。
 - **⚠️ 必做对比实验**：在回测中必须包含以下两种模式的绩效对比：
   - 模式 A（默认）：仅 20 日突破入场，无过滤。

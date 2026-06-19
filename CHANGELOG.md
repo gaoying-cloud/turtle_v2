@@ -1,5 +1,16 @@
 # Changelog
 
+## [V5.6-删除旧P2+投票确认系统] - 2026-06-19
+### 删除旧 P2 累计亏损冻结 + 新增投票式信号确认系统（默认关闭）
+- `strategies/turtle_trading.py`: 删除旧 P2 累计亏损金额冻结代码块（近15笔亏损≥15%封禁），该逻辑对所有品种返回相同亏损比例，存在 bug
+- `strategies/turtle_trading.py`: 新增投票式信号确认区块（成交量/K线形态/近期胜率），由 `min_confirmations` 控制（0=关闭）
+- `strategies/turtle_trading.py`: `p2_mode` 默认值从 `"batting_avg"` 改为 `"none"`，移除 `"cumulative_loss"` 选项
+- `strategies/turtle_trading.py`: `max_cumulative_loss_pct` 参数保留但标记废弃，兼容网格搜索
+- `src/turtle_core.py`: 新增 `volume_confirmation()`, `breakout_quality()`, `recent_batting_avg()` 三个确认函数
+- `scripts/run_backtest.py`: 新增 `min_confirmations`, `vol_threshold`, `kline_min_body`, `p2_loss_ratio`, `p2_batting_window`, `use_signal_filter`, `p2_mode` 参数传递
+- `scripts/compare_filters.py`: 删除成交量+旧P2、K线+旧P2 两个组合，缩至 6 组
+- [V5.6-删除旧P2] `已完成`
+
 ## [V5.5-暂停按品种+做空修复] - 2026-06-18
 ### 暂停粒度从全局改为按品种 + 6脚本 `shortable_symbols`/`t_plus_one_symbols` 传参修复
 - `strategies/turtle_trading.py`: 暂停机制从全局单点改为按品种独立控制；`_consecutive_losses`、`_paused_until` 从 `int`/`Optional[date]` 改为 `Dict[str, int]`/`Dict[str, Optional[date]]`
