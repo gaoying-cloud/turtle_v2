@@ -44,8 +44,8 @@ def get_t_plus_one_symbols(config: Dict[str, Any]) -> Set[str]:
 
 
 def get_t0_symbols(config: Dict[str, Any]) -> List[str]:
-    """T+0 品种（shortable=True, 即纳指+黄金）。"""
-    return [s["code"] for s in config.get("symbols", []) if s.get("shortable", False)]
+    """T+0 品种（t_plus_one=False, 即非 T+1）。"""
+    return [s["code"] for s in config.get("symbols", []) if not s.get("t_plus_one", False)]
 
 
 def get_futures_symbols(config: Dict[str, Any]) -> List[str]:
