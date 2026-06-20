@@ -72,7 +72,7 @@ based_on: "V5.2 (2026-06-18)"
   - `self._trades` → `self._my_trades`：避免覆盖 Backtrader 内部 `self._trades` dict
   - `_next_idx()` 增加负值和越界保护：`len(self)=0` 时返回 0
   - `next()` 增加 `len(self) < 2: return`：跳过第 0 个 bar 数据不全
-  - B4 在 `run_comparison.py` 中改用独立 Cerebro 实例
+  - B4 在 `scripts/run_comparison.py` 中改用独立 Cerebro 实例
 - S5 四个基准全部成功运行：
 
   | 基准 | 最终净值 | 总收益率 |

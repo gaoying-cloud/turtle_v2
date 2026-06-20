@@ -57,13 +57,31 @@ def load_design_metadata() -> dict:
 
 
 def extract_file_refs(text: str) -> list:
-    """从文本中提取代码文件引用路径"""
+    """从文本中提取代码文件引用路径（含目录前缀）"""
     refs = []
-    # 匹配 src/ xxx.py ,  scripts/ xxx.py ,  config/ xxx.yaml ,  strategies/ xxx.py
-    for pat in [r"src/([\w/]+\.py)", r"scripts/([\w/]+\.py)",
-                 r"config/([\w/]+\.ya?ml)", r"strategies/([\w/]+\.py)"]:
-        refs.extend(re.findall(pat, text))
+    dir_prefixes = {
+        "src/": r"src/([\w/]+\.(?:py|yaml|yml))",
+        "scripts/": r"scripts/([\w/]+\.(?:py|yaml|yml))",
+        "config/": r"config/([\w/]+\.(?:ya?ml))",
+        "strategies/": r"strategies/([\w/]+\.(?:py|yaml|yml))",
+        "docs/": r"docs/([\w/]+\.(?:md|py|yaml|yml))",
+        "tests/": r"tests/([\w/]+\.(?:py|yaml|yml))",
+    }
+    for prefix, pat in dir_prefixes.items():
+        for match in re.finditer(pat, text):
+            refs.append(prefix + match.group(1))
     return list(set(refs))
+
+
+def extract_bare_file_refs(text: str) -> list:
+    """提取缺少目录前缀的裸文件名引用，用于辅助警告"""
+    bare = []
+    for match in re.finditer(r'`([\w-]+\.(?:py|yaml|yml|md))`', text):
+        fn = match.group(1)
+        # 排除已有目录前缀的、CHANGELOG.md 等根目录文件、和明确指向根目录的
+        if '/' not in match.group() and fn not in ('CHANGELOG.md', 'README.md'):
+            bare.append(fn)
+    return list(set(bare))
 
 
 # ────────────────────────────────────────────
@@ -91,7 +109,7 @@ def check_version_consistency(warnings: list, errors: list):
                 )
 
 
-def check_file_refs_in_design(errors: list):
+def check_file_refs_in_design(errors: list, warnings: list):
     """检查设计文档中引用的所有文件路径是否存在"""
     path = ROOT / "docs" / "strategy_design_v3.0.md"
     if not path.exists():
@@ -99,9 +117,21 @@ def check_file_refs_in_design(errors: list):
         return
     content = path.read_text(encoding="utf-8")
     refs = extract_file_refs(content)
+
+    # 已知外部引用（存在于 automated_trading 项目，不存在于 turtle_v2）
+    EXTERNAL_REFS = {"src/strategy_engine.py", "docs/检验执行计划.md"}
+    refs = [r for r in refs if r not in EXTERNAL_REFS]
+
     for ref in refs:
         if not (ROOT / ref).exists():
             errors.append(f"设计文档引用不存在的文件: {ref}")
+
+    # 检查裸文件名（缺少目录前缀）
+    bare = extract_bare_file_refs(content)
+    for fn in sorted(bare):
+        warnings.append(
+            f"设计文档引用 `{fn}` 缺少目录前缀（如 scripts/{fn}），请补全"
+        )
 
 
 def check_stage_status(errors: list):
@@ -157,26 +187,26 @@ def main():
     errors = []
 
     check_version_consistency(warnings, errors)
-    check_file_refs_in_design(errors)
+    check_file_refs_in_design(errors, warnings)
     check_stage_status(errors)
     check_readme_purity(warnings)
 
     # 输出
     exit_code = 0
     if warnings:
-        print("\n⚠ 一致性警告:")
+        print("\n[WARN] 一致性警告:")
         for w in warnings:
-            print(f"  ⚠ {w}")
+            print(f"  [WARN] {w}")
         exit_code = 1
 
     if errors:
-        print(f"\n🔴 一致性检查失败 (共 {len(errors)} 项):")
+        print(f"\n[FAIL] 一致性检查失败 (共 {len(errors)} 项):")
         for e in errors:
-            print(f"  🔴 {e}")
+            print(f"  [FAIL] {e}")
         exit_code = 2
 
     if not warnings and not errors:
-        print("✅ 一致性检查通过")
+        print("[OK] 一致性检查通过")
 
     sys.exit(exit_code)
 
