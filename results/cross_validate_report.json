@@ -1,0 +1,176 @@
+{
+  "510500": {
+    "symbol": "510500",
+    "total_days": 1563,
+    "ok_days": 1559,
+    "warn_days": 1,
+    "error_days": 2,
+    "critical_days": 1,
+    "consecutive_errors": 1,
+    "worst_level": "critical",
+    "worst_date": "2022-08-29",
+    "worst_detail": "收益率差异 23.8876% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 23.8876% > 6.0%",
+    "block_new_entries": true,
+    "block_all_trading": true,
+    "details": [
+      {
+        "date": "2022-08-29",
+        "level": "critical",
+        "reason": "收益率差异 23.8876% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 23.8876% > 6.0%",
+        "ret_tf": -1e-06,
+        "ret_ts": -0.238877,
+        "ret_diff_abs": 0.238876,
+        "vol_diff_pct": 0.99
+      },
+      {
+        "date": "2024-05-17",
+        "level": "error",
+        "reason": "收益率差异 3.1646% > 2.0%; 成交量差异 99.0% > 30%",
+        "ret_tf": 0.014701,
+        "ret_ts": -0.016945,
+        "ret_diff_abs": 0.031646,
+        "vol_diff_pct": 0.99
+      },
+      {
+        "date": "2025-01-16",
+        "level": "error",
+        "reason": "收益率差异 3.3537% > 2.0%; 成交量差异 99.0% > 30%",
+        "ret_tf": 0.00269,
+        "ret_ts": -0.030847,
+        "ret_diff_abs": 0.033537,
+        "vol_diff_pct": 0.99
+      },
+      {
+        "date": "2026-01-16",
+        "level": "warning",
+        "reason": "收益率差异 1.3614% > 0.5%; 成交量差异 99.0% > 30%",
+        "ret_tf": 0.002385,
+        "ret_ts": -0.011229,
+        "ret_diff_abs": 0.013614,
+        "vol_diff_pct": 0.99
+      }
+    ]
+  },
+  "159845": {
+    "symbol": "159845",
+    "total_days": 1263,
+    "ok_days": 1261,
+    "warn_days": 0,
+    "error_days": 0,
+    "critical_days": 2,
+    "consecutive_errors": 1,
+    "worst_level": "critical",
+    "worst_date": "2022-08-02",
+    "worst_detail": "收益率差异 688.8817% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 688.8817% > 6.0%",
+    "block_new_entries": true,
+    "block_all_trading": true,
+    "details": [
+      {
+        "date": "2022-08-02",
+        "level": "critical",
+        "reason": "收益率差异 688.8817% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 688.8817% > 6.0%",
+        "ret_tf": -0.023721,
+        "ret_ts": 6.865095,
+        "ret_diff_abs": 6.888817,
+        "vol_diff_pct": 0.99
+      },
+      {
+        "date": "2023-03-01",
+        "level": "critical",
+        "reason": "收益率差异 79.3641% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 79.3641% > 6.0%",
+        "ret_tf": 0.006115,
+        "ret_ts": 0.799755,
+        "ret_diff_abs": 0.793641,
+        "vol_diff_pct": 0.99
+      }
+    ]
+  },
+  "159915": {
+    "symbol": "159915",
+    "total_days": 1562,
+    "ok_days": 1562,
+    "warn_days": 0,
+    "error_days": 0,
+    "critical_days": 0,
+    "consecutive_errors": 0,
+    "worst_level": "ok",
+    "worst_date": null,
+    "worst_detail": "",
+    "block_new_entries": false,
+    "block_all_trading": false,
+    "details": []
+  },
+  "588000": {
+    "symbol": "588000",
+    "total_days": 1354,
+    "ok_days": 1354,
+    "warn_days": 0,
+    "error_days": 0,
+    "critical_days": 0,
+    "consecutive_errors": 0,
+    "worst_level": "ok",
+    "worst_date": null,
+    "worst_detail": "",
+    "block_new_entries": false,
+    "block_all_trading": false,
+    "details": []
+  },
+  "513100": {
+    "symbol": "513100",
+    "total_days": 1562,
+    "ok_days": 1559,
+    "warn_days": 2,
+    "error_days": 0,
+    "critical_days": 1,
+    "consecutive_errors": 2,
+    "worst_level": "critical",
+    "worst_date": "2022-01-14",
+    "worst_detail": "收益率差异 93.6878% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 93.6878% > 6.0%",
+    "block_new_entries": true,
+    "block_all_trading": true,
+    "details": [
+      {
+        "date": "2021-07-23",
+        "level": "warning",
+        "reason": "收益率差异 0.7493% > 0.5%; 成交量差异 99.0% > 30%",
+        "ret_tf": 0.007493,
+        "ret_ts": 0.0,
+        "ret_diff_abs": 0.007493,
+        "vol_diff_pct": 0.99
+      },
+      {
+        "date": "2021-07-26",
+        "level": "warning",
+        "reason": "收益率差异 0.7592% > 0.5%; 成交量差异 99.0% > 30%",
+        "ret_tf": 0.013266,
+        "ret_ts": 0.020858,
+        "ret_diff_abs": 0.007592,
+        "vol_diff_pct": 0.99
+      },
+      {
+        "date": "2022-01-14",
+        "level": "critical",
+        "reason": "收益率差异 93.6878% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 93.6878% > 6.0%",
+        "ret_tf": -0.024039,
+        "ret_ts": -0.960917,
+        "ret_diff_abs": 0.936878,
+        "vol_diff_pct": 0.99
+      }
+    ]
+  },
+  "518880": {
+    "symbol": "518880",
+    "total_days": 1563,
+    "ok_days": 1563,
+    "warn_days": 0,
+    "error_days": 0,
+    "critical_days": 0,
+    "consecutive_errors": 0,
+    "worst_level": "ok",
+    "worst_date": null,
+    "worst_detail": "",
+    "block_new_entries": false,
+    "block_all_trading": false,
+    "details": []
+  }
+}

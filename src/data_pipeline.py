@@ -283,9 +283,17 @@ def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataF
 
     # 调整 OHLC 价格（不含 pre_close，用复权因子等比缩放）
     price_cols = ["open", "high", "low", "close"]
+
+    # 构建全覆盖的复权因子映射：对 adj_map 中缺失的日期做 forward-fill，
+    # 确保每个交易日都有因子可用，避免 missing date 留下未调整行
+    all_dates = df["date"].dropna().unique()
+    adj_series = pd.Series(index=pd.DatetimeIndex(adj_map.keys()), data=list(adj_map.values()))
+    adj_series = adj_series.reindex(pd.DatetimeIndex(all_dates), method="ffill")
+    full_adj_map = adj_series.to_dict()
+
     for idx, row in df.iterrows():
         d = row["date"]
-        factor = adj_map.get(d)
+        factor = full_adj_map.get(d)
         if factor is None or factor <= 0:
             continue
         ratio = latest_factor / factor
