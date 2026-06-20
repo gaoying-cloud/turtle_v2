@@ -203,9 +203,9 @@ class TestATREqualRisk:
 
 class TestSIX_SYMBOLS:
     def test_six_symbols_count(self):
-        """SIX_SYMBOLS 长度为 6。"""
+        """SIX_SYMBOLS 长度为 4（移除科创50+中证1000后）。"""
         from src.benchmarks import SIX_SYMBOLS
-        assert len(SIX_SYMBOLS) == 6
+        assert len(SIX_SYMBOLS) == 4
 
     def test_contains_core_etfs(self):
         """包含所有核心品种。"""
@@ -213,3 +213,4 @@ class TestSIX_SYMBOLS:
         assert "510500.SH" in SIX_SYMBOLS
         assert "518880.SH" in SIX_SYMBOLS
         assert "513100.SH" in SIX_SYMBOLS
+        assert "159915.SZ" in SIX_SYMBOLS  # 创业板保留

@@ -26,25 +26,15 @@ weighting:
   rebalance_quarterly: true  # 每季度全组合再平衡
   atr_change_threshold: 0.30 # ATR变动超过30%触发强制再平衡
 
-# ── 交易标的 (6只ETF) ──
+# ── 交易标的 (4只ETF) ──
 symbols:
   - code: "510500.SH"   # 中证500ETF
     name: "中证500"
     market: "A股"
     shortable: false
     t_plus_one: true
-  - code: "159845.SZ"   # 中证1000ETF
-    name: "中证1000"
-    market: "A股"
-    shortable: false
-    t_plus_one: true
   - code: "159915.SZ"   # 创业板ETF
     name: "创业板"
-    market: "A股"
-    shortable: false
-    t_plus_one: true
-  - code: "588000.SH"   # 科创50ETF
-    name: "科创50"
     market: "A股"
     shortable: false
     t_plus_one: true
@@ -81,7 +71,7 @@ backtest:
 risk:
   max_portfolio_risk: 0.20       # 组合总风险敞口 ≤ 20%
   single_max_risk: 0.04          # 单品种最大风险 ≤ 4%
-  concentration_trigger: 4       # ≥4品种同时持仓时降敞口
+  concentration_trigger: 3       # ≥3品种同时持仓时降敞口
   concentrated_risk_per_unit: 0.005  # 集中度熔断后单单位风险
   max_consecutive_losses: 8      # 连续亏损8次暂停交易
   max_cumulative_loss_pct: 0.15  # 累计亏损15%暂停交易

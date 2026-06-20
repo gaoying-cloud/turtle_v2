@@ -88,14 +88,14 @@ class TestConfig:
 
     def test_get_symbols_six_plus_bond(self):
         symbols = get_symbols(include_bond=True)
-        assert len(symbols) == 7
+        assert len(symbols) == 5  # 4 交易标的 + 1 国债
         codes = [s["code"] for s in symbols]
         assert "511010.SH" in codes  # 国债ETF
         assert "510500.SH" in codes
 
     def test_get_symbols_without_bond(self):
         symbols = get_symbols(include_bond=False)
-        assert len(symbols) == 6
+        assert len(symbols) == 4  # 4 交易标的
         codes = [s["code"] for s in symbols]
         assert "511010.SH" not in codes
 
@@ -273,7 +273,7 @@ class TestCheckStatus:
 
         status = check_status()
         assert isinstance(status, pd.DataFrame)
-        assert len(status) == 7  # 全部 7 品种
+        assert len(status) == 5  # 4 交易标的 + 1 国债
 
         # 只有 510500.SH 有数据
         row = status[status["code"] == "510500.SH"].iloc[0]

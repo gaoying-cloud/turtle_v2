@@ -55,15 +55,11 @@ CROSS_MARKET = [
     ("518880.SH", "黄金ETF",  "etf"),
 ]
 
-# 策略交易的 6 只底层 ETF（buy-and-hold 对比）
-STRATEGY_ETFS = [
-    ("510500.SH", "中证500ETF"),
-    ("159845.SZ", "中证1000ETF"),
-    ("159915.SZ", "创业板ETF"),
-    ("588000.SH", "科创50ETF"),
-    ("513100.SH", "纳指ETF"),
-    ("518880.SH", "黄金ETF"),
-]
+# 策略交易的底层 ETF（从配置动态读取）
+import yaml
+with open(ROOT / "config" / "turtle_config.yaml", "r", encoding="utf-8") as _f:
+    _YB_CONFIG = yaml.safe_load(_f)
+STRATEGY_ETFS = [(s["code"], s["name"]) for s in _YB_CONFIG.get("symbols", [])]
 
 
 # ════════════════════════════════════════════════════════════

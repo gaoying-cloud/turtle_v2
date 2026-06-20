@@ -38,9 +38,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("cross_validate")
 
-# ── turtle_v2 品种列表 ──
-# 全部品种均已后复权，统一用收益率比较法
-SIX_SYMBOLS = ["510500", "159845", "159915", "588000", "513100", "518880"]
+# ── 品种列表（从配置动态读取） ──
+import yaml
+with open(ROOT / "config" / "turtle_config.yaml", "r", encoding="utf-8") as _f:
+    _CV_CONFIG = yaml.safe_load(_f)
+SIX_SYMBOLS = [s["code"][:6] for s in _CV_CONFIG.get("symbols", [])]
 BOND_SYMBOL = "511010"  # 国债 ETF，可选校验
 ALL_SYMBOLS = SIX_SYMBOLS  # + [BOND_SYMBOL]
 

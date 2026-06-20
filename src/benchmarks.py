@@ -25,15 +25,13 @@ from src.turtle_core import (
 
 logger = logging.getLogger(__name__)
 
-# ── 6 只海龟品种（与 run_backtest 中的 SIX_SYMBOLS 一致） ──
-SIX_SYMBOLS = [
-    "510500.SH",
-    "159845.SZ",
-    "159915.SZ",
-    "588000.SH",
-    "513100.SH",
-    "518880.SH",
-]
+# ── 海龟品种（从配置动态读取） ──
+import yaml
+from pathlib import Path
+_BENCHMARK_ROOT = Path(__file__).resolve().parent.parent
+with open(_BENCHMARK_ROOT / "config" / "turtle_config.yaml", "r", encoding="utf-8") as _f:
+    _BENCHMARK_CONFIG = yaml.safe_load(_f)
+SIX_SYMBOLS = [s["code"] for s in _BENCHMARK_CONFIG.get("symbols", [])]
 
 
 # ════════════════════════════════════════════════════════════

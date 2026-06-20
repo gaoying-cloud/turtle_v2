@@ -119,7 +119,8 @@ def check_file_refs_in_design(errors: list, warnings: list):
     refs = extract_file_refs(content)
 
     # 已知外部引用（存在于 automated_trading 项目，不存在于 turtle_v2）
-    EXTERNAL_REFS = {"src/strategy_engine.py", "docs/检验执行计划.md"}
+    EXTERNAL_REFS = {"src/strategy_engine.py", "docs/检验执行计划.md",
+                     "scripts/analyze_n_percentile.py"}
     refs = [r for r in refs if r not in EXTERNAL_REFS]
 
     for ref in refs:
