@@ -408,7 +408,7 @@ def generate_report(metrics: dict, df_full: Optional[pd.DataFrame] = None,
         "> ⚠️ 请先执行 `py scripts/run_comparison.py` 生成对比数据。\n\n"
         "基准定义（§4.4）：\n"
         "- B1：买入等权持有\n- B2：等权定期再平衡\n"
-        "- B3：ATR 等风险贡献\n- B4：海龟 + 国债现金管理（本策略）\n",
+        "- B3：ATR 等风险贡献\n- B4：海龟（纯策略，国债逻辑已移除）\n",
         "\n---\n",
         generate_params_section(df_full, df_oos),
         "\n---\n",

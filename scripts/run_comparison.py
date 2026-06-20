@@ -6,7 +6,7 @@
     B1 买入等权持有
     B2 等权定期再平衡
     B3 ATR 等风险贡献
-    B4 海龟 + 国债（TurtleStrategy）
+    B4 海龟（纯策略，国债逻辑已移除）
 
 输出对比表格到控制台，并保存到 results/backtest/comparison_{date}.csv。
 
@@ -266,7 +266,7 @@ def run_comparison(
         "B1": "B1 买入等权持有",
         "B2": "B2 等权再平衡",
         "B3": "B3 ATR等风险",
-        "B4": "B4 海龟+国债",
+        "B4": "B4 海龟(纯策略)",
     }
     results = []
 
@@ -324,7 +324,7 @@ def run_comparison(
                 "profit_factor": None,
             }
             results.append(result)
-            print(f"B4 B4 海龟+国债: 最终 {fv:>10.2f} | "
+            print(f"B4 B4 海龟(纯策略): 最终 {fv:>10.2f} | "
                   f"收益 {result['total_return_pct']:>7.2f}% | "
                   f"夏普 N/A     | 回撤 N/A   | "
                   f"交易 {_total4:>4}次")

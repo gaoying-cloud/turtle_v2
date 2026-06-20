@@ -1,7 +1,7 @@
 """四种基准对比策略 (S5)
 
 实现设计文档 §4.4 定义的三种补充基准策略（B1/B2/B3），
-B4（海龟+国债）即为现有 TurtleStrategy，不在此模块重复实现。
+TurtleStrategy（原\"海龟+国债\"，V5.3 已移除国债逻辑，不在此模块重复实现）
 
 基准对比分析入口在 scripts/run_comparison.py。
 """
