@@ -1,13 +1,23 @@
 ---
-version: "5.7"
-date: "2026-06-19"
-based_on: "V5.2 (2026-06-18)"
+version: "5.11"
+date: "2026-06-20"
+based_on: "V5.8 (2026-06-20)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V5.7
+# 跨市场ETF海龟组合策略 — 设计文件 V5.11
 
-**V5.7 变更**：
-- 新增 `src/market_regime.py` — 实盘可用的市场状态判断器，三指标融合（N值分位 + 方向效率 + N值趋势），输出 trending/choppy/transitional
+**V5.8~V5.11 变更**：
+- 数据复权深度修复：`_apply_factor_adjustment` 中 `pre_close` 改为 `close.shift(1)` 消除人工价格缺口；`_save_to_parquet` 新增 `overwrite` 参数，`force` 模式覆盖旧缓存
+- `_detect_and_adjust_splits` 逆向分段调整，修复多拆分事件中间段遗漏 bug
+- `_apply_factor_adjustment` 对 `fund_adj` 缺失日期 forward-fill，避免未调整行造成价格缺口
+- `_pi_ij`/`_rho_ij` Ledoit-Wolf 公式修复（`_pi_ij` 原偏差 503x）
+- `_check_5day_drawdown` 恢复全部品种暂停（之前仅预警不暂停）
+- 6 个脚本 `SIX_SYMBOLS` 硬编码全部迁移到 `config_loader`
+- 单品种敞口 `0.04` 改为 `self.params.single_max_risk`，从 config 读取
+- `scripts/cross_validate.py`: TickFlow 交叉校验工具（ETF ×6 + 国债）
+- `.pre-commit-config.yaml` + `.github/workflows/ci.yml`: CI/pre-commit 配置
+- 全量测试 185/185 passed
+- 回测基线：模式 A +127.73%，模式 B -18.36%，4 策略对比 B4 +141.78%
 - 新增 `scripts/analyze_n_percentile.py` — 历史验证脚本，逐年计算 regime score 并与策略收益关联
 - 数据管道新增后复权处理：Tushare `fund_adj` 获取复权因子 → 后复权 OHLC，消除 ETF 份额折算/分红导致的价格跳跃
 - 备选方案：Tushare 不可用时自动降级为价格检测法（pre_close vs prev_close 跳跃检测 + 累积因子修正）
@@ -828,6 +838,7 @@ src/market_regime.py             # 市场状态判断器（三指标融合）
 strategies/turtle_trading.py     # Backtrader Strategy 子类
     ↑
 scripts/run_backtest.py          # 回测入口
+scripts/cross_validate.py        # TickFlow <-> Tushare 数据交叉校验
 scripts/run_grid_search.py       # 参数网格搜索
 scripts/run_stress_test.py       # 极端情景回测
 scripts/run_comparison.py        # 基准对比

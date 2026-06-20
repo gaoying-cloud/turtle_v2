@@ -1,6 +1,31 @@
 # Changelog
 
-## [V5.8-数据复权修复] - 2026-06-20
+## [V5.11-CI/pre-commit配置] - 2026-06-20
+### pre-commit 安装激活 + GitHub Actions + check_consistency 修复
+- `.pre-commit-config.yaml`: 新增 pytest-quick(快速模式)、check-yaml、end-of-file-fixer、trailing-whitespace hooks；改为 `language: system`
+- `.github/workflows/ci.yml`: 新增 CI 工作流（pytest 多版本 + check-consistency + cross-validate）
+- `pre-commit install` 已执行；每次 `git commit` 自动触发 5 个 hooks
+- `scripts/check_consistency.py`: `extract_file_refs` 保留目录前缀修复（17 个假阳性→0）；新增 `extract_bare_file_refs` 裸文件名检测；emoji→ASCII 兼容 Windows GBK
+- `docs/strategy_design_v3.0.md`: `run_comparison.py` → `scripts/run_comparison.py`
+- [V5.11-CI/pre-commit配置] `已完成`
+
+## [V5.10-复权缺失因子forward-fill+数据交叉校验] - 2026-06-20
+### 修复 fund_adj 缺失日期导致的价格缺口 + TickFlow 交叉校验工具
+- `src/data_pipeline.py`: `_apply_factor_adjustment` — 对 `fund_adj` 中缺失的因子日期做 forward-fill，确保每个交易日都有可用因子，避免未调整行造成价格缺口
+- `scripts/cross_validate.py`: 从 `automated_trading` 适配到 turtle_v2（TickFlow ↔ Tushare 收益率比较法交叉校验），覆盖全部 6 只 ETF
+- 交叉校验结果：159915/588000/518880 双源 100% 一致；510500/159845/513100 仅拆分事件日有差异（预期行为）
+- [V5.10-复权缺失因子forward-fill+数据交叉校验] `已完成`
+
+## [V5.9-全模块代码审核修复] - 2026-06-20
+### P0~P2 问题修复
+- `src/data_pipeline.py`: `_detect_and_adjust_splits` 逆向分段调整，修复多拆分事件中间段遗漏 bug
+- `src/risk_parity.py`: `_pi_ij` 重写为正确公式 `sum((xc*yc-s_ij)²)/T`（原公式偏差 503x）；`_rho_ij` 重写为 delta-method 正确实现，传入 `rho_bar` 参数
+- `strategies/turtle_trading.py`: `_check_5day_drawdown` 恢复全部品种暂停（之前仅预警不暂停）
+- `scripts/*`: 6 个脚本 `SIX_SYMBOLS`/`BOND_SYMBOL`/`ALL_SYMBOLS` 全部从 `config_loader` 读取
+- `strategies/turtle_trading.py`: 单品种敞口 hardcoded `0.04` 改为 `self.params.single_max_risk`，从 config 读取
+- 全量测试 185/185 passed，回测基线不变 +127.73%
+- 基线回测已验证：模式 A +127.73%，模式 B -18.36%，4 策略对比 B4 +141.78%
+- [V5.9-全模块代码审核修复] `已完成`
 ### 修复后复权逻辑：所有品种价格序列连续可比
 - `src/data_pipeline.py`: `_apply_factor_adjustment` — 后复权改用官方 `fund_adj` 因子，但对于拆分/合并边界处交易所已调整的 `pre_close` 字段不再直接缩放，而是在调整完 OHLC 后重算为 `close.shift(1)`，消除人工价格缺口对 ATR 等波动率指标的污染
 - `src/data_pipeline.py`: `_detect_and_adjust_splits` — 同上，拆分检测后统一重算 `pre_close = close.shift(1)`
