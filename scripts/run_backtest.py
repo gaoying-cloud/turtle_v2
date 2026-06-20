@@ -173,6 +173,7 @@ def run_backtest(
     stop_buffer_n: float = 1.0,
     p2_mode: str = "none",
     p2_batting_window: int = 4,
+    symbols_override: Optional[list[str]] = None,
 ) -> Optional[dict]:
     """运行海龟策略回测。
 
@@ -212,7 +213,10 @@ def run_backtest(
         # 期货使用专门的资金参数
         initial_cash = config.get("futures", {}).get("initial_cash", 1000000)
     else:
-        trading_symbols = T0_SYMBOLS if t0_only else SIX_SYMBOLS
+        if symbols_override is not None:
+            trading_symbols = list(symbols_override)
+        else:
+            trading_symbols = T0_SYMBOLS if t0_only else SIX_SYMBOLS
         data_dir = DATA_DIR
         all_symbols = trading_symbols + [BOND_SYMBOL]
         use_bond = True
@@ -603,6 +607,12 @@ def main():
         default="breakout",
         help="入场模式: breakout=20日高点突破(默认), dual=突破+MA5金叉双模式",
     )
+    parser.add_argument(
+        "--symbols", "-s",
+        type=str,
+        default="",
+        help="逗号分隔的品种代码，覆盖配置文件（用于单品种筛查回测），如: --symbols 588000.SH",
+    )
 
     args = parser.parse_args()
 
@@ -636,6 +646,10 @@ def main():
         t0_only=args.t0_only,
         futures=args.futures,
         entry_mode=args.entry_mode,
+        symbols_override=(
+            [s.strip() for s in args.symbols.split(",") if s.strip()]
+            if args.symbols else None
+        ),
     )
 
     if result is None:

@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 # ── 路径 ──
 DATA_DIR = ROOT / "data" / "etf_daily"
 OUTPUT_DIR = ROOT / "results" / "stress_test"
+CONFIG_PATH = ROOT / "config" / "turtle_config.yaml"
 
 # 从统一配置读取品种列表
 with open(CONFIG_PATH, "r", encoding="utf-8") as _f:

@@ -1,0 +1,34 @@
+{
+  "timestamp": "2026-06-20T20:03:25.601579",
+  "existing_universe": [
+    "510500.SH",
+    "159915.SZ",
+    "513100.SH",
+    "518880.SH"
+  ],
+  "candidates": [
+    {
+      "symbol": "513100.SH",
+      "name": "纳指ETF",
+      "final_verdict": "reject",
+      "checks": [
+        {
+          "stage": "data_quality",
+          "verdict": "reject",
+          "metric_name": "worst_level",
+          "metric_value": "critical",
+          "threshold": "worst_level != critical",
+          "detail": "CRITICAL: 收益率差异 93.6878% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 93.6878% > 6.0%",
+          "elapsed_sec": 2.2
+        }
+      ],
+      "stopped_at_stage": "data_quality"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "pass": 0,
+    "reject": 1,
+    "warn_only": 0
+  }
+}

@@ -873,3 +873,60 @@ class SignalFilter:
         """导出所有过滤器的统计信息（用于日志/调试）。"""
         from dataclasses import asdict
         return {k: asdict(v) for k, v in self._states.items()}
+
+
+# ════════════════════════════════════════════════════════════
+#  Hurst 指数（用于品种筛选 §5.12）
+# ════════════════════════════════════════════════════════════
+
+def hurst_exponent(price: np.ndarray, max_lag: int = 100) -> float:
+    """重标极差法 (R/S) 计算 Hurst 指数。
+
+    衡量价格序列的趋势持续性。
+
+    Parameters
+    ----------
+    price : np.ndarray, shape (n_days,)
+        价格序列（收盘价），至少需要 252 个数据点。
+    max_lag : int
+        最大滞后阶数，默认 100。
+
+    Returns
+    -------
+    float
+        H ∈ [0, 1]。
+        H > 0.55  → 趋势持续（适合海龟策略）
+        H ≈ 0.50  → 随机游走（海龟仍可捕捉肥尾）
+        H < 0.45  → 均值回归（不适合趋势跟踪）
+    """
+    returns = np.diff(np.log(price))
+    n = len(returns)
+    if n < 50:
+        return 0.5
+
+    if n < max_lag:
+        max_lag = max(10, n // 4)
+
+    lags = range(2, min(max_lag, n // 2))
+    rs_values = []
+
+    for lag in lags:
+        n_chunks = n // lag
+        if n_chunks < 2:
+            break
+        chunks = returns[:n_chunks * lag].reshape(n_chunks, lag)
+        mean = chunks.mean(axis=1, keepdims=True)
+        deviations = chunks - mean
+        Z = deviations.cumsum(axis=1)
+        R = Z.max(axis=1) - Z.min(axis=1)
+        S = chunks.std(axis=1, ddof=1)
+        S[S == 0] = 1e-10
+        rs_values.append((R / S).mean())
+
+    if len(rs_values) < 4:
+        return 0.5
+
+    log_lags = np.log(list(range(2, 2 + len(rs_values))))
+    log_rs = np.log(np.array(rs_values))
+    H = np.polyfit(log_lags, log_rs, 1)[0]
+    return max(0.0, min(1.0, float(H)))
