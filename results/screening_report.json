@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-20T20:25:24.672686",
+  "timestamp": "2026-06-20T20:49:26.579159",
   "existing_universe": [
     "510500.SH",
     "159915.SZ",
@@ -8,53 +8,81 @@
   ],
   "candidates": [
     {
-      "symbol": "588000.SH",
-      "name": "588000.SH",
-      "final_verdict": "reject",
+      "symbol": "510500.SH",
+      "name": "中证500",
+      "final_verdict": "warn",
       "checks": [
         {
           "stage": "data_quality",
-          "verdict": "pass",
-          "metric_name": "worst_level",
-          "metric_value": "ok",
-          "threshold": "worst_level != critical",
-          "detail": "最高级别=ok, 交叉校验通过",
-          "elapsed_sec": 2.0
-        },
-        {
-          "stage": "listing_age",
-          "verdict": "reject",
-          "metric_name": "first_date",
-          "metric_value": "2020-09-28",
-          "threshold": "first_date <= 2018-01-01",
-          "detail": "首日 2020-09-28，晚于要求 2018-01-01（不足7年，未覆盖完整牛熊）",
-          "elapsed_sec": 0.0
-        }
-      ],
-      "stopped_at_stage": "listing_age"
-    },
-    {
-      "symbol": "159845.SZ",
-      "name": "159845.SZ",
-      "final_verdict": "reject",
-      "checks": [
-        {
-          "stage": "data_quality",
-          "verdict": "reject",
+          "verdict": "warn",
           "metric_name": "worst_level",
           "metric_value": "critical",
           "threshold": "worst_level != critical",
-          "detail": "CRITICAL: 收益率差异 688.8817% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 688.8817% > 6.0%",
-          "elapsed_sec": 1.3
+          "detail": "CRITICAL 仅出现在拆分/分红事件日 (2022-08-29)，双源差异为预期行为，降级为 WARN",
+          "elapsed_sec": 2.1
+        },
+        {
+          "stage": "listing_age",
+          "verdict": "pass",
+          "metric_name": "first_date",
+          "metric_value": "2013-02-06",
+          "threshold": "first_date <= 2018-01-01",
+          "detail": "首日 2013-02-06，满足 ≥2018-01-01",
+          "elapsed_sec": 0.0
+        },
+        {
+          "stage": "liquidity",
+          "verdict": "pass",
+          "metric_name": "avg_vol_252d",
+          "metric_value": "34.45亿",
+          "threshold": "avg_vol > 2亿",
+          "detail": "近252日均成交额 34.45亿",
+          "elapsed_sec": 0.0
+        },
+        {
+          "stage": "trend_persistence",
+          "verdict": "pass",
+          "metric_name": "hurst_median",
+          "metric_value": 0.647,
+          "threshold": "H >= 0.50",
+          "detail": "滚动 Hurst 中位数 0.647，趋势持续性良好",
+          "elapsed_sec": 0.0
+        },
+        {
+          "stage": "standalone_backtest",
+          "verdict": "pass",
+          "metric_name": "profit_factor",
+          "metric_value": 6.546,
+          "threshold": "profit_factor >= 1.0, CAGR > 0",
+          "detail": "PASS: | 盈亏比=6.55 | CAGR=3.9% | 交易=20次 | 胜率=30.0%",
+          "elapsed_sec": 1.6
+        },
+        {
+          "stage": "correlation",
+          "verdict": "pass",
+          "metric_name": "avg_correlation_60d",
+          "metric_value": 0.372,
+          "threshold": "avg ρ <= 0.5 vs each existing",
+          "detail": "60日平均相关系数 0.372，低相关，合格",
+          "elapsed_sec": 2.0
+        },
+        {
+          "stage": "t1_ratio",
+          "verdict": "warn",
+          "metric_name": "t1_ratio_after",
+          "metric_value": "60%",
+          "threshold": "T+1 占比 ≤ 50%",
+          "detail": "加入后 T+1=3/5=60% > 50%，止损滞后风险偏高",
+          "elapsed_sec": 0.0
         }
       ],
-      "stopped_at_stage": "data_quality"
+      "stopped_at_stage": ""
     }
   ],
   "summary": {
-    "total": 2,
+    "total": 1,
     "pass": 0,
-    "reject": 2,
-    "warn_only": 0
+    "reject": 0,
+    "warn_only": 1
   }
 }

@@ -126,7 +126,11 @@ def _resolve_name(symbol: str) -> str:
 # ════════════════════════════════════════════════════════════
 
 def check_data_quality(symbol: str) -> SingleCheck:
-    """复用 cross_validate 的 validate_symbol。"""
+    """复用 cross_validate 的 validate_symbol。
+
+    拆分/分红事件日的 CRITICAL 降级为 WARN（双源在除权日的收益率差异为预期行为）。
+    非拆分事件日的 CRITICAL 仍为 REJECT（数据源本身有问题）。
+    """
     t0 = time.time()
     try:
         from scripts.cross_validate import validate_symbol
@@ -141,8 +145,27 @@ def check_data_quality(symbol: str) -> SingleCheck:
             )
         worst = report.worst_level
         if worst == "critical":
-            verdict = "reject"
-            detail = f"CRITICAL: {report.worst_detail[:120]}"
+            # 获取 fund_adj 因子跳变日期（拆分/分红事件日）
+            from src.data_pipeline import _fetch_adj_factors
+            adj = _fetch_adj_factors(symbol)
+            factor_change_dates = set()
+            if adj is not None and not adj.empty:
+                adj_sorted = adj.sort_values("date").reset_index(drop=True)
+                for i in range(1, len(adj_sorted)):
+                    if adj_sorted.loc[i, "adj_factor"] != adj_sorted.loc[i-1, "adj_factor"]:
+                        factor_change_dates.add(adj_sorted.loc[i, "date"].date())
+
+            # 检查所有 CRITICAL 日期是否都是因子跳变日
+            critical_dates = {d.date for d in report.details if d.level == "critical"}
+            if critical_dates and critical_dates.issubset(factor_change_dates):
+                verdict = "warn"
+                detail = (
+                    f"CRITICAL 仅出现在拆分/分红事件日 ({', '.join(str(d) for d in sorted(critical_dates))})，"
+                    "双源差异为预期行为，降级为 WARN"
+                )
+            else:
+                verdict = "reject"
+                detail = f"CRITICAL: {report.worst_detail[:120]}"
         elif worst == "error":
             verdict = "warn"
             detail = f"ERROR: {report.worst_detail[:120]}"
