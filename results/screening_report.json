@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-20T20:49:26.579159",
+  "timestamp": "2026-06-20T20:53:59.683857",
   "existing_universe": [
     "510500.SH",
     "159915.SZ",
@@ -19,7 +19,7 @@
           "metric_value": "critical",
           "threshold": "worst_level != critical",
           "detail": "CRITICAL 仅出现在拆分/分红事件日 (2022-08-29)，双源差异为预期行为，降级为 WARN",
-          "elapsed_sec": 2.1
+          "elapsed_sec": 2.5
         },
         {
           "stage": "listing_age",
@@ -50,12 +50,12 @@
         },
         {
           "stage": "standalone_backtest",
-          "verdict": "pass",
-          "metric_name": "profit_factor",
-          "metric_value": 6.546,
+          "verdict": "skip",
+          "metric_name": "N/A",
+          "metric_value": "N/A",
           "threshold": "profit_factor >= 1.0, CAGR > 0",
-          "detail": "PASS: | 盈亏比=6.55 | CAGR=3.9% | 交易=20次 | 胜率=30.0%",
-          "elapsed_sec": 1.6
+          "detail": "--skip-backtest 已跳过",
+          "elapsed_sec": 0.0
         },
         {
           "stage": "correlation",
