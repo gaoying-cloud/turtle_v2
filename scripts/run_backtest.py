@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.turtle_core import TurtleSignals
 from strategies.turtle_trading import TurtleStrategy
-from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
+from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols, get_trading_symbols, get_bond_symbol, get_all_symbols, get_t0_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -40,25 +40,13 @@ logger = logging.getLogger(__name__)
 CONFIG_PATH = ROOT / "config" / "turtle_config.yaml"
 DATA_DIR = ROOT / "data" / "etf_daily"
 
-# 海龟品种顺序必须与策略中的 self.datas 索引一致
-SIX_SYMBOLS = [
-    "510500.SH",  # 中证500
-    "159845.SZ",  # 中证1000
-    "159915.SZ",  # 创业板
-    "588000.SH",  # 科创50
-    "513100.SH",  # 纳指ETF
-    "518880.SH",  # 黄金ETF
-]
-
-# T+0 品种（纳指 + 黄金），做空不受 T+1 约束
-T0_SYMBOLS = [
-    "513100.SH",  # 纳指ETF
-    "518880.SH",  # 黄金ETF
-]
-
-BOND_SYMBOL = "511010.SH"
-
-ALL_SYMBOLS = SIX_SYMBOLS + [BOND_SYMBOL]
+# 从统一配置读取品种列表（消除硬编码）
+with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
+    _CONFIG = yaml.safe_load(_f)
+SIX_SYMBOLS = get_trading_symbols(_CONFIG)
+BOND_SYMBOL = get_bond_symbol(_CONFIG)
+ALL_SYMBOLS = get_all_symbols(_CONFIG)
+T0_SYMBOLS = get_t0_symbols(_CONFIG)
 
 # 期货品种（12 个，跨市场不相关）
 FUTURES_SYMBOLS = [
@@ -287,6 +275,7 @@ def run_backtest(
         max_consecutive_losses=config["risk"]["max_consecutive_losses"],
         max_cumulative_loss_pct=config["risk"]["max_cumulative_loss_pct"],
         pause_days=config["risk"]["pause_days"],
+        single_max_risk=config["risk"]["single_max_risk"],
         max_portfolio_risk=config["risk"]["max_portfolio_risk"],
         alpha=config["weighting"]["alpha"],
         cov_lookback_days=config["weighting"]["cov_lookback_days"],

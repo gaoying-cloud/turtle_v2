@@ -36,13 +36,21 @@ sys.path.insert(0, str(ROOT))
 
 from src.benchmarks import BuyAndHold, EqualWeightRebalance, ATREqualRisk
 from strategies.turtle_trading import TurtleStrategy
-from scripts.run_backtest import load_data, df_to_feed, SIX_SYMBOLS, BOND_SYMBOL, ALL_SYMBOLS
-from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
+from scripts.run_backtest import load_data, df_to_feed
+from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols, get_trading_symbols, get_bond_symbol, get_all_symbols
 
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = ROOT / "config" / "turtle_config.yaml"
 RESULTS_DIR = ROOT / "results" / "backtest"
+
+# 从统一配置读取品种列表
+import yaml
+with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
+    _CONFIG = yaml.safe_load(_f)
+SIX_SYMBOLS = get_trading_symbols(_CONFIG)
+BOND_SYMBOL = get_bond_symbol(_CONFIG)
+ALL_SYMBOLS = get_all_symbols(_CONFIG)
 
 
 # ── 策略配置函数 ──

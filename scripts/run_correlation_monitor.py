@@ -29,6 +29,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import yaml
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -41,15 +42,12 @@ logger = logging.getLogger(__name__)
 DATA_DIR = ROOT / "data" / "etf_daily"
 OUTPUT_DIR = ROOT / "results" / "stress_test"
 
-# ── 品种 ──
-SIX_SYMBOLS = [
-    "510500.SH",  # 中证500
-    "159845.SZ",  # 中证1000
-    "159915.SZ",  # 创业板
-    "588000.SH",  # 科创50
-    "513100.SH",  # 纳指ETF
-    "518880.SH",  # 黄金ETF
-]
+# 从统一配置读取品种列表
+with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
+    _CONFIG = yaml.safe_load(_f)
+from src.config_loader import get_trading_symbols
+SIX_SYMBOLS = get_trading_symbols(_CONFIG)
+
 
 
 # ════════════════════════════════════════════════════════════

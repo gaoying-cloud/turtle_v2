@@ -49,9 +49,13 @@ COMPARISON_DIR = ROOT / "results" / "comparison"
 DEFAULT_OUTPUT = ROOT / "results" / "report.md"
 
 # ── 品种 ──
-SIX_SYMBOLS = ["510500.SH", "159845.SZ", "159915.SZ", "588000.SH", "513100.SH", "518880.SH"]
-BOND_SYMBOL = "511010.SH"
-ALL_SYMBOLS = SIX_SYMBOLS + [BOND_SYMBOL]
+import yaml
+from src.config_loader import get_trading_symbols, get_bond_symbol, get_all_symbols
+with open(ROOT / "config" / "turtle_config.yaml", "r", encoding="utf-8") as _f:
+    _CONFIG = yaml.safe_load(_f)
+SIX_SYMBOLS = get_trading_symbols(_CONFIG)
+BOND_SYMBOL = get_bond_symbol(_CONFIG)
+ALL_SYMBOLS = get_all_symbols(_CONFIG)
 
 
 # ════════════════════════════════════════════════════════════

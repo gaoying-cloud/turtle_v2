@@ -87,7 +87,7 @@ def ledoit_wolf_cov(returns: np.ndarray) -> np.ndarray:
     for i in range(N):
         for j in range(i, N):
             rho_ij = _rho_ij(returns[:, i], returns[:, j],
-                             sample_cov[i, j], target[i, j], T)
+                             sample_cov[i, j], target[i, j], avg_corr, T)
             rho_sum += rho_ij
 
     # gamma: ||Σ_sample - Σ_target||^2_F
@@ -105,28 +105,48 @@ def ledoit_wolf_cov(returns: np.ndarray) -> np.ndarray:
 
 
 def _pi_ij(x: np.ndarray, y: np.ndarray, s_ij: float, T: int) -> float:
-    """计算 Pi_ij 的估计值。"""
-    # 去中心化
+    """计算 π̂_ij = (1/T) * Σ_t[(x_it-x̄_i)(x_jt-x̄_j) - s_ij]²
+
+    LW2004 公式 (12): π̂_ij 是样本协方差估计的渐近方差。
+    """
     xc = x - x.mean()
     yc = y - y.mean()
-    # 逐元素乘积的方差
-    z = xc * yc
-    var_z = np.var(z, ddof=1)
-    return (T / (T - 1) ** 2) * var_z * T * T  # Ledoit-Wolf 公式
-
-
-def _rho_ij(x: np.ndarray, y: np.ndarray, s_ij: float, t_ij: float, T: int) -> float:
-    """计算 Rho_ij 的估计值。"""
-    xc = x - x.mean()
-    yc = y - y.mean()
-    # (x_i - x_bar)(y_i - y_bar) - s_ij
+    # (x_it - x̄_i)(x_jt - x̄_j) - s_ij
     z = xc * yc - s_ij
-    # (x_i - x_bar)^2 和 (y_i - y_bar)^2
-    xx = xc ** 2
-    yy = yc ** 2
-    # rho_ij_hat
-    sum_term = np.sum(z * (xx * y.mean() / 2 + yy * x.mean() / 2))
-    return (T / (T - 1) ** 2) * sum_term
+    return float(np.sum(z ** 2) / T)
+
+
+def _rho_ij(x: np.ndarray, y: np.ndarray, s_ij: float, t_ij: float,
+            rho_bar: float, T: int) -> float:
+    """计算 ρ̂_ij（常数相关模型目标矩阵用）。
+
+    对于常数相关目标 t_ij = ρ̄·√(s_ii·s_jj)，ρ̂_ij 涉及
+    target 对样本协方差的导数（delta method）。
+
+    简化实现：将 target 视作"伪样本协方差"的同阶估计量，
+    用双样本协方差公式：
+        ρ̂_ij = (1/T) * Σ_t [a_ij_t · b_ij_t]
+    其中 a_ij_t = (x_it-x̄_i)(x_jt-x̄_j) - s_ij
+         b_ij_t = (x_it-x̄_i)² · θ_j + (x_jt-x̄_j)² · θ_i
+         θ_i = ρ̄ · σ_j / (2 · σ_i)   (来自 target 对 s_ii 的导数)
+    """
+    xc = x - x.mean()
+    yc = y - y.mean()
+    # 样本误差项
+    a_t = xc * yc - s_ij
+    # 常数相关 target 对样本方差 s_ii/s_jj 的导数项
+    # dt_ij/ds_ii = ρ̄ · σ_j / (2 · σ_i)
+    # dt_ij/ds_jj = ρ̄ · σ_i / (2 · σ_j)
+    sigma_i = np.std(x, ddof=1)
+    sigma_j = np.std(y, ddof=1)
+    if sigma_i <= 0 or sigma_j <= 0:
+        return 0.0
+    theta_i = rho_bar * sigma_j / (2.0 * sigma_i)
+    theta_j = rho_bar * sigma_i / (2.0 * sigma_j)
+
+    b_t = xc ** 2 * theta_j + yc ** 2 * theta_i
+
+    return float(np.sum(a_t * b_t) / T)
 
 
 # ────────────────────────────────────────────────────────────

@@ -93,6 +93,7 @@ def strat():
         "pause_days": 5,
         "max_5day_drawdown_pct": 0.10,
         "max_portfolio_risk": 0.20,
+        "single_max_risk": 0.04,
         "t_plus_one_symbols": {"510500.SH", "159845.SZ", "159915.SZ", "588000.SH"},
         "shortable_symbols": {"513100.SH", "518880.SH"},
         "alpha": 0.05,

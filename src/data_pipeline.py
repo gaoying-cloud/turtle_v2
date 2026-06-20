@@ -311,7 +311,7 @@ def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
 
     通过对比 pre_close[t] 与 close[t-1] 的比值来检测。
     正常日比值接近 1.0，拆分日会大幅偏离。
-    将所有事件前的价格乘以累积调整因子，使历史与当前在同一基准。
+    从最晚事件向最早事件逆向处理，确保多拆分场景下中间段也被正确调整。
     """
     df = df.sort_values("date").reset_index(drop=True)
 
@@ -328,22 +328,25 @@ def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
     if not events:
         return df
 
-    cum_factor = 1.0
-    for _, factor in events:
-        cum_factor *= factor
-
-    first_idx = events[0][0] - 1  # 第一个事件的前一天
-    if first_idx <= 0:
-        return df
-
+    # 逆向处理：从最晚事件往前，每次只调整当前事件到上一个事件之间的区间
+    # 这样每个事件的影响不会叠加到跨事件的其他区间
     price_cols = ["open", "high", "low", "close"]
-    for col in price_cols:
-        if col in df.columns:
-            df.loc[:first_idx, col] = df.loc[:first_idx, col].astype(float) * cum_factor
+    for evt_idx in range(len(events) - 1, -1, -1):
+        evt_pos, evt_factor = events[evt_idx]
+        # 该事件影响的范围：从该事件前一天到上一个事件（或起点）
+        if evt_idx == 0:
+            start = 0
+        else:
+            start = events[evt_idx - 1][0]  # 上一个事件的位置（含，因为该行已在上次调整中被修正）
+        end = evt_pos - 1  # 该事件前一天
+        if end < start:
+            continue
+        for col in price_cols:
+            if col in df.columns:
+                df.loc[start:end, col] = df.loc[start:end, col].astype(float) * evt_factor
 
-    logger.info("[复权] %s: %d 个事件, 累积因子 %.4f, 调整 %d 行",
-                df.get("ts_code", df.iloc[0].get("date")), len(events),
-                cum_factor, first_idx + 1)
+    logger.info("[复权] %s: %d 个事件, 逆向分段调整完成",
+                df.get("ts_code", df.iloc[0].get("date")), len(events))
 
     # 后复权后重新计算 pre_close = 前一日调整后 close
     df["pre_close"] = df["close"].shift(1)

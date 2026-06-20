@@ -84,6 +84,7 @@ class TurtleStrategy(bt.Strategy):
         ("pause_days", 5),
         ("max_5day_drawdown_pct", 0.10),   # 5日最大回撤阈值，超阈值暂停交易
         ("max_portfolio_risk", 0.20),      # 全账户风险敞口上限
+        ("single_max_risk", 0.04),         # 单品种风险敞口上限
         ("t_plus_one_symbols", set()),     # T+1 品种集合（从配置传入）
         ("shortable_symbols", set()),      # 可做空品种集合（从配置传入）
         ("alpha", 0.05),                  # α 风险平价偏移系数
@@ -509,7 +510,7 @@ class TurtleStrategy(bt.Strategy):
         shares = calc_position_size(equity, n, price, risk, min_unit=mu, multiplier=ml)
         if shares == 0:
             return
-        # P0: 校验单品种风险敞口 ≤ 4% (single_max_risk=0.04)
+        # P0: 校验单品种风险敞口 ≤ single_max_risk
         per_share_risk = 2.0 * n
         requested_risk = shares * per_share_risk
         # 已有该品种的敞口
@@ -518,11 +519,12 @@ class TurtleStrategy(bt.Strategy):
         if pos is not None:
             existing_risk = pos.total_shares * 2.0 * pos.n_at_entry
         total_symbol_risk_pct = (existing_risk + requested_risk) / equity if equity > 0 else 0
-        if total_symbol_risk_pct > 0.04:
-            max_new = equity * 0.04 - existing_risk
+        if total_symbol_risk_pct > self.params.single_max_risk:
+            max_new = equity * self.params.single_max_risk - existing_risk
             adjusted = int(max_new / per_share_risk / 100) * 100
             if adjusted <= 0:
-                logger.debug("[入场] %s 单品种风险敞口已达 4%% (%.2f%%)", code, total_symbol_risk_pct * 100)
+                logger.debug("[入场] %s 单品种风险敞口已达 %.0f%% (%.2f%%)",
+                             code, self.params.single_max_risk * 100, total_symbol_risk_pct * 100)
                 return
             shares = adjusted
         # P0: 校验全账户风险敞口 ≤ 15% (max_total_risk=0.15)
@@ -722,7 +724,7 @@ class TurtleStrategy(bt.Strategy):
     # ════════════════════════════════════════════════════════
 
     def _check_5day_drawdown(self):
-        """5日滚动最大回撤监控，超阈值暂停交易。"""
+        """5日滚动最大回撤监控，超阈值暂停所有品种交易。"""
         today = self.datas[0].datetime.date(0)
         equity = self._equity()
         self._equity_history.append((today, equity))
@@ -735,8 +737,11 @@ class TurtleStrategy(bt.Strategy):
             return
         drawdown = (peak - equity) / peak
         if drawdown >= self.params.max_5day_drawdown_pct:
-            logger.warning("[风控] 5日回撤 %.1f%% ≥ %.0f%%，暂停逻辑已移除，仅预警",
-                           drawdown * 100, self.params.max_5day_drawdown_pct * 100)
+            pause_days = 5  # 全局熔断暂停 5 天
+            for code in self.params.symbols:
+                self._paused_until[code] = today + timedelta(days=pause_days)
+            logger.warning("[风控] 5日回撤 %.1f%% ≥ %.0f%%，全部品种暂停 %d 天",
+                           drawdown * 100, self.params.max_5day_drawdown_pct * 100, pause_days)
 
     def _enter_pause(self, code: str, reason: str):
         """按品种进入交易暂停状态。"""

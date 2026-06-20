@@ -57,18 +57,15 @@ DATA_DIR = ROOT / "data" / "etf_daily"
 GRID_DIR = ROOT / "results" / "grid_search"
 OUTPUT_DIR = ROOT / "results" / "stress_test"
 
-# ── 品种 ──
-SIX_SYMBOLS = [
-    "510500.SH",  # 中证500
-    "159845.SZ",  # 中证1000
-    "159915.SZ",  # 创业板
-    "588000.SH",  # 科创50
-    "513100.SH",  # 纳指ETF
-    "518880.SH",  # 黄金ETF
-]
-BOND_SYMBOL = "511010.SH"
-ALL_SYMBOLS = SIX_SYMBOLS + [BOND_SYMBOL]
-T_PLUS_ONE_SYMBOLS = {"510500.SH", "159845.SZ", "159915.SZ", "588000.SH"}
+# 从统一配置读取品种列表
+with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
+    _CONFIG = yaml.safe_load(_f)
+from src.config_loader import get_trading_symbols, get_bond_symbol, get_all_symbols, get_t_plus_one_symbols
+SIX_SYMBOLS = get_trading_symbols(_CONFIG)
+BOND_SYMBOL = get_bond_symbol(_CONFIG)
+ALL_SYMBOLS = get_all_symbols(_CONFIG)
+T_PLUS_ONE_SYMBOLS = get_t_plus_one_symbols(_CONFIG)
+
 
 
 # ════════════════════════════════════════════════════════════
