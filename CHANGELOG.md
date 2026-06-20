@@ -1,6 +1,17 @@
 # Changelog
 
-## [V5.11-CI/pre-commit配置] - 2026-06-20
+## [V5.12-去科创50+中证1000] - 2026-06-20
+### 品种从 6 只缩减为 4 只，回撤显著改善
+- `config/turtle_config.yaml`: 删除 588000.SH(科创50) 和 159845.SZ(中证1000) 两个品种条目；`concentration_trigger` 从 4 改为 3
+- `src/benchmarks.py`/`scripts/cross_validate.py`/`scripts/yearly_benchmark.py`: 硬编码品种列表全部改为从 config 动态读取
+- `tests/*`: 断言 6→4 更新
+- **回测基线大幅改善**：
+  - 总收益 +122.74% → **+221.06%** 🔥
+  - 最大回撤 46.86% → **38.29%** ✅
+  - 夏普比率 0.36 → **0.41** ✅
+  - 盈亏比 1.11 → **1.97** ✅
+- 全量测试 185/185 passed
+- [V5.12-去科创50+中证1000] `已完成`
 ### pre-commit 安装激活 + GitHub Actions + check_consistency 修复
 - `.pre-commit-config.yaml`: 新增 pytest-quick(快速模式)、check-yaml、end-of-file-fixer、trailing-whitespace hooks；改为 `language: system`
 - `.github/workflows/ci.yml`: 新增 CI 工作流（pytest 多版本 + check-consistency + cross-validate）

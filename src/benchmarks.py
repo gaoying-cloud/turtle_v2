@@ -42,7 +42,7 @@ SIX_SYMBOLS = [s["code"] for s in _BENCHMARK_CONFIG.get("symbols", [])]
 class BuyAndHold(bt.Strategy):
     """B1: 买入等权持有基准。
 
-    回测第一天等权买入 6 只 ETF，之后不交易。
+    回测第一天等权买入配置中的 ETF，之后不交易。
     """
 
     params = (
@@ -155,7 +155,7 @@ class ATREqualRisk(bt.Strategy):
     """B3: ATR 等风险贡献基准。
 
     仅使用第二层（ATR 仓位管理），不使用海龟入场/止损/加仓信号。
-    始终持有 6 只 ETF，仅当 ATR 变动 > 30% 时调整头寸规模。
+    始终持有配置中的 ETF，仅当 ATR 变动 > 30% 时调整头寸规模。
 
     注意：由于 ATR 需要 20 个交易日的数据预热，前 20 个 bar 跳过。
     """

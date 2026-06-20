@@ -58,7 +58,7 @@ class TurtleStrategy(bt.Strategy):
     turtle_params : dict
         海龟参数（从 config['turtle'] 读取）。
     symbols : list[str]
-        6 只海龟品种代码列表（与 self.datas 顺序一致）。
+        ETF 品种代码列表（与 self.datas 顺序一致）。
     use_55_filter : bool
         是否启用 55 日过滤（模式 B）。
     risk_per_unit : float

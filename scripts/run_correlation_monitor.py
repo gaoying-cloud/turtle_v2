@@ -304,7 +304,9 @@ def plot_correlation_timeseries(
 
     ax.set_xlabel("日期")
     ax.set_ylabel("平均两两相关系数")
-    ax.set_title(f"6 只 ETF 滚动 {len(df) + 60 - 1 if not df.empty else 60} 日两两相关性")
+    # 获取滚动窗口值用于标题
+    lookback = args.window if hasattr(args, 'window') else 60
+    ax.set_title(f"ETF 滚动 {lookback} 日两两相关性")
     ax.legend(loc="upper right", fontsize=9)
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))

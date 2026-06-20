@@ -312,7 +312,7 @@ def run_yearly_comparison(
         print()
 
     # ════════════════════════════════════════════════════════
-    #  表2: 6 只底层 ETF Buy-and-Hold 对比
+    #  表2: 底层 ETF Buy-and-Hold 对比
     # ════════════════════════════════════════════════════════
     if not etf_only:
         etf_labels = []

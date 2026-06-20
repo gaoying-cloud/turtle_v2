@@ -120,7 +120,7 @@ def run_single(
     """
     cerebro = bt.Cerebro()
 
-    # 添加数据（所有基准策略都使用相同的 6 只海龟品种）
+    # 添加数据（所有基准策略都使用相同的品种列表）
     for symbol in SIX_SYMBOLS:
         cerebro.adddata(feeds[symbol], name=symbol)
 
