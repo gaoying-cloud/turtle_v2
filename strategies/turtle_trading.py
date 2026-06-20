@@ -331,6 +331,32 @@ class TurtleStrategy(bt.Strategy):
 
         # ── Step 3: [[空仓→国债切换已移除（V5.3）]] ──
 
+        # ── 每日品种健康日志（仅暴露已有指标，不改变任何交易逻辑） ──
+        # 退化判定规则（人工监控用，策略不自动处置）：
+        #   信号 1「被拦截不进场」: 转化率 < 30% 且 信号 ≥ 5
+        #   信号 2「反复进出磨损」: 近4笔胜率 ≤ 25% 且 交易 ≥ 4
+        #   任一触发 → 人工核查该品种是否已不适合本策略
+        if len(self) % 5 == 0 and len(self) > 2:  # 每周打印一次，避免刷屏
+            has_data = any(
+                self._signal_count.get(code, 0) > 0 or
+                len([t for t in self._my_trades if t["symbol"] == code]) > 0
+                for code in self.params.symbols
+            )
+            if has_data:
+                logger.info("[健康] %12s %5s %5s %5s %8s %5s",
+                            "品种", "信号", "入场", "转化率", "近4笔胜率", "连亏")
+                for code in sorted(self.params.symbols):
+                    sig = self._signal_count.get(code, 0)
+                    ent = self._enter_count.get(code, 0)
+                    conv = f"{ent/sig*100:.0f}%" if sig > 0 else "-"
+                    code_trades = [t for t in self._my_trades if t["symbol"] == code]
+                    recent = code_trades[-4:]
+                    wins = sum(1 for t in recent if t["was_win"])
+                    recent_wr = f"{wins}/{len(recent)}={wins/len(recent)*100:.0f}%" if recent else "-"
+                    cl = self._consecutive_losses.get(code, 0)
+                    logger.info("[健康] %12s %5d %5d %5s %8s %5d",
+                                code, sig, ent, conv, recent_wr, cl)
+
     # ════════════════════════════════════════════════════════
     #  入场
     # ════════════════════════════════════════════════════════
