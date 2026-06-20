@@ -1,5 +1,15 @@
 # Changelog
 
+## [V5.8-数据复权修复] - 2026-06-20
+### 修复后复权逻辑：所有品种价格序列连续可比
+- `src/data_pipeline.py`: `_apply_factor_adjustment` — 后复权改用官方 `fund_adj` 因子，但对于拆分/合并边界处交易所已调整的 `pre_close` 字段不再直接缩放，而是在调整完 OHLC 后重算为 `close.shift(1)`，消除人工价格缺口对 ATR 等波动率指标的污染
+- `src/data_pipeline.py`: `_detect_and_adjust_splits` — 同上，拆分检测后统一重算 `pre_close = close.shift(1)`
+- `src/data_pipeline.py`: `_save_to_parquet` — 新增 `overwrite` 参数，`fetch_single(force=True)` 时覆盖旧缓存而非合并，避免新旧混合数据污染
+- `data/etf_daily/`: 全部 7 品种 Parquet 用修复后的逻辑重新拉取，价格序列 `pre_close` 与 `close.shift(1)` 完全一致，零异常
+- 回测基线重新运行：模式 A（ETF 全品种）总收益 **+127.73%**，夏普 0.3588，最大回撤 46.8%
+- 全量测试 185/185 passed ✅
+- [V5.8-数据复权修复] `已完成`
+
 ## [V5.6-删除旧P2+投票确认系统] - 2026-06-19
 ### 删除旧 P2 累计亏损冻结 + 新增投票式信号确认系统（默认关闭）
 - `strategies/turtle_trading.py`: 删除旧 P2 累计亏损金额冻结代码块（近15笔亏损≥15%封禁），该逻辑对所有品种返回相同亏损比例，存在 bug

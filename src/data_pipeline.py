@@ -281,7 +281,8 @@ def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataF
     latest_factor = adj_df["adj_factor"].iloc[-1]
     adj_map = dict(zip(adj_df["date"], adj_df["adj_factor"]))
 
-    price_cols = ["open", "high", "low", "close", "pre_close"]
+    # 调整 OHLC 价格（不含 pre_close，用复权因子等比缩放）
+    price_cols = ["open", "high", "low", "close"]
     for idx, row in df.iterrows():
         d = row["date"]
         factor = adj_map.get(d)
@@ -293,6 +294,14 @@ def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataF
         for col in price_cols:
             if col in df.columns and pd.notna(row[col]):
                 df.at[idx, col] = round(float(row[col]) * ratio, 4)
+
+    # 后复权后重新计算 pre_close = 前一日调整后 close
+    # 避免拆分/合并边界处出现人工价格缺口（pre_close 由交易所针对拆
+    # 分调整过，但调整后的 close 与交易所调整后的 pre_close 之间存在
+    # 比值突变，进而污染 ATR 等波动率指标）
+    df["pre_close"] = df["close"].shift(1)
+    # 首行无前一日的 pre_close 填 NaN
+    df.loc[df.index[0], "pre_close"] = None
 
     return df
 
@@ -327,7 +336,7 @@ def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
     if first_idx <= 0:
         return df
 
-    price_cols = ["open", "high", "low", "close", "pre_close"]
+    price_cols = ["open", "high", "low", "close"]
     for col in price_cols:
         if col in df.columns:
             df.loc[:first_idx, col] = df.loc[:first_idx, col].astype(float) * cum_factor
@@ -335,6 +344,11 @@ def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("[复权] %s: %d 个事件, 累积因子 %.4f, 调整 %d 行",
                 df.get("ts_code", df.iloc[0].get("date")), len(events),
                 cum_factor, first_idx + 1)
+
+    # 后复权后重新计算 pre_close = 前一日调整后 close
+    df["pre_close"] = df["close"].shift(1)
+    df.loc[df.index[0], "pre_close"] = None
+
     return df
 
 
@@ -355,18 +369,19 @@ def _read_local_cache(code: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def _save_to_parquet(df: pd.DataFrame, code: str):
+def _save_to_parquet(df: pd.DataFrame, code: str, overwrite: bool = False):
     """将 DataFrame 写入 Parquet 文件。
 
-    若本地已有缓存，则合并后再写入（增量更新）。
+    若本地已有缓存且 overwrite=False，则合并后再写入（增量更新）。
     """
-    # 读取现有缓存
-    existing = _read_local_cache(code)
-    if not existing.empty:
-        df = pd.concat([existing, df], ignore_index=True)
-        df.sort_values("date", inplace=True)
-        df.drop_duplicates(subset="date", keep="last", inplace=True)
-        df.reset_index(drop=True, inplace=True)
+    # 强制覆盖则不读取现有缓存
+    if not overwrite:
+        existing = _read_local_cache(code)
+        if not existing.empty:
+            df = pd.concat([existing, df], ignore_index=True)
+            df.sort_values("date", inplace=True)
+            df.drop_duplicates(subset="date", keep="last", inplace=True)
+            df.reset_index(drop=True, inplace=True)
 
     path = _parquet_path(code)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -461,7 +476,7 @@ def fetch_single(
 
     cleaned = _clean_and_standardize(raw)
     cleaned = _adjust_backward(cleaned, code)
-    _save_to_parquet(cleaned, code)
+    _save_to_parquet(cleaned, code, overwrite=force)
 
     # ── 返回请求区间数据 ──
     result = _read_local_cache(code)
