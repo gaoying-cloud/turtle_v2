@@ -80,10 +80,12 @@ risk:
   correlation_lookback: 60       # 滚动相关性计算窗口
 
   # ── 品种退化自动检测（三规则，仅报警不自动暂停） ──
+  # 触发时序：规则②最早（几周）→ 规则③（数月）→ 规则①（一年以上）
   degradation:
-    silent_annual_signals: 2.0       # 规则①：年均信号 < 此值 → 沉默型退化
-    intercept_min_signals: 5         # 规则②：最少信号数门槛
-    intercept_max_conv_pct: 0.30     # 规则②：入场/信号 ≤ 此值 → 拦截型退化
-    wear_min_trades: 3               # 规则③：最少交易数门槛
-    wear_max_loss_streak: 3          # 规则③：连亏 ≥ 此值 且 亏损额>5%
-    wear_min_loss_amount_pct: 0.05   # 规则③：近N笔亏损总额 > 初始资金 × 此值
+    silent_annual_signals: 2          # 规则①：年均信号 < 此值 → 沉默型退化
+    entry_conv_min: 0.30              # 规则②：入场/信号 ≤ 此值 → 拦截型退化
+    entry_conv_min_signals: 10        # 规则②：至少 N 个信号才判定
+    wear_window_short: 3              # 规则③：近 N 笔全亏
+    wear_window_long: 6               # 规则③：近 N 笔胜率 < 25%
+    wear_win_rate_max: 0.25           # 规则③：长窗口胜率阈值
+    wear_min_loss_pct: 0.05           # 规则③：亏损总额 > 初始资金 × 此值

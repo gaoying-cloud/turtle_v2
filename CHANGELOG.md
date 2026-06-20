@@ -1,5 +1,16 @@
 # Changelog
 
+## [V5.13-品种退化三规则自动检测] - 2026-06-20
+### 三规则自动检测 + WARNING 报警 + 可配置阈值
+- `config/turtle_config.yaml`: 新增 `risk.degradation` 节（7个参数）
+- `strategies/turtle_trading.py`: `_check_degradation()` 按②→③→①顺序自动判定
+  - 规则②—拦截型（最早触发）: 信号≥10 且 入场/信号 ≤ 30%
+  - 规则③—磨损型（第二触发）: 交易≥3 且 (近3全亏 或 近6胜率<25%) 且亏损>5%初始资金
+  - 规则①—沉默型（最后触发）: 年均信号 < 2 次
+- 退化状态变更时 WARNING/INFO 级别日志通报
+- 健康日志增加退化列，实时反映品种状态
+- 5 个 backtest 脚本同步传入 `degradation_config`
+
 ## [V5.12-去科创50+中证1000] - 2026-06-20
 ### 品种从 6 只缩减为 4 只，回撤显著改善
 - `config/turtle_config.yaml`: 删除 588000.SH(科创50) 和 159845.SZ(中证1000) 两个品种条目；`concentration_trigger` 从 4 改为 3
