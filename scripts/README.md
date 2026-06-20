@@ -41,6 +41,16 @@
 |------|------|----------|
 | `gen_report.py` | 综合报告生成（汇总各阶段结果，可选重新回测） | `py scripts/gen_report.py` `py scripts/gen_report.py --mode B --no-backtest` |
 
+##  品种筛选量化框架自动化脚本
+
+| 脚本 | 作用 | 调用示例 |
+|------|------|----------|
+| `screen_candidates.py` | 品种筛选工具 | `py scripts/screen_candidates.py` |
+
+
+
+scripts/screen_candidates.py
+
 ---
 
 ## 🗂 子目录

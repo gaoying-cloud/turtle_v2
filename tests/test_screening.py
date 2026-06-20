@@ -193,6 +193,7 @@ class TestScreenCandidate:
         assert "liquidity" in stages
         assert "trend_persistence" in stages
         assert "correlation" in stages
+        assert "t1_ratio" in stages
 
 
 class TestScreenAll:

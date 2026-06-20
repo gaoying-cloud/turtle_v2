@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-20T20:03:25.601579",
+  "timestamp": "2026-06-20T20:25:24.672686",
   "existing_universe": [
     "510500.SH",
     "159915.SZ",
@@ -8,8 +8,34 @@
   ],
   "candidates": [
     {
-      "symbol": "513100.SH",
-      "name": "纳指ETF",
+      "symbol": "588000.SH",
+      "name": "588000.SH",
+      "final_verdict": "reject",
+      "checks": [
+        {
+          "stage": "data_quality",
+          "verdict": "pass",
+          "metric_name": "worst_level",
+          "metric_value": "ok",
+          "threshold": "worst_level != critical",
+          "detail": "最高级别=ok, 交叉校验通过",
+          "elapsed_sec": 2.0
+        },
+        {
+          "stage": "listing_age",
+          "verdict": "reject",
+          "metric_name": "first_date",
+          "metric_value": "2020-09-28",
+          "threshold": "first_date <= 2018-01-01",
+          "detail": "首日 2020-09-28，晚于要求 2018-01-01（不足7年，未覆盖完整牛熊）",
+          "elapsed_sec": 0.0
+        }
+      ],
+      "stopped_at_stage": "listing_age"
+    },
+    {
+      "symbol": "159845.SZ",
+      "name": "159845.SZ",
       "final_verdict": "reject",
       "checks": [
         {
@@ -18,17 +44,17 @@
           "metric_name": "worst_level",
           "metric_value": "critical",
           "threshold": "worst_level != critical",
-          "detail": "CRITICAL: 收益率差异 93.6878% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 93.6878% > 6.0%",
-          "elapsed_sec": 2.2
+          "detail": "CRITICAL: 收益率差异 688.8817% > 2.0%; 成交量差异 99.0% > 30%; CRITICAL: 收益率差异 688.8817% > 6.0%",
+          "elapsed_sec": 1.3
         }
       ],
       "stopped_at_stage": "data_quality"
     }
   ],
   "summary": {
-    "total": 1,
+    "total": 2,
     "pass": 0,
-    "reject": 1,
+    "reject": 2,
     "warn_only": 0
   }
 }
