@@ -42,6 +42,7 @@ from src.turtle_core import (
     recent_batting_avg,
 )
 from src.risk_parity import compute_alpha_weights
+from src.market_regime import MarketRegime
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,11 @@ class TurtleStrategy(bt.Strategy):
         ("entry_mode", "breakout"),         # "breakout" | "dual"（突破+MA5金叉双模式）
         ("stop_buffer_n", 1.0),             # MA20入场模式下止损缓冲 N 值倍数
         ("degradation_config", None),       # 品种退化自动检测参数配置
+        # ── 市场状态前置过滤（降回撤） ──
+        ("use_regime_filter", False),       # 开启 MarketRegime 碎步市过滤
+        ("choppy_threshold", 0.35),         # choppy 状态判定阈值
+        ("use_trend_duration_filter", False), # 开启趋势持续时间过滤
+        ("trend_duration_min_days", 5),     # 趋势持续中位数最低天数
     )
 
     def __init__(self):
@@ -131,6 +137,14 @@ class TurtleStrategy(bt.Strategy):
         self._alpha_risk_pcts: Optional[np.ndarray] = None
         self._last_rebalance_day: Optional[date] = None
         self._last_n_values: Dict[str, float] = {}
+
+        # ── MarketRegime 实例（按品种） ──
+        self._regimes: Dict[str, MarketRegime] = {}
+        if self.params.use_regime_filter:
+            for code in self.params.symbols:
+                self._regimes[code] = MarketRegime(
+                    choppy_threshold=self.params.choppy_threshold,
+                )
 
         # ── 状态字段 ──
         self._risk_events: dict = {}
@@ -395,6 +409,13 @@ class TurtleStrategy(bt.Strategy):
         for i in range(n_symbols):
             code = self.params.symbols[i]
             data = self.datas[i]
+
+            # ── 更新 MarketRegime（choppy/trending 判断） ──
+            if self.params.use_regime_filter:
+                regime = self._regimes.get(code)
+                if regime is not None:
+                    regime.update(today, data.close[0], data.high[0], data.low[0])
+
             if not self._positions.has_position(code):
                 # 检查入场
                 self._check_entry(code, data)
@@ -522,6 +543,21 @@ class TurtleStrategy(bt.Strategy):
                 filter_low = si["entry_low_55"].iloc[idx]
                 if pd.isna(filter_low) or close >= filter_low:
                     return
+
+        # ── 市场状态门控：choppy 市不开新仓 ──
+        if self.params.use_regime_filter:
+            regime = self._regimes.get(code)
+            if regime is not None and regime.state == "choppy":
+                logger.debug("[入场] %s choppy 状态 (score=%.3f)，跳过入场", code, regime.score)
+                return
+
+        # ── 趋势持续时间门控：趋势太短不进场 ──
+        if self.params.use_trend_duration_filter:
+            td = si["trend_duration_median"].iloc[idx]
+            if not pd.isna(td) and td < self.params.trend_duration_min_days:
+                logger.debug("[入场] %s 趋势中位数 %.1fd < %dd，跳过入场",
+                             code, td, self.params.trend_duration_min_days)
+                return
 
         # ── 盈利过滤器（期货模式禁用） ──
         if self.params.use_signal_filter and not self.params.futures_mode:

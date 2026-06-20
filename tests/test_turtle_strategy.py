@@ -113,6 +113,11 @@ def strat():
         "use_sma_entry": False,
         "entry_mode": "breakout",
         "stop_buffer_n": 1.0,
+        "degradation_config": {},
+        "use_regime_filter": False,
+        "choppy_threshold": 0.35,
+        "use_trend_duration_filter": False,
+        "trend_duration_min_days": 5,
     })()
     s.datas = [MockData(), MockData()]
     s.broker = MagicMock()

@@ -601,7 +601,20 @@ class TurtleSignals:
             "sma_20": close.rolling(20).mean(),  # 20日均线
             "ma5": close.rolling(5).mean(),      # MA5（双模式入场用）
             "ma10": close.rolling(10).mean(),    # MA10（金叉判断用）
+            "hurst_252": self._rolling_hurst(close),
+            "trend_duration_median": pd.Series(trend_duration_median(close, 20), index=close.index),
         }
+
+    def _rolling_hurst(self, close: pd.Series, window: int = 252) -> pd.Series:
+        """滚动窗口 Hurst 指数（每日计算，末尾 pad 向前填充）。"""
+        values = close.values.astype(np.float64)
+        n = len(values)
+        result = np.full(n, np.nan)
+        for i in range(window, n):
+            result[i] = hurst_exponent(values[i-window:i], max_lag=40)
+        series = pd.Series(result, index=close.index)
+        series.ffill(inplace=True)
+        return series
 
 
 # ════════════════════════════════════════════════════════════
@@ -930,3 +943,20 @@ def hurst_exponent(price: np.ndarray, max_lag: int = 100) -> float:
     log_rs = np.log(np.array(rs_values))
     H = np.polyfit(log_lags, log_rs, 1)[0]
     return max(0.0, min(1.0, float(H)))
+
+
+def trend_duration_median(close: pd.Series, ma_period: int = 20) -> float:
+    """连续高于/低于均线天数的中位数。
+    值 < 5 → 趋势太短，不适合20日突破系统。
+    """
+    ma = close.rolling(ma_period, min_periods=ma_period).mean().dropna()
+    above = (close.reindex(ma.index) > ma).astype(int)
+    streaks = []; cur = 0
+    for v in above:
+        cur = cur + 1 if v else (streaks.append(cur) or 0 if cur else 0)
+    if cur: streaks.append(cur)
+    cur = 0
+    for v in above:
+        cur = cur + 1 if not v else (streaks.append(cur) or 0 if cur else 0)
+    if cur: streaks.append(cur)
+    return float(np.median(streaks)) if streaks else 0.0

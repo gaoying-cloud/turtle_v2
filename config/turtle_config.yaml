@@ -17,6 +17,11 @@ turtle:
   max_units: 4                # 最多4个单位
   unit_step: 0.5              # 每0.5N加仓一次
   use_55_filter: false        # 默认不使用55日过滤
+  # ── 市场状态前置过滤（降回撤） ──
+  regime_filter: "off"         # "off" | "choppy_only" | "trending_only"
+  choppy_threshold: 0.35       # choppy 判定阈值（< 此值=碎步市）
+  use_trend_duration_filter: false  # 趋势持续时间过滤
+  trend_duration_min_days: 5   # 趋势持续中位数最低天数
   exit_period: 10             # 10日反向突破退出
 
 # ── 三层权重配置 ──
