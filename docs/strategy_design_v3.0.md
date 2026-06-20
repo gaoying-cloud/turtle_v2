@@ -7,9 +7,11 @@ based_on: "V5.2 (2026-06-18)"
 # 跨市场ETF海龟组合策略 — 设计文件 V5.7
 
 **V5.7 变更**：
+- 新增 `src/market_regime.py` — 实盘可用的市场状态判断器，三指标融合（N值分位 + 方向效率 + N值趋势），输出 trending/choppy/transitional
+- 新增 `scripts/analyze_n_percentile.py` — 历史验证脚本，逐年计算 regime score 并与策略收益关联
 - 数据管道新增后复权处理：Tushare `fund_adj` 获取复权因子 → 后复权 OHLC，消除 ETF 份额折算/分红导致的价格跳跃
 - 备选方案：Tushare 不可用时自动降级为价格检测法（pre_close vs prev_close 跳跃检测 + 累积因子修正）
-- 对应 §2.3 数据源补充复权说明、新增 §5.2.1 复权处理详细设计
+- 对应更新 §2.3 补充复权说明、新增 §5.2.1 复权处理、新增 §5.11 市场状态判断
 
 **V5.6 变更**：
 - 删除旧 P2 累计亏损金额冻结规则（近15笔亏损≥15%封禁），该逻辑对多品种返回相同亏损比例，存在 bug
@@ -718,6 +720,63 @@ scripts/run_correlation_monitor.py
 
 ---
 
+### 5.11 市场状态判断（V5.7 新增）
+
+**`src/market_regime.py`** — 实盘可用的每日市场状态判断器。
+
+#### 设计目标
+
+识别市场处于趋势市还是碎步市，为策略切换提供依据。所有指标均无 look-ahead，每日收盘后可立即计算。
+
+#### 三子指标
+
+| 指标 | 含义 | 计算方式 |
+|:--|:--|:--|
+| `n_pct` | N 值(ATR20)历史分位 | 当日 N 在过去 252 天中的分位 |
+| `eff_20d` | 方向效率 | 近 20 日 `|净位移| / Σ|Δclose|` |
+| `n_trend` | N 值趋势 | 近 60 日 N 值线性回归斜率 |
+
+#### 融合公式
+
+```
+score = 0.4 × n_pct + 0.4 × eff_20d + 0.2 × max(n_trend_sign, 0)
+```
+
+| 状态 | score 阈值 | 含义 |
+|:--|:--|:--|
+| `trending` | > 0.60 | 趋势市，适合海龟 |
+| `transitional` | 0.35–0.60 | 过渡态 |
+| `choppy` | < 0.35 | 碎步市 |
+
+权重和阈值均可通过 `MarketRegime.__init__` 参数调整。
+
+#### API
+
+```python
+from src.market_regime import MarketRegime
+regime = MarketRegime()
+for date, close, high, low in daily_data:
+    state = regime.update(date, close, high, low)
+    print(regime.score, regime.state)
+```
+
+#### 历史验证
+
+| 年份 | score | 趋势% | 碎步% | 策略收益 |
+|:---:|:-----:|:----:|:-----:|:-------:|
+| 2021 | 0.234 | 3.7% | 77.5% | −20.47% |
+| 2022 | 0.305 | 8.4% | 65.6% | +49.08% |
+| 2023 | 0.246 | 2.1% | 75.3% | −11.99% |
+| 2024 | 0.430 | 19.7% | 35.2% | −8.10% |
+| 2025 | 0.380 | 13.1% | 46.6% | +14.98% |
+| 2026 | 0.492 | 23.1% | 18.2% | +9.21% |
+
+Score vs 策略收益斯皮尔曼相关系数：0.49。最优分割阈值 0.30（<0.30 年均 −16.23%，>0.30 年均 +16.29%，差距 +32.52%）。
+
+> **已知局限**：2022（碎步率高但赚大钱）和 2024（趋势倾向但亏钱）说明方向效率窗口（20日）对极端行情的灵敏度不足，权重和窗口可后续优化。
+
+---
+
 ## 六、风险控制体系
 
 ### 6.1 品种级止损（被动风控）
@@ -764,6 +823,7 @@ src/turtle_core.py               # ATR/唐奇安/止损/加仓（从 strategy_en
 src/risk_parity.py               # Ledoit-Wolf + α风险平价
 src/data_pipeline.py             # Tushare 数据拉取
 src/benchmarks.py                # 四种基准对比
+src/market_regime.py             # 市场状态判断器（三指标融合）
     ↑
 strategies/turtle_trading.py     # Backtrader Strategy 子类
     ↑
@@ -771,6 +831,7 @@ scripts/run_backtest.py          # 回测入口
 scripts/run_grid_search.py       # 参数网格搜索
 scripts/run_stress_test.py       # 极端情景回测
 scripts/run_comparison.py        # 基准对比
+scripts/analyze_n_percentile.py  # N 值分位历史验证
     ↑
 results/                         # 回测输出
 ```
