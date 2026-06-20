@@ -1,6 +1,7 @@
 # pre-commit 配置
 # 安装: pip install pre-commit && pre-commit install
 # 手动运行: pre-commit run --all-files
+# 跳过一次检查: git commit --no-verify
 
 repos:
   - repo: local
@@ -9,7 +10,28 @@ repos:
         name: 文档一致性校验
         description: 检查设计文档与代码文件的状态一致性（版本号、路径、阶段状态）
         entry: py scripts/check_consistency.py
-        language: python
+        language: system
         always_run: true
         pass_filenames: false
-        stages: [commit]
+        stages: [pre-commit]
+
+      - id: pytest-quick
+        name: 快速测试 (pytest)
+        description: 提交前运行 pytest 快速模式，确保无回归
+        entry: py -m pytest tests/ -q --tb=short -x
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-commit]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+        name: YAML 语法检查
+        args: [--unsafe]
+      - id: end-of-file-fixer
+        name: 文件尾换行符检查
+      - id: trailing-whitespace
+        name: 行尾空白检查
+        args: [--markdown-linebreak-ext=md]

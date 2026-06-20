@@ -3,7 +3,7 @@
 
 用法：
     from src.market_regime import MarketRegime
-    
+
     regime = MarketRegime()
     for date, close, high, low in data:
         state = regime.update(date, close, high, low)
@@ -24,7 +24,7 @@ class MarketRegime:
         n_pct      — N 值(ATR20)在历史 252 天中的分位
         eff_20d    — 最近 20 日的价格方向效率 = |move|/|path|
         n_trend    — 最近 60 日 N 值是扩张还是收缩
-    
+
     融合 score = w_n × n_pct + w_eff × eff_20d + w_trend × n_trend_sign
     输出 state: "trending" | "choppy" | "transitional"
     """

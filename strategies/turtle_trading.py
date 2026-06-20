@@ -363,12 +363,12 @@ class TurtleStrategy(bt.Strategy):
 
         # ── 判断方向（多头） ──
         entry_source = None  # "breakout" | "ma5_golden"
-        
+
         if self.params.entry_mode == "dual":
             # 双模式：A) 20日高点突破  OR  B) MA10>MA20 且 close>MA10
             entry_high = si["entry_high_20"].iloc[idx]
             is_long_a = pd.notna(entry_high) and close > entry_high
-            
+
             ma10 = si.get("ma10")
             ma20 = si.get("sma_20")
             is_long_b = False
@@ -377,7 +377,7 @@ class TurtleStrategy(bt.Strategy):
                 m20 = ma20.iloc[idx]
                 if not pd.isna(m10) and not pd.isna(m20):
                     is_long_b = m10 > m20 and close > m10
-            
+
             if is_long_a:
                 entry_source = "breakout"
                 is_long = True
