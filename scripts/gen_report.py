@@ -57,6 +57,16 @@ SIX_SYMBOLS = get_trading_symbols(_CONFIG)
 BOND_SYMBOL = get_bond_symbol(_CONFIG)
 ALL_SYMBOLS = get_all_symbols(_CONFIG)
 
+# 品种名称映射
+SYMBOL_NAMES = {
+    "510500.SH": "中证500",
+    "159845.SZ": "中证1000",
+    "159915.SZ": "创业板",
+    "588000.SH": "科创50",
+    "513100.SH": "纳指ETF",
+    "518880.SH": "黄金ETF",
+}
+
 
 # ════════════════════════════════════════════════════════════
 #  1. 数据加载
@@ -183,6 +193,7 @@ def run_backtest_with_best(params: dict, start_date: str = "2020-01-01",
         atr_change_threshold=config["weighting"]["atr_change_threshold"],
         shortable_symbols=get_shortable_symbols(config),
         t_plus_one_symbols=get_t_plus_one_symbols(config),
+        degradation_config=config["risk"].get("degradation", {}),
     )
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
@@ -444,8 +455,12 @@ def main():
     df_full = load_grid_results()
     df_oos = load_oos_results()
 
+    with open(CONFIG_PATH, "r", encoding="utf-8") as _cfg_f:
+        _cfg = yaml.safe_load(_cfg_f)
     if args.no_backtest:
-        metrics = {"mode": args.mode, "start_date": args.start, "end_date": args.end, "initial_cash": 200000,
+        metrics = {"mode": args.mode, "start_date": args.start, "end_date": args.end,
+                   "initial_cash": _cfg.get("initial_cash", 120000),
+                   "final_value": 0, "total_return": 0, "cagr": 0, "sharpe": None, "max_drawdown": 0,
                    "final_value": 0, "total_return": 0, "cagr": 0, "sharpe": None, "max_drawdown": 0,
                    "win_rate": 0, "profit_factor": 0, "total_trades": 0, "annual_vol": 0, "calmar": 0,
                    "concentration_cut": 0, "dd_warning": 0, "loss_pause": 0, "t1_stop_delay": 0}
@@ -453,6 +468,13 @@ def main():
         metrics = run_backtest_with_best(best, args.start, args.end, args.mode)
         if not metrics:
             logger.error("回测失败"); sys.exit(1)
+
+    # 提取策略的品种级数据
+    from src.turtle_core import recent_batting_avg
+    per_symbol = {}
+    if not args.no_backtest:
+        strat_cache = None  # would need to capture from run
+
 
     report = generate_report(metrics, df_full, df_oos, args.mode, args.start, args.end)
     output_path.write_text(report, encoding="utf-8")

@@ -8,11 +8,11 @@ import sys, logging, yaml, pandas as pd, numpy as np
 from pathlib import Path
 logging.disable(logging.CRITICAL)
 import warnings; warnings.filterwarnings('ignore')
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import backtrader as bt
 from strategies.turtle_trading import TurtleStrategy
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 with open(ROOT/"config/turtle_config.yaml","r",encoding="utf-8") as f:
     config = yaml.safe_load(f)
 

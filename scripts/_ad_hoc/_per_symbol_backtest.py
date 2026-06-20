@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 logging.disable(logging.CRITICAL)
 warnings.filterwarnings("ignore")
@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore")
 import backtrader as bt
 from strategies.turtle_trading import TurtleStrategy
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_PATH = ROOT / "config" / "turtle_config.yaml"
 DATA_DIR = ROOT / "data" / "etf_daily"
 
