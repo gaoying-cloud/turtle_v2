@@ -181,7 +181,9 @@ def run_backtest(
     kline_min_body: float = 0.4,
     p2_loss_ratio: float = 0.75,
     use_signal_filter: bool = True,
-    p2_mode: str = "batting_avg",
+    entry_mode: str = "breakout",
+    stop_buffer_n: float = 1.0,
+    p2_mode: str = "none",
     p2_batting_window: int = 4,
 ) -> Optional[dict]:
     """运行海龟策略回测。
@@ -300,6 +302,8 @@ def run_backtest(
         kline_min_body=kline_min_body,
         p2_loss_ratio=p2_loss_ratio,
         use_signal_filter=use_signal_filter,
+        entry_mode=entry_mode,
+        stop_buffer_n=stop_buffer_n,
         p2_mode=p2_mode,
         p2_batting_window=p2_batting_window,
     )
@@ -433,6 +437,7 @@ def run_yearly_breakdown(
     mode: str = "A",
     t0_only: bool = False,
     futures: bool = False,
+    entry_mode: str = "breakout",
 ) -> None:
     """按年独立回测，输出各年度指标对比表。
 
@@ -465,6 +470,7 @@ def run_yearly_breakdown(
             t0_only=t0_only,
             futures=futures,
             quiet=True,
+            entry_mode=entry_mode,
         )
         if result is None:
             # 数据不足，跳过
@@ -601,6 +607,13 @@ def main():
         default=False,
         help="按年拆分回测，输出各年度指标对比表",
     )
+    parser.add_argument(
+        "--entry-mode",
+        type=str,
+        choices=["breakout", "dual"],
+        default="breakout",
+        help="入场模式: breakout=20日高点突破(默认), dual=突破+MA5金叉双模式",
+    )
 
     args = parser.parse_args()
 
@@ -620,6 +633,7 @@ def main():
             mode=args.mode,
             t0_only=args.t0_only,
             futures=args.futures,
+            entry_mode=args.entry_mode,
         )
         return
 
@@ -632,6 +646,7 @@ def main():
         verbose=args.verbose,
         t0_only=args.t0_only,
         futures=args.futures,
+        entry_mode=args.entry_mode,
     )
 
     if result is None:

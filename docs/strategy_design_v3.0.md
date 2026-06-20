@@ -1,10 +1,15 @@
 ---
-version: "5.6"
+version: "5.7"
 date: "2026-06-19"
 based_on: "V5.2 (2026-06-18)"
 ---
 
-# 跨市场ETF海龟组合策略 — 设计文件 V5.6
+# 跨市场ETF海龟组合策略 — 设计文件 V5.7
+
+**V5.7 变更**：
+- 数据管道新增后复权处理：Tushare `fund_adj` 获取复权因子 → 后复权 OHLC，消除 ETF 份额折算/分红导致的价格跳跃
+- 备选方案：Tushare 不可用时自动降级为价格检测法（pre_close vs prev_close 跳跃检测 + 累积因子修正）
+- 对应 §2.3 数据源补充复权说明、新增 §5.2.1 复权处理详细设计
 
 **V5.6 变更**：
 - 删除旧 P2 累计亏损金额冻结规则（近15笔亏损≥15%封禁），该逻辑对多品种返回相同亏损比例，存在 bug
@@ -163,6 +168,8 @@ based_on: "V5.2 (2026-06-18)"
 | Baostock（备选源） | ✅ 已验证 | A 股 ETF 日线可获取，跨境 ETF 不可用 |
 | yfinance | ⏳ 待验证 | 跨境数据应急源，国内网络稳定性未知 |
 
+> **复权处理**：Tushare `fund_daily` 返回的价格为不复权数据。数据管道在清洗后自动调用 `fund_adj` 接口获取复权因子，以最新日期为基准做**后复权**（backward adjustment），消除 ETF 份额折算/分拆/合并对历史价格的跳跃影响。若 `fund_adj` 不可用，降级为价格跳跃检测法（对比 pre_close 与昨日 close）。详见 §5.2.1。
+
 ### 2.4 交易日历方案
 
 每个品种使用**自己的交易日历**独立推进。在 Backtrader 中按各自的时间轴加载数据，仅在信号合并/仓位计算的时刻对齐到同一时间戳。若某品种当日无交易数据（非交易日），该品种维持上一日状态，不产生信号。
@@ -306,6 +313,28 @@ based_on: "V5.2 (2026-06-18)"
 |:--|:--|
 | A 股 ETF | Tushare Pro (fund_daily) |
 | 跨境 ETF | Tushare fund_daily |
+
+### 5.2.1 复权处理（V5.7 新增）
+
+ETF 日线原始数据来自 Tushare `fund_daily`，该接口返回**不复权**价格。ETF 在存续期内可能发生份额折算（拆分/合并）和分红，导致历史价格出现非交易性跳跃。
+
+**复权方案：后复权（Backward Adjustment）**
+
+以最新交易日为基准，将历史 OHLC 等比例缩放：
+
+```
+adjusted_price[t] = raw_price[t] × (latest_adj_factor / adj_factor[t])
+```
+
+**实现流程**（`src/data_pipeline.py`）：
+
+1. `_fetch_adj_factors(code)` — 从 Tushare `fund_adj` 拉取复权因子序列
+2. `_apply_factor_adjustment(df, adj_df)` — 应用后复权，跳过因子变化 < 0.1% 的日期
+3. 若 `fund_adj` 不可用（token 缺失/接口异常），降级为 `_detect_and_adjust_splits(df)` — 检测 pre_close 与昨日 close 比值偏离 ±15% 的事件，累积因子修正
+
+**品种覆盖**：全部 7 只 ETF（含国债）。期货无分红拆分，不适用。
+
+**影响**：未复权的数据会导致大比例拆分日出现虚假涨跌，海龟策略可能产生错误的入场/止损信号，历史回测收益被拆分事件污染。
 
 ### 5.3 交易日历处理
 
@@ -779,7 +808,7 @@ results/                         # 回测输出
 | 阶段 | 任务 | 周期 | 交付物 | 状态 |
 |:--|:--|:--|:--|:--:|
 | **S0** | 项目骨架搭建 | 即时 | 项目结构 + 管控模型 + 配置 | ✅ |
-| **S1** | 数据管道 | 0.5天 | src/data_pipeline.py + scripts/pull_data.py | ✅ |
+| **S1** | 数据管道 | 0.5天 | src/data_pipeline.py + scripts/pull_data.py | ✅ 含后复权 |
 | **S2** | 海龟核心移植 | 1天 | src/turtle_core.py（从 strategy_engine.py 提取） | ✅ |
 | **S3** | Backtrader 策略层 | 1天 | strategies/turtle_trading.py + scripts/run_backtest.py | ✅ |
 | **S4** | 风险平价权重 | 1天 | src/risk_parity.py | ✅ |

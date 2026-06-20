@@ -238,6 +238,106 @@ def _clean_and_standardize(raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _adjust_backward(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    """后复权处理：优先使用 Tushare fund_adj 官方因子，不可用时用价格检测。
+
+    后复权以最新日期为基准，等比缩放历史 OHLC，使价格连续可比的。
+    """
+    adj_df = _fetch_adj_factors(code)
+    if not adj_df.empty:
+        return _apply_factor_adjustment(df, adj_df)
+    return _detect_and_adjust_splits(df)
+
+
+def _fetch_adj_factors(code: str) -> pd.DataFrame:
+    """从 Tushare fund_adj 拉取复权因子。"""
+    try:
+        import tushare as ts
+        import os
+        token = os.environ.get("TUSHARE_TOKEN")
+        if not token:
+            return pd.DataFrame()
+        ts.set_token(token)
+        pro = ts.pro_api()
+        adj = pro.fund_adj(ts_code=code)
+        if adj is None or adj.empty:
+            return pd.DataFrame()
+        adj = adj.rename(columns={"trade_date": "date"})
+        adj["date"] = pd.to_datetime(adj["date"], format="%Y%m%d")
+        adj = adj.sort_values("date").reset_index(drop=True)
+        logger.info("[%s] 拉取复权因子 %d 条", code, len(adj))
+        return adj
+    except Exception as e:
+        logger.warning("[%s] 拉取复权因子失败: %s，使用价格检测法", code, e)
+        return pd.DataFrame()
+
+
+def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataFrame:
+    """用官方复权因子做后复权：最新日因子为基准，等比缩放历史价格。"""
+    if adj_df.empty or df.empty:
+        return df
+
+    df = df.sort_values("date").reset_index(drop=True)
+    latest_factor = adj_df["adj_factor"].iloc[-1]
+    adj_map = dict(zip(adj_df["date"], adj_df["adj_factor"]))
+
+    price_cols = ["open", "high", "low", "close", "pre_close"]
+    for idx, row in df.iterrows():
+        d = row["date"]
+        factor = adj_map.get(d)
+        if factor is None or factor <= 0:
+            continue
+        ratio = latest_factor / factor
+        if abs(ratio - 1) < 0.001:
+            continue
+        for col in price_cols:
+            if col in df.columns and pd.notna(row[col]):
+                df.at[idx, col] = round(float(row[col]) * ratio, 4)
+
+    return df
+
+
+def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
+    """检测并修正基金拆分/合并事件（后复权）。
+
+    通过对比 pre_close[t] 与 close[t-1] 的比值来检测。
+    正常日比值接近 1.0，拆分日会大幅偏离。
+    将所有事件前的价格乘以累积调整因子，使历史与当前在同一基准。
+    """
+    df = df.sort_values("date").reset_index(drop=True)
+
+    events = []  # [(date_index, factor)]
+    for i in range(1, len(df)):
+        prev_close = df.loc[i - 1, "close"]
+        curr_pre = df.loc[i, "pre_close"]
+        if prev_close <= 0:
+            continue
+        ratio = curr_pre / prev_close
+        if abs(ratio - 1) > 0.15:
+            events.append((i, ratio))
+
+    if not events:
+        return df
+
+    cum_factor = 1.0
+    for _, factor in events:
+        cum_factor *= factor
+
+    first_idx = events[0][0] - 1  # 第一个事件的前一天
+    if first_idx <= 0:
+        return df
+
+    price_cols = ["open", "high", "low", "close", "pre_close"]
+    for col in price_cols:
+        if col in df.columns:
+            df.loc[:first_idx, col] = df.loc[:first_idx, col].astype(float) * cum_factor
+
+    logger.info("[复权] %s: %d 个事件, 累积因子 %.4f, 调整 %d 行",
+                df.get("ts_code", df.iloc[0].get("date")), len(events),
+                cum_factor, first_idx + 1)
+    return df
+
+
 # ════════════════════════════════════════════════════════════
 #  本地 Parquet 缓存
 # ════════════════════════════════════════════════════════════
@@ -360,6 +460,7 @@ def fetch_single(
         return pd.DataFrame()
 
     cleaned = _clean_and_standardize(raw)
+    cleaned = _adjust_backward(cleaned, code)
     _save_to_parquet(cleaned, code)
 
     # ── 返回请求区间数据 ──

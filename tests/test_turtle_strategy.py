@@ -109,6 +109,9 @@ def strat():
         "p2_loss_ratio": 0.75,
         "p2_batting_window": 4,
         "use_signal_filter": True,
+        "use_sma_entry": False,
+        "entry_mode": "breakout",
+        "stop_buffer_n": 1.0,
     })()
     s.datas = [MockData(), MockData()]
     s.broker = MagicMock()

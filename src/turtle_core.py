@@ -521,6 +521,7 @@ class Position:
     n_at_entry: float = 0.0           # 入场时的 N 值
     base_price: float = 0.0           # 初始入场价（加仓基准点）
     holding_days: int = 0
+    entry_mode: str = "breakout"      # "breakout" | "ma20_cross"（决定止损方式）
 
     @property
     def total_shares(self) -> int:
@@ -597,6 +598,9 @@ class TurtleSignals:
             "trail_high_10": trail_high_close(close, self.stop_period),
             "trail_low_10": trail_low_close(close, self.stop_period),
             "sma_50": close.rolling(50).mean(),  # 50日均线（趋势判断用）
+            "sma_20": close.rolling(20).mean(),  # 20日均线
+            "ma5": close.rolling(5).mean(),      # MA5（双模式入场用）
+            "ma10": close.rolling(10).mean(),    # MA10（金叉判断用）
         }
 
 
@@ -663,6 +667,7 @@ class TurtlePositions:
         shares: int = 0,
         n_at_entry: float = 0.0,
         stop_loss: float = 0.0,
+        entry_mode: str = "breakout",
     ) -> Position:
         """开新仓。
 
@@ -684,6 +689,7 @@ class TurtlePositions:
             n_at_entry=n_at_entry,
             stop_loss=stop_loss,
             base_price=entry_price,
+            entry_mode=entry_mode,
         )
         self._positions[symbol] = position
         logger.info("[开仓] %s system=%s price=%.4f shares=%d units=1",

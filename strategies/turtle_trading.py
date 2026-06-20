@@ -100,6 +100,9 @@ class TurtleStrategy(bt.Strategy):
         ("p2_loss_ratio", 0.75),           # batting 模式：允许最大亏损占比
         ("p2_batting_window", 4),          # batting 模式：观察窗口
         ("use_signal_filter", True),       # 是否启用 SignalFilter 盈利过滤器
+        ("use_sma_entry", False),           # 使用20日均线替代20日高点作为入场信号
+        ("entry_mode", "breakout"),         # "breakout" | "dual"（突破+MA5金叉双模式）
+        ("stop_buffer_n", 1.0),             # MA20入场模式下止损缓冲 N 值倍数
     )
 
     def __init__(self):
@@ -357,9 +360,37 @@ class TurtleStrategy(bt.Strategy):
         if pd.isna(n) or n <= 0:
             return
 
-        # ── 判断方向（多头或空头） ──
-        entry_high = si["entry_high_20"].iloc[idx]
-        is_long = pd.notna(entry_high) and close > entry_high
+        # ── 判断方向（多头） ──
+        entry_source = None  # "breakout" | "ma5_golden"
+        
+        if self.params.entry_mode == "dual":
+            # 双模式：A) 20日高点突破  OR  B) MA10>MA20 且 close>MA10
+            entry_high = si["entry_high_20"].iloc[idx]
+            is_long_a = pd.notna(entry_high) and close > entry_high
+            
+            ma10 = si.get("ma10")
+            ma20 = si.get("sma_20")
+            is_long_b = False
+            if ma10 is not None and ma20 is not None and idx >= 20:
+                m10 = ma10.iloc[idx]
+                m20 = ma20.iloc[idx]
+                if not pd.isna(m10) and not pd.isna(m20):
+                    is_long_b = m10 > m20 and close > m10
+            
+            if is_long_a:
+                entry_source = "breakout"
+                is_long = True
+            elif is_long_b:
+                entry_source = "ma10_golden"
+                is_long = True
+            else:
+                is_long = False
+        else:
+            # 标准模式：20日高点突破
+            entry_high = si["entry_high_20"].iloc[idx]
+            is_long = pd.notna(entry_high) and close > entry_high
+            if is_long:
+                entry_source = "breakout"
         entry_low_20 = si.get("entry_low_20")
         is_short = False
         if entry_low_20 is not None and code in self.params.shortable_symbols:
@@ -531,6 +562,7 @@ class TurtleStrategy(bt.Strategy):
             shares=shares,
             n_at_entry=n,
             stop_loss=0.0,
+            entry_mode=entry_source or "breakout",
         )
         if code in self.params.t_plus_one_symbols:
             self._buy_today[code] = True
@@ -564,10 +596,23 @@ class TurtleStrategy(bt.Strategy):
             if not pd.isna(stop_high) and high >= stop_high:
                 return True
         else:
-            # 10日向下突破退出（唯一退出规则）
-            stop_low = si["stop_low_10"].iloc[idx]
-            if not pd.isna(stop_low) and low <= stop_low:
-                return True
+            ep = getattr(pos, "entry_mode", "breakout")
+            if ep == "ma10_golden":
+                # B 入场：仅 MA20 止损，不走 10 日低点
+                ma20 = si.get("sma_20")
+                if ma20 is not None and not pd.isna(ma20.iloc[idx]):
+                    c = data.close[0]
+                    if pos.direction == "long":
+                        if c < ma20.iloc[idx]:
+                            return True
+                    else:
+                        if c > ma20.iloc[idx]:
+                            return True
+            else:
+                # A 入场：10 日反向突破退出
+                stop_low = si["stop_low_10"].iloc[idx]
+                if not pd.isna(stop_low) and low <= stop_low:
+                    return True
 
         return False
 
