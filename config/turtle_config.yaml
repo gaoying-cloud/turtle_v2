@@ -78,3 +78,12 @@ risk:
   pause_days: 5                  # 暂停交易天数
   correlation_warning: 0.6       # 60日滚动平均相关系数预警阈值
   correlation_lookback: 60       # 滚动相关性计算窗口
+
+  # ── 品种退化自动检测（三规则，仅报警不自动暂停） ──
+  degradation:
+    silent_annual_signals: 2.0       # 规则①：年均信号 < 此值 → 沉默型退化
+    intercept_min_signals: 5         # 规则②：最少信号数门槛
+    intercept_max_conv_pct: 0.30     # 规则②：入场/信号 ≤ 此值 → 拦截型退化
+    wear_min_trades: 3               # 规则③：最少交易数门槛
+    wear_max_loss_streak: 3          # 规则③：连亏 ≥ 此值 且 亏损额>5%
+    wear_min_loss_amount_pct: 0.05   # 规则③：近N笔亏损总额 > 初始资金 × 此值

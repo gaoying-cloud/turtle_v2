@@ -38,7 +38,8 @@ cerebro.addstrategy(TurtleStrategy,
     shortable_symbols={"513100.SH","518880.SH"},
     t_plus_one_symbols={"510500.SH","159915.SZ"},
     futures_mode=False, multipliers={}, min_unit=100,
-    min_confirmations=0, use_signal_filter=True, p2_mode="none")
+    min_confirmations=0, use_signal_filter=True, p2_mode="none",
+    degradation_config={})
 cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
 
 results = cerebro.run()

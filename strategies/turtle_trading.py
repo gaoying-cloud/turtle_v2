@@ -104,6 +104,7 @@ class TurtleStrategy(bt.Strategy):
         ("use_sma_entry", False),           # 使用20日均线替代20日高点作为入场信号
         ("entry_mode", "breakout"),         # "breakout" | "dual"（突破+MA5金叉双模式）
         ("stop_buffer_n", 1.0),             # MA20入场模式下止损缓冲 N 值倍数
+        ("degradation_config", None),       # 品种退化自动检测参数配置
     )
 
     def __init__(self):
@@ -148,6 +149,7 @@ class TurtleStrategy(bt.Strategy):
         self._pause_reject_count: Dict[str, int] = {}    # 风控暂停拒绝次数
         self._loss_lockout_count: Dict[str, int] = {}    # 累计亏损封禁次数
         self._risk_reject_count: Dict[str, int] = {}     # 敞口校验拒绝次数
+        self._degraded_symbols: Dict[str, str] = {}  # 已退化品种及原因
         self._enter_count: Dict[str, int] = {}           # 实际入场次数
 
     def _next_idx(self, code: str) -> int:
@@ -281,6 +283,79 @@ class TurtleStrategy(bt.Strategy):
                         self.params.alpha, rp_str)
 
     # ════════════════════════════════════════════════════════
+    #  品种退化自动检测（三规则）
+    # ════════════════════════════════════════════════════════
+
+    def _check_degradation(self):
+        """检测每个品种是否满足退化条件（仅报警，不自动暂停交易）。
+
+        规则①—沉默型: 年均信号 < threshold（符号长期无信号）
+        规则②—拦截型: 信号 ≥ min_sig 且 入场/信号 ≤ max_conv_pct
+        规则③—磨损型: 交易 ≥ min_ta 且 (近N笔全亏 或 近2N笔胜率<25%) 且亏损额>阈值
+        """
+        dc = self.params.degradation_config
+        if not dc:
+            return
+
+        annual_min = dc.get("silent_annual_signals", 2.0)
+        intercept_min = dc.get("intercept_min_signals", 5)
+        intercept_max = dc.get("intercept_max_conv_pct", 0.30)
+        wear_min = dc.get("wear_min_trades", 3)
+        wear_streak = dc.get("wear_max_loss_streak", 3)
+        wear_min_pct = dc.get("wear_min_loss_amount_pct", 0.05)
+
+        for code in self.params.symbols:
+            reasons = []
+
+            # ── 规则①：沉默型 ──
+            sig = self._signal_count.get(code, 0)
+            n_bars = len(self._signals.get(code, {}).get("n", []))
+            years = n_bars / 252
+            annual_sig = sig / years if years > 0 else 0
+            if years >= 2 and annual_sig < annual_min:
+                reasons.append(f"沉默①(年均{annual_sig:.1f}<{annual_min})")
+
+            # ── 规则②：拦截型 ──
+            ent = self._enter_count.get(code, 0)
+            conv = ent / sig if sig > 0 else 0
+            if sig >= intercept_min and conv <= intercept_max:
+                reasons.append(f"拦截②({sig}信{ent}入转化率{conv:.0%}≤{intercept_max:.0%})")
+
+            # ── 规则③：磨损型 ──
+            code_trades = [t for t in self._my_trades if t["symbol"] == code]
+            n_trades = len(code_trades)
+            if n_trades >= wear_min:
+                # 近 N 笔全亏
+                recent_n = code_trades[-wear_streak:]
+                recent_n_loss_all = all(not t["was_win"] for t in recent_n)
+                # 近 2N 笔胜率 < 25%
+                recent_2n = code_trades[-wear_streak * 2:]
+                recent_2n_win_rate = sum(1 for t in recent_2n if t["was_win"]) / len(recent_2n) if recent_2n else 1.0
+                # 亏损总额超过阈值（取触发规则的窗口）
+                if recent_n_loss_all:
+                    loss_total = abs(sum(t["pnl"] for t in recent_n if not t["was_win"]))
+                elif recent_2n_win_rate < 0.25:
+                    loss_total = abs(sum(t["pnl"] for t in recent_2n if not t["was_win"]))
+                else:
+                    loss_total = 0
+                equity = self._equity() if hasattr(self, '_equity') else self.broker.getvalue()
+                loss_pct = loss_total / equity if equity > 0 else 0
+
+                if (recent_n_loss_all or recent_2n_win_rate < 0.25) and loss_pct > wear_min_pct:
+                    detail = "全亏" if recent_n_loss_all else f"近{wear_streak*2}笔胜率{recent_2n_win_rate:.0%}"
+                    reasons.append(f"磨损③({n_trades}笔{detail}亏{loss_pct:.1%}本金)")
+
+            # ── 更新退化状态 ──
+            old_reason = self._degraded_symbols.get(code, "")
+            new_status = "; ".join(reasons) if reasons else ""
+            if new_status != old_reason:
+                self._degraded_symbols[code] = new_status
+                if new_status:
+                    logger.warning("[退化] %s → %s", code, new_status)
+                elif old_reason:
+                    logger.info("[退化] %s → 已恢复（无退化信号）", code)
+
+    # ════════════════════════════════════════════════════════
     #  next() — 逐日迭代
     # ════════════════════════════════════════════════════════
 
@@ -331,12 +406,15 @@ class TurtleStrategy(bt.Strategy):
 
         # ── Step 3: [[空仓→国债切换已移除（V5.3）]] ──
 
-        # ── 每日品种健康日志（仅暴露已有指标，不改变任何交易逻辑） ──
-        # 退化判定三规则（人工监控用，策略不自动处置）：
-        #   规则①—沉默型: 年均信号 < 2 次（新品种上市不满2年跳过）
-        #   规则②—拦截型: 信号 ≥ 5 且 入场/信号 ≤ 30%
-        #   规则③—磨损型: 交易 ≥ 4 且 近4笔胜率 < 25%（近3笔全亏也可预警）
-        #   任一触发 → 人工核查该品种是否已不适合本策略
+        # ── Step 4: 品种退化自动检测 ──
+        if len(self) % 5 == 0:
+            self._check_degradation()
+
+        # ── 每周健康日志 ──
+        # 退化判定三规则（配置项位于 config.yaml risk.degradation）：
+        #   规则①—沉默型: 年均信号 < silent_annual_signals
+        #   规则②—拦截型: 信号 ≥ intercept_min_signals 且 入场/信号 ≤ intercept_max_conv_pct
+        #   规则③—磨损型: 交易 ≥ wear_min_trades 且 (近 wear_max_loss_streak 笔全亏 或 近2倍笔数胜率<25%) 且亏损额> wear_min_loss_amount_pct
         if len(self) % 5 == 0 and len(self) > 2:  # 每周打印一次，避免刷屏
             has_data = any(
                 self._signal_count.get(code, 0) > 0 or
@@ -344,8 +422,8 @@ class TurtleStrategy(bt.Strategy):
                 for code in self.params.symbols
             )
             if has_data:
-                logger.info("[健康] %12s %5s %5s %5s %8s %5s",
-                            "品种", "信号", "入场", "转化率", "近4笔胜率", "连亏")
+                logger.info("[健康] %12s %5s %5s %5s %8s %5s  %s",
+                            "品种", "信号", "入场", "转化率", "近4笔胜率", "连亏", "退化")
                 for code in sorted(self.params.symbols):
                     sig = self._signal_count.get(code, 0)
                     ent = self._enter_count.get(code, 0)
@@ -355,8 +433,9 @@ class TurtleStrategy(bt.Strategy):
                     wins = sum(1 for t in recent if t["was_win"])
                     recent_wr = f"{wins}/{len(recent)}={wins/len(recent)*100:.0f}%" if recent else "-"
                     cl = self._consecutive_losses.get(code, 0)
-                    logger.info("[健康] %12s %5d %5d %5s %8s %5d",
-                                code, sig, ent, conv, recent_wr, cl)
+                    degraded = self._degraded_symbols.get(code, "")
+                    logger.info("[健康] %12s %5d %5d %5s %8s %5d  %s",
+                                code, sig, ent, conv, recent_wr, cl, degraded)
 
     # ════════════════════════════════════════════════════════
     #  入场

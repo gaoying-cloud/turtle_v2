@@ -40,7 +40,8 @@ def run_yearly(year):
         alpha=0.05, cov_lookback_days=252, rebalance_quarterly=True, atr_change_threshold=0.30,
         shortable_symbols={"513100.SH","518880.SH"}, t_plus_one_symbols={"510500.SH","159915.SZ"},
         futures_mode=False, multipliers={}, min_unit=100,
-        min_confirmations=0, use_signal_filter=True, p2_mode="none", p2_batting_window=4)
+        min_confirmations=0, use_signal_filter=True, p2_mode="none", p2_batting_window=4,
+        degradation_config={})
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="dd")
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")

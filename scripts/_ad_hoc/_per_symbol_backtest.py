@@ -76,6 +76,7 @@ for code in codes:
         use_signal_filter=True,
         p2_mode="none",
         p2_batting_window=4,
+        degradation_config={},
     )
 
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)

@@ -299,6 +299,7 @@ def run_backtest(
         stop_buffer_n=stop_buffer_n,
         p2_mode=p2_mode,
         p2_batting_window=p2_batting_window,
+        degradation_config=config["risk"].get("degradation", {}),
     )
 
     # ── 添加分析器 ──
