@@ -1,5 +1,13 @@
 # Changelog
 
+## [V5.14-最终定案：关闭做空] - 2026-06-20
+### 回撤从 38% 降至 12%，策略达到可交易状态
+- `config/turtle_config.yaml`: 所有品种 `shortable: true` → `false`
+- 根因：做空端持续亏损（纳指空 0% 胜率亏 16k，黄金空 40% 胜率亏 31k）
+- RSI/布林带、market_regime、Hurst、趋势中位数等过滤器全部实验确认无效
+- 最终绩效：CAGR 9.51% / MDD 12.32% / Calmar 0.77
+- 对比原基线：MDD -25.8pp, Calmar +54%
+
 ## [V5.13-品种退化三规则自动检测] - 2026-06-20
 ### 三规则自动检测 + WARNING 报警 + 可配置阈值
 - `config/turtle_config.yaml`: 新增 `risk.degradation` 节（7个参数）
