@@ -116,10 +116,6 @@ class TurtleStrategy(bt.Strategy):
         ("hurst_min", 0.50),                # H < 此值拒绝入场（均值回归）
         ("use_rsi_filter", False),          # 开启 RSI/布林带过度延伸过滤
         ("rsi_overbought", 70),             # RSI 超买阈值（>此值且触及布林带上轨→过滤）
-        # ── 做空两级共振参数 ──
-        ("short_bear_ma_period", 120),      # 熊市确认：价格需在半年线下方
-        ("short_deviation_pct", 15.0),      # 极端超买：乖离率 > 此值
-        ("short_rsi_overbought", 80),       # RSI 超买阈值（>此值后死叉→做空）
     )
 
     def __init__(self):
@@ -549,32 +545,7 @@ class TurtleStrategy(bt.Strategy):
         if entry_low_20 is not None and code in self.params.shortable_symbols:
             el = entry_low_20.iloc[idx]
             if pd.notna(el) and close < el:
-                # ── 做空两级共振过滤 ──
-                allow_short = True
-
-                # 1) 熊市确认：close 必须在半年线下方
-                sma_120 = si.get("sma_120")
-                if sma_120 is not None:
-                    s120 = sma_120.iloc[idx]
-                    if pd.notna(s120) and close > s120:
-                        allow_short = False
-
-                # 2) 极端超买拐头：乖离率 > 阈值 AND RSI 从超买区死叉向下
-                if allow_short:
-                    dev = si.get("deviation_sma20")
-                    rsi = si.get("rsi_14")
-                    if dev is not None and rsi is not None:
-                        d = dev.iloc[idx]
-                        r = rsi.iloc[idx]
-                        r_prev = rsi.iloc[idx - 1] if idx > 0 else None
-                        if (pd.isna(d) or d < self.params.short_deviation_pct
-                            or pd.isna(r) or pd.isna(r_prev)
-                            or r_prev <= self.params.short_rsi_overbought
-                            or r >= r_prev):
-                            allow_short = False
-
-                if allow_short:
-                    is_short = True
+                is_short = True
         if not is_long and not is_short:
             return
 

@@ -607,8 +607,6 @@ class TurtleSignals:
             "rsi_14": self._rsi(close, 14),
             "bb_upper_20": close.rolling(20).mean() + 2 * close.rolling(20).std(),
             "bb_lower_20": close.rolling(20).mean() - 2 * close.rolling(20).std(),
-            "sma_120": close.rolling(120).mean(),  # 半年线（做空熊市确认）
-            "deviation_sma20": (close - close.rolling(20).mean()) / close.rolling(20).mean() * 100,  # 乖离率%
         }
 
     def _rsi(self, close: pd.Series, period: int = 14) -> pd.Series:

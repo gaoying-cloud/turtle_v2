@@ -274,7 +274,7 @@ class TestTurtleSignals:
             "stop_high_10", "stop_low_10", "trail_high_10",
             "trail_low_10", "sma_50", "sma_20", "ma5", "ma10",
             "hurst_252", "trend_duration_median", "sma_60",
-            "rsi_14", "bb_upper_20", "bb_lower_20", "sma_120", "deviation_sma20",
+            "rsi_14", "bb_upper_20", "bb_lower_20",
         }
         assert set(result.keys()) == expected_keys
 

@@ -191,9 +191,9 @@ class TestScreenCandidate:
         assert "data_quality" in stages
         assert "listing_age" in stages
         assert "liquidity" in stages
+        assert "volatility" in stages
         assert "trend_persistence" in stages
         assert "correlation" in stages
-        assert "t1_ratio" in stages
 
 
 class TestScreenAll:

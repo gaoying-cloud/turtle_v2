@@ -122,9 +122,6 @@ def strat():
         "hurst_min": 0.50,
         "use_rsi_filter": False,
         "rsi_overbought": 70,
-        "short_bear_ma_period": 120,
-        "short_deviation_pct": 15.0,
-        "short_rsi_overbought": 80,
     })()
     s.datas = [MockData(), MockData()]
     s.broker = MagicMock()

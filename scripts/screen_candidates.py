@@ -2,8 +2,11 @@
 """
 跨市场ETF海龟组合策略 · 品种筛选工具 (§5.12)
 
-基于 §2.2 定义的 8 道硬门槛，对候选品种进行自动化逐道检查。
+基于 §2.2 定义的 7 道硬门槛（已删 T+0 优先），对候选品种进行自动化逐道检查。
 任一 REJECT 即淘汰。WARN 不阻断但记录。
+
+门槛顺序：
+  ①数据质量 → ②上市年限 → ③流动性 → ④波动性 → ⑤趋势(Hurst) → ⑥回测 → ⑦相关性
 
 用法：
     py scripts/screen_candidates.py                           # 自动发现候选，全量筛查
@@ -305,7 +308,56 @@ def check_liquidity(symbol: str, min_avg_vol: float = 2e8) -> SingleCheck:
 
 
 # ════════════════════════════════════════════════════════════
-#  [4] 趋势持续性检查（Hurst 指数）
+#  [4] 波动性检查（年化波动率）
+# ════════════════════════════════════════════════════════════
+
+def check_volatility(symbol: str, min_annual_vol: float = 0.15) -> SingleCheck:
+    """检查品种近252日年化波动率是否足够大。
+
+    海龟策略在强趋势、高波动的品种上表现更好。
+    低波动品种趋势空间不足，不适合趋势跟踪。
+    """
+    t0 = time.time()
+    path = DATA_DIR / f"{symbol}.parquet"
+    if not path.exists():
+        return SingleCheck(
+            stage="volatility", verdict="skip",
+            metric_name="volatility", metric_value="N/A",
+            threshold=f"年化波动率 ≥ {min_annual_vol:.0%}",
+            detail="数据不可用",
+            elapsed_sec=round(time.time() - t0, 1),
+        )
+    df = pd.read_parquet(path).sort_values("date")
+    close = df["close"].values[-252:]
+    if len(close) < 20:
+        return SingleCheck(
+            stage="volatility", verdict="skip",
+            metric_name="volatility", metric_value="N/A",
+            threshold=f"年化波动率 ≥ {min_annual_vol:.0%}",
+            detail="数据不足252日",
+            elapsed_sec=round(time.time() - t0, 1),
+        )
+    returns = np.diff(np.log(close))
+    annual_vol = np.std(returns, ddof=1) * np.sqrt(252)
+    if annual_vol < min_annual_vol:
+        return SingleCheck(
+            stage="volatility", verdict="warn",
+            metric_name="annual_vol", metric_value=f"{annual_vol:.1%}",
+            threshold=f"年化波动率 ≥ {min_annual_vol:.0%}",
+            detail=f"波动率 {annual_vol:.1%}，偏低，海龟需要强趋势品种",
+            elapsed_sec=round(time.time() - t0, 1),
+        )
+    return SingleCheck(
+        stage="volatility", verdict="pass",
+        metric_name="annual_vol", metric_value=f"{annual_vol:.1%}",
+        threshold=f"年化波动率 ≥ {min_annual_vol:.0%}",
+        detail=f"波动率 {annual_vol:.1%}，适合趋势跟踪",
+        elapsed_sec=round(time.time() - t0, 1),
+    )
+
+
+# ════════════════════════════════════════════════════════════
+#  [5] 趋势持续性检查（Hurst 指数）
 # ════════════════════════════════════════════════════════════
 
 def check_trend_persistence(symbol: str) -> SingleCheck:
@@ -543,61 +595,6 @@ def check_correlation(
     )
 
 
-# ════════════════════════════════════════════════════════════
-#  [7] T+1 占比检查
-# ════════════════════════════════════════════════════════════
-
-def check_t1_ratio(
-    symbol: str,
-    existing_symbols: List[str],
-) -> SingleCheck:
-    """检查加入该品种后 T+1 品种占比是否超过 50%。
-
-    T+1 品种在极端行情下的止损滞后是结构性问题，
-    组合中 T+1 占比应不超过 50%。
-    """
-    t0 = time.time()
-    from src.config_loader import get_t_plus_one_symbols
-    t1_set = get_t_plus_one_symbols(_CONFIG)
-
-    # 候选品种可能不在 config 中，用后缀推断 T+1 状态
-    # A股 ETF（上交所/深交所）为 T+1，跨境/商品为 T+0
-    # T+0 品种列表（已知的跨境和商品 ETF）
-    T0_CODES = {"513100", "513500", "518880", "159985"}
-    def _is_t1(code: str) -> bool:
-        if code in t1_set:
-            return True
-        # 不在 config 中则通过代码推断
-        prefix = code.split(".")[0][:6] if "." in code else code[:6]
-        if prefix in T0_CODES:
-            return False
-        # 上交所 51xxxx/56xxxx/58xxxx 或 深交所 1xxxxx/3xxxxx → A股 ETF → T+1
-        return True
-
-    candidate_is_t1 = _is_t1(symbol)
-    existing_t1_count = sum(1 for s in existing_symbols if _is_t1(s))
-    new_t1_count = existing_t1_count + (1 if candidate_is_t1 else 0)
-    total_after = len(existing_symbols) + 1
-    ratio = new_t1_count / total_after if total_after > 0 else 0
-
-    if ratio > 0.5:
-        return SingleCheck(
-            stage="t1_ratio", verdict="warn",
-            metric_name="t1_ratio_after", metric_value=f"{ratio:.0%}",
-            threshold="T+1 占比 ≤ 50%",
-            detail=f"加入后 T+1={new_t1_count}/{total_after}={ratio:.0%} > 50%，止损滞后风险偏高",
-            elapsed_sec=round(time.time() - t0, 1),
-        )
-    return SingleCheck(
-        stage="t1_ratio", verdict="pass",
-        metric_name="t1_ratio_after", metric_value=f"{ratio:.0%}",
-        threshold="T+1 占比 ≤ 50%",
-        detail=f"加入后 T+1={new_t1_count}/{total_after}={ratio:.0%}，在安全线内",
-        elapsed_sec=round(time.time() - t0, 1),
-    )
-
-
-# ════════════════════════════════════════════════════════════
 #  筛查主流程
 # ════════════════════════════════════════════════════════════
 
@@ -652,14 +649,21 @@ def screen_candidate(
     if c.verdict == "warn":
         result.final_verdict = "warn"
 
-    # [4] 趋势持续性 → WARN 不阻断
-    c = check_trend_persistence(symbol)
+    # [4] 波动性 → WARN 不阻断
+    c = check_volatility(symbol)
     checks.append(c)
-    log.info("[%s] ④趋势(Hurst): %s — %s", symbol, c.verdict.upper(), c.detail[:80])
+    log.info("[%s] ④波动性: %s — %s", symbol, c.verdict.upper(), c.detail[:80])
     if c.verdict == "warn" and result.final_verdict == "pass":
         result.final_verdict = "warn"
 
-    # [5] 单品种回测 → REJECT 阻断
+    # [5] 趋势持续性 → WARN 不阻断
+    c = check_trend_persistence(symbol)
+    checks.append(c)
+    log.info("[%s] ⑤趋势(Hurst): %s — %s", symbol, c.verdict.upper(), c.detail[:80])
+    if c.verdict == "warn" and result.final_verdict == "pass":
+        result.final_verdict = "warn"
+
+    # [6] 单品种回测 → REJECT 阻断
     if not skip_backtest:
         c = check_standalone_backtest(symbol, start_date, end_date)
         checks.append(c)
@@ -683,13 +687,6 @@ def screen_candidate(
     c = check_correlation(symbol, existing_symbols, start_date, end_date)
     checks.append(c)
     log.info("[%s] ⑥相关性: %s — %s", symbol, c.verdict.upper(), c.detail[:80])
-    if c.verdict == "warn" and result.final_verdict == "pass":
-        result.final_verdict = "warn"
-
-    # [7] T+1 占比 → WARN 不阻断
-    c = check_t1_ratio(symbol, existing_symbols)
-    checks.append(c)
-    log.info("[%s] ⑦T+1占比: %s — %s", symbol, c.verdict.upper(), c.detail[:80])
     if c.verdict == "warn" and result.final_verdict == "pass":
         result.final_verdict = "warn"
 

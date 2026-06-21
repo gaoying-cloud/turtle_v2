@@ -22,10 +22,6 @@ turtle:
   choppy_threshold: 0.35       # choppy 判定阈值（< 此值=碎步市）
   use_trend_duration_filter: false  # 趋势持续时间过滤
   trend_duration_min_days: 5   # 趋势持续中位数最低天数
-  # ── 做空两级共振过滤 ──
-  short_bear_ma_period: 120      # 熊市确认：价格需在半年线下方
-  short_deviation_pct: 15.0      # 极端超买：乖离率 > 此值
-  short_rsi_overbought: 80       # RSI 超买阈值
   exit_period: 10             # 10日反向突破退出
 
 # ── 三层权重配置 ──
@@ -50,12 +46,12 @@ symbols:
   - code: "513100.SH"   # 纳指ETF
     name: "纳指ETF"
     market: "跨境"
-    shortable: true
+    shortable: false
     t_plus_one: false
   - code: "518880.SH"   # 黄金ETF
     name: "黄金ETF"
     market: "商品"
-    shortable: true
+    shortable: false
     t_plus_one: false
 
 # ── 国债ETF (空仓期现金管理) ──
