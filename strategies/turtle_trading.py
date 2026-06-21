@@ -111,6 +111,10 @@ class TurtleStrategy(bt.Strategy):
         ("choppy_threshold", 0.35),         # choppy 状态判定阈值
         ("use_trend_duration_filter", False), # 开启趋势持续时间过滤
         ("trend_duration_min_days", 5),     # 趋势持续中位数最低天数
+        ("use_hurst_filter", False),        # 开启 Hurst 指数过滤
+        ("hurst_min", 0.50),                # H < 此值拒绝入场（均值回归）
+        ("use_rsi_filter", False),          # 开启 RSI/布林带过度延伸过滤
+        ("rsi_overbought", 70),             # RSI 超买阈值（>此值且触及布林带上轨→过滤）
     )
 
     def __init__(self):
@@ -558,6 +562,24 @@ class TurtleStrategy(bt.Strategy):
                 logger.debug("[入场] %s 趋势中位数 %.1fd < %dd，跳过入场",
                              code, td, self.params.trend_duration_min_days)
                 return
+
+        # ── Hurst 门控：H < 阈值 → 均值回归，不开仓 ──
+        if self.params.use_hurst_filter:
+            hurst_val = si["hurst_252"].iloc[idx]
+            if not pd.isna(hurst_val) and hurst_val < self.params.hurst_min:
+                logger.debug("[入场] %s Hurst=%.3f < %.2f，均值回归跳过入场",
+                             code, hurst_val, self.params.hurst_min)
+                return
+
+        # ── RSI/布林带过滤：RSI超买且触及布林带上轨→跳过做多 ──
+        if self.params.use_rsi_filter and is_long:
+            rsi_val = si["rsi_14"].iloc[idx]
+            bb_upper = si["bb_upper_20"].iloc[idx]
+            if pd.notna(rsi_val) and pd.notna(bb_upper):
+                if rsi_val > self.params.rsi_overbought and close > bb_upper:
+                    logger.debug("[入场] %s RSI=%.0f>%d 且触及布林带上轨=%.2f，跳过过度延伸突破",
+                                 code, rsi_val, self.params.rsi_overbought, bb_upper)
+                    return
 
         # ── 盈利过滤器（期货模式禁用） ──
         if self.params.use_signal_filter and not self.params.futures_mode:

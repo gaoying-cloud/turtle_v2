@@ -46,12 +46,12 @@ symbols:
   - code: "513100.SH"   # 纳指ETF
     name: "纳指ETF"
     market: "跨境"
-    shortable: true
+    shortable: false
     t_plus_one: false
   - code: "518880.SH"   # 黄金ETF
     name: "黄金ETF"
     market: "商品"
-    shortable: true
+    shortable: false
     t_plus_one: false
 
 # ── 国债ETF (空仓期现金管理) ──

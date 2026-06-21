@@ -603,7 +603,20 @@ class TurtleSignals:
             "ma10": close.rolling(10).mean(),    # MA10（金叉判断用）
             "hurst_252": self._rolling_hurst(close),
             "trend_duration_median": pd.Series(trend_duration_median(close, 20), index=close.index),
+            "rsi_14": self._rsi(close, 14),
+            "bb_upper_20": close.rolling(20).mean() + 2 * close.rolling(20).std(),
+            "bb_lower_20": close.rolling(20).mean() - 2 * close.rolling(20).std(),
         }
+
+    def _rsi(self, close: pd.Series, period: int = 14) -> pd.Series:
+        """Wilder 平滑 RSI。"""
+        delta = close.diff()
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
+        avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0, 1e-10)
+        return 100 - (100 / (1 + rs))
 
     def _rolling_hurst(self, close: pd.Series, window: int = 252) -> pd.Series:
         """滚动窗口 Hurst 指数（每日计算，末尾 pad 向前填充）。"""

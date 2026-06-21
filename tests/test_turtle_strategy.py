@@ -118,6 +118,10 @@ def strat():
         "choppy_threshold": 0.35,
         "use_trend_duration_filter": False,
         "trend_duration_min_days": 5,
+        "use_hurst_filter": False,
+        "hurst_min": 0.50,
+        "use_rsi_filter": False,
+        "rsi_overbought": 70,
     })()
     s.datas = [MockData(), MockData()]
     s.broker = MagicMock()
