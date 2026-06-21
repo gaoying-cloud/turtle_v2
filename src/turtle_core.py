@@ -598,6 +598,7 @@ class TurtleSignals:
             "trail_high_10": trail_high_close(close, self.stop_period),
             "trail_low_10": trail_low_close(close, self.stop_period),
             "sma_50": close.rolling(50).mean(),  # 50日均线（趋势判断用）
+            "sma_60": close.rolling(60).mean(),  # 60日均线（趋势方向过滤用）
             "sma_20": close.rolling(20).mean(),  # 20日均线
             "ma5": close.rolling(5).mean(),      # MA5（双模式入场用）
             "ma10": close.rolling(10).mean(),    # MA10（金叉判断用）
@@ -606,6 +607,8 @@ class TurtleSignals:
             "rsi_14": self._rsi(close, 14),
             "bb_upper_20": close.rolling(20).mean() + 2 * close.rolling(20).std(),
             "bb_lower_20": close.rolling(20).mean() - 2 * close.rolling(20).std(),
+            "sma_120": close.rolling(120).mean(),  # 半年线（做空熊市确认）
+            "deviation_sma20": (close - close.rolling(20).mean()) / close.rolling(20).mean() * 100,  # 乖离率%
         }
 
     def _rsi(self, close: pd.Series, period: int = 14) -> pd.Series:

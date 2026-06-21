@@ -1,0 +1,3 @@
+Config,FV,CAGR%,MDD%,Sharpe,Calmar,WR%,PF,Trades
+SMA20<SMA60 filter + shorting,215399.18,9.51,12.32,0.7154,0.7722,50.0,3.291,44
+"SMA20<SMA60 filter, no short",215399.18,9.51,12.32,0.7154,0.7722,50.0,3.291,44

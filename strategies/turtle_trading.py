@@ -40,6 +40,7 @@ from src.turtle_core import (
     volume_confirmation,
     breakout_quality,
     recent_batting_avg,
+    calc_fixed_stop,
 )
 from src.risk_parity import compute_alpha_weights
 from src.market_regime import MarketRegime
@@ -115,6 +116,10 @@ class TurtleStrategy(bt.Strategy):
         ("hurst_min", 0.50),                # H < 此值拒绝入场（均值回归）
         ("use_rsi_filter", False),          # 开启 RSI/布林带过度延伸过滤
         ("rsi_overbought", 70),             # RSI 超买阈值（>此值且触及布林带上轨→过滤）
+        # ── 做空两级共振参数 ──
+        ("short_bear_ma_period", 120),      # 熊市确认：价格需在半年线下方
+        ("short_deviation_pct", 15.0),      # 极端超买：乖离率 > 此值
+        ("short_rsi_overbought", 80),       # RSI 超买阈值（>此值后死叉→做空）
     )
 
     def __init__(self):
@@ -469,14 +474,28 @@ class TurtleStrategy(bt.Strategy):
     # ════════════════════════════════════════════════════════
 
     def _should_enter_short(self, code: str, si: dict, idx: int, close: float, n: float) -> bool:
-        """检查是否触发空头入场信号。仅对 shortable_symbols 返回 True。"""
+        """检查是否触发空头入场信号。仅对 shortable_symbols 返回 True。
+
+        附加条件：SMA20 < SMA60（中期趋势向下）才允许做空。
+        （注意：此函数当前未被调用，short 检测在 _check_entry 中内联实现）
+        """
         if code not in self.params.shortable_symbols:
             return False
         dc_low = si.get("entry_low_20")
         if dc_low is None:
             return False
         entry_low = dc_low.iloc[idx]
-        return pd.notna(entry_low) and close < entry_low
+        if not (pd.notna(entry_low) and close < entry_low):
+            return False
+        # SMA20 < SMA60 趋势方向过滤
+        sma20 = si.get("sma_20")
+        sma60 = si.get("sma_60")
+        if sma20 is not None and sma60 is not None:
+            s20 = sma20.iloc[idx]
+            s60 = sma60.iloc[idx]
+            if pd.notna(s20) and pd.notna(s60) and s20 > s60:
+                return False  # 中期趋势向上，不做空
+        return True
 
     def _check_entry(self, code: str, data: bt.feeds.PandasData):
         """检查并执行入场信号。"""
@@ -530,7 +549,32 @@ class TurtleStrategy(bt.Strategy):
         if entry_low_20 is not None and code in self.params.shortable_symbols:
             el = entry_low_20.iloc[idx]
             if pd.notna(el) and close < el:
-                is_short = True
+                # ── 做空两级共振过滤 ──
+                allow_short = True
+
+                # 1) 熊市确认：close 必须在半年线下方
+                sma_120 = si.get("sma_120")
+                if sma_120 is not None:
+                    s120 = sma_120.iloc[idx]
+                    if pd.notna(s120) and close > s120:
+                        allow_short = False
+
+                # 2) 极端超买拐头：乖离率 > 阈值 AND RSI 从超买区死叉向下
+                if allow_short:
+                    dev = si.get("deviation_sma20")
+                    rsi = si.get("rsi_14")
+                    if dev is not None and rsi is not None:
+                        d = dev.iloc[idx]
+                        r = rsi.iloc[idx]
+                        r_prev = rsi.iloc[idx - 1] if idx > 0 else None
+                        if (pd.isna(d) or d < self.params.short_deviation_pct
+                            or pd.isna(r) or pd.isna(r_prev)
+                            or r_prev <= self.params.short_rsi_overbought
+                            or r >= r_prev):
+                            allow_short = False
+
+                if allow_short:
+                    is_short = True
         if not is_long and not is_short:
             return
 
@@ -729,7 +773,7 @@ class TurtleStrategy(bt.Strategy):
             entry_price=price,
             shares=shares,
             n_at_entry=n,
-            stop_loss=0.0,
+            stop_loss=calc_fixed_stop(price, n, 2.0, direction) if direction == "short" else 0.0,
             entry_mode=entry_source or "breakout",
         )
         if code in self.params.t_plus_one_symbols:

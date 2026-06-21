@@ -37,3 +37,9 @@ alwaysApply: true
 | `py scripts/run_backtest.py` | ETF 全品种 |
 | `py scripts/run_backtest.py --t0-only` | 仅 T+0（纳指+黄金）做空验证 |
 | `py scripts/run_backtest.py --futures` | 期货 12 品种双向 |
+
+## Windows 执行规范（强制）
+
+- **禁止内联 Python 多行脚本**：禁止 `py << 'EOF'`、`py -c "多行..."` 等 heredoc/内联方式
+- 回测、对比实验、数据分析等脚本必须先写入独立 `.py` 文件再执行
+- 临时实验脚本放入 `scripts/_ad_hoc/` 目录
