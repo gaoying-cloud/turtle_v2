@@ -30,6 +30,7 @@ import pandas as pd
 import yaml
 
 warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -231,6 +232,22 @@ def run_backtest_with_best(params: dict, start_date: str = "2020-01-01",
     calmar = (cagr / abs(max_dd)) if max_dd > 0 else 0.0
 
     risk_events = getattr(strat, "_risk_events", {})
+
+    # 提取品种级交易统计
+    my_trades = getattr(strat, "_my_trades", [])
+    per_symbol = {}
+    for tr in my_trades:
+        sym = tr.get("symbol", "?")
+        if sym not in per_symbol:
+            per_symbol[sym] = {"total": 0, "won": 0, "pnl_sum": 0.0}
+        per_symbol[sym]["total"] += 1
+        if tr.get("was_win"):
+            per_symbol[sym]["won"] += 1
+        per_symbol[sym]["pnl_sum"] += tr.get("pnl", 0.0)
+    for sym, v in per_symbol.items():
+        v["win_rate"] = round(v["won"] / v["total"] * 100, 1) if v["total"] > 0 else 0.0
+        v["pnl_sum"] = round(v["pnl_sum"], 2)
+
     del cerebro, strat, results, feeds
     gc.collect()
 
@@ -246,6 +263,7 @@ def run_backtest_with_best(params: dict, start_date: str = "2020-01-01",
         "dd_warning": risk_events.get("dd_warning", 0),
         "loss_pause": risk_events.get("loss_pause", 0),
         "t1_stop_delay": risk_events.get("t1_stop_delay", 0),
+        "per_symbol": per_symbol,
     }
 
 
@@ -316,13 +334,95 @@ def generate_params_section(df_full: Optional[pd.DataFrame], df_oos: Optional[pd
                          f"| {b.get('total_trades','N/A')} | {b.get('robustness_score',0):.4f} |")
     else:
         lines.append("> ⚠️ 网格搜索尚未运行。\n")
-    if df_full is not None and df_oos is not None:
-        lines.append("\n### 样本外衰减\n| 指标 | 样本内 | 样本外 | 衰减率 |\n|:--|:--:|:--:|:--:|")
-        for metric in ["sharpe", "cagr"]:
-            in_val = df_full[metric].mean() if metric in df_full else 0
-            oos_val = df_oos[metric].mean() if metric in df_oos else 0
-            decay = (in_val - oos_val) / max(abs(in_val), 0.01) * 100
-            lines.append(f"| {metric} | {in_val:.4f} | {oos_val:.4f} | {decay:.1f}% |")
+
+    # ── 逐参数 OOS 衰减追踪 ──
+    if df_full is not None and df_oos is not None and best_path.exists():
+        with open(best_path, "r", encoding="utf-8") as f:
+            best = json.load(f)
+
+        decay_rows = []
+        for b in best[:5]:
+            mode_val = b.get("mode", "A")
+            atr = int(b["atr_period"])
+            breakout = int(b["breakout_period"])
+            stop = int(b["stop_period"])
+            mult = float(b["stop_atr_multiple"])
+            alpha = float(b["alpha"])
+
+            # IS 指标（来自 best_params.json 的样本内回测）
+            is_sharpe = b.get("sharpe")
+            is_cagr = b.get("cagr")
+
+            # OOS 指标（从 df_oos 匹配参数）
+            if df_oos is not None and not df_oos.empty:
+                mask = (
+                    (df_oos["atr_period"].astype(int) == atr)
+                    & (df_oos["breakout_period"].astype(int) == breakout)
+                    & (df_oos["stop_period"].astype(int) == stop)
+                    & (df_oos["stop_atr_multiple"].astype(float) == mult)
+                    & (df_oos["alpha"].astype(float) == alpha)
+                    & (df_oos["mode"] == mode_val)
+                )
+                match = df_oos[mask]
+            else:
+                match = pd.DataFrame()
+
+            if not match.empty:
+                oos_sharpe = match["sharpe"].mean() if "sharpe" in match else None
+                oos_cagr = match["cagr"].mean() if "cagr" in match else None
+            else:
+                oos_sharpe = None
+                oos_cagr = None
+
+            # 计算衰减
+            if is_sharpe is not None and oos_sharpe is not None and abs(float(is_sharpe)) > 0.01:
+                sh_decay = (float(is_sharpe) - float(oos_sharpe)) / abs(float(is_sharpe)) * 100
+            else:
+                sh_decay = None
+
+            if is_cagr is not None and oos_cagr is not None and abs(float(is_cagr)) > 0.01:
+                cagr_decay = (float(is_cagr) - float(oos_cagr)) / abs(float(is_cagr)) * 100
+            else:
+                cagr_decay = None
+
+            decay_rows.append({
+                "mode": mode_val,
+                "params": f"atr={atr} b={breakout} s={stop} m={mult} α={alpha}",
+                "is_sharpe": is_sharpe,
+                "oos_sharpe": oos_sharpe,
+                "sharpe_decay_pct": sh_decay,
+                "is_cagr": is_cagr,
+                "oos_cagr": oos_cagr,
+                "cagr_decay_pct": cagr_decay,
+            })
+
+        if decay_rows:
+            lines.append("\n### 样本外衰减（逐参数）\n")
+            lines.append("| 模式 | 参数 | IS Sharpe | OOS Sharpe | Sharpe衰减% | IS CAGR% | OOS CAGR% | CAGR衰减% |")
+            lines.append("|:--:|:--|:--:|:--:|:--:|:--:|:--:|:--:|")
+            for r in decay_rows:
+                sh_flag = " 🔴" if r["sharpe_decay_pct"] is not None and r["sharpe_decay_pct"] > 30 else ""
+                cagr_flag = " 🔴" if r["cagr_decay_pct"] is not None and r["cagr_decay_pct"] > 30 else ""
+                lines.append(
+                    f"| {r['mode']} | {r['params']} "
+                    f"| {r['is_sharpe']:.3f} | {r['oos_sharpe']:.3f} | {r['sharpe_decay_pct']:.0f}%{sh_flag} "
+                    f"| {r['is_cagr']:.2f} | {r['oos_cagr']:.2f} | {r['cagr_decay_pct']:.0f}%{cagr_flag} |"
+                )
+
+            # 衰减分布汇总
+            sh_decays = [r["sharpe_decay_pct"] for r in decay_rows if r["sharpe_decay_pct"] is not None]
+            cagr_decays = [r["cagr_decay_pct"] for r in decay_rows if r["cagr_decay_pct"] is not None]
+
+            if sh_decays:
+                median_sh = np.median(sh_decays)
+                high_sh = sum(1 for d in sh_decays if d > 30)
+                lines.append(f"\n**衰减汇总**: Sharpe衰减中位数={median_sh:.0f}% | "
+                             f"超过30%的个数={high_sh}/{len(sh_decays)}"
+                             f"{' ⚠️ 强过拟合信号' if median_sh > 30 or high_sh >= len(sh_decays)//2 else ''}")
+            if cagr_decays:
+                median_cagr = np.median(cagr_decays)
+                lines.append(f"**CAGR衰减**: 中位数={median_cagr:.0f}%")
+
     return "\n".join(lines)
 
 
@@ -360,12 +460,12 @@ def generate_stress_section() -> str:
 
     if conclusion is None:
         return (
-            "## 5. 压力测试\n"
+            "## 6. 压力测试\n"
             "> ⚠️ 压力测试尚未运行。包含 A1-A4 历史情景 + B1-B2 合成情景。\n"
             "请先执行 `py scripts/run_stress_test.py` 和 `py scripts/run_correlation_monitor.py`。\n"
         )
 
-    lines = ["## 5. 压力测试\n"]
+    lines = ["## 6. 压力测试\n"]
     overall = conclusion.get("overall", {})
     status_map = {
         "pass": "✅ 全部通过",
@@ -401,9 +501,26 @@ def generate_stress_section() -> str:
     return "\n".join(lines)
 
 
+def _per_symbol_table(per_symbol: dict) -> str:
+    """生成品种级交易统计的 Markdown 表格。"""
+    if not per_symbol:
+        return ""
+    lines = [
+        "## 5. 品种级交易统计\n",
+        "| 品种 | 交易次数 | 盈利次数 | 胜率 | 总盈亏 |",
+        "|:--:|:--:|:--:|:--:|:--:|",
+    ]
+    for sym in sorted(per_symbol):
+        v = per_symbol[sym]
+        lines.append(f"| {sym} | {v['total']} | {v['won']} | {v['win_rate']}% | {v['pnl_sum']:,.0f} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def generate_report(metrics: dict, df_full: Optional[pd.DataFrame] = None,
                     df_oos: Optional[pd.DataFrame] = None, mode: str = "A",
-                    start_date: str = "2020-01-01", end_date: str = "2026-06-10") -> str:
+                    start_date: str = "2020-01-01", end_date: str = "2026-06-10",
+                    per_symbol: Optional[dict] = None) -> str:
     mode_label = f"模式 {'A (无过滤)' if mode == 'A' else 'B (55日过滤)'}"
     sections = [
         f"# 跨市场ETF海龟组合策略 — 综合回测报告\n",
@@ -422,6 +539,8 @@ def generate_report(metrics: dict, df_full: Optional[pd.DataFrame] = None,
         "- B3：ATR 等风险贡献\n- B4：海龟（纯策略，国债逻辑已移除）\n",
         "\n---\n",
         generate_params_section(df_full, df_oos),
+        # ── 品种级交易统计（可选） ──
+        (f"\n---\n{_per_symbol_table(per_symbol)}" if per_symbol else ""),
         "\n---\n",
         generate_stress_section(),
         "\n---\n",
@@ -461,7 +580,6 @@ def main():
         metrics = {"mode": args.mode, "start_date": args.start, "end_date": args.end,
                    "initial_cash": _cfg.get("initial_cash", 120000),
                    "final_value": 0, "total_return": 0, "cagr": 0, "sharpe": None, "max_drawdown": 0,
-                   "final_value": 0, "total_return": 0, "cagr": 0, "sharpe": None, "max_drawdown": 0,
                    "win_rate": 0, "profit_factor": 0, "total_trades": 0, "annual_vol": 0, "calmar": 0,
                    "concentration_cut": 0, "dd_warning": 0, "loss_pause": 0, "t1_stop_delay": 0}
     else:
@@ -469,14 +587,10 @@ def main():
         if not metrics:
             logger.error("回测失败"); sys.exit(1)
 
-    # 提取策略的品种级数据
-    from src.turtle_core import recent_batting_avg
-    per_symbol = {}
-    if not args.no_backtest:
-        strat_cache = None  # would need to capture from run
+    # 从指标中取出品种级数据（run_backtest_with_best 已提取）
+    per_symbol = metrics.pop("per_symbol", {})
 
-
-    report = generate_report(metrics, df_full, df_oos, args.mode, args.start, args.end)
+    report = generate_report(metrics, df_full, df_oos, args.mode, args.start, args.end, per_symbol=per_symbol)
     output_path.write_text(report, encoding="utf-8")
     logger.info("报告已保存: %s (%d 行)", output_path, len(report.splitlines()))
     metrics_path = output_path.with_suffix(".json").with_stem(output_path.stem + "_metrics")

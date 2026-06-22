@@ -66,6 +66,69 @@ futures:
   margin_rate: 0.15          # 保证金比例 15%（约 6.67x 杠杆）
   start_date: "2015-01-01"
   end_date: "2026-06-10"
+  # 期货品种列表（统一来源，pull_futures/run_backtest/config_loader 均从此读取）
+  # 字段命名沿用 Tushare 术语 ts_code，便于 pull_futures.py 直接使用
+  futures_list:
+    - ts_code: "CU.SHF"
+      name: "沪铜"
+      exchange: "上期所"
+      category: "金属"
+      multiplier: 5
+    - ts_code: "RB.SHF"
+      name: "螺纹钢"
+      exchange: "上期所"
+      category: "金属"
+      multiplier: 10
+    - ts_code: "RU.SHF"
+      name: "橡胶"
+      exchange: "上期所"
+      category: "能源化工"
+      multiplier: 10
+    - ts_code: "M.DCE"
+      name: "豆粕"
+      exchange: "大商所"
+      category: "农产品"
+      multiplier: 10
+    - ts_code: "Y.DCE"
+      name: "豆油"
+      exchange: "大商所"
+      category: "农产品"
+      multiplier: 10
+    - ts_code: "P.DCE"
+      name: "棕榈油"
+      exchange: "大商所"
+      category: "农产品"
+      multiplier: 10
+    - ts_code: "JM.DCE"
+      name: "焦煤"
+      exchange: "大商所"
+      category: "能源"
+      multiplier: 60
+    - ts_code: "CF.ZCE"
+      name: "棉花"
+      exchange: "郑商所"
+      category: "农产品"
+      multiplier: 5
+    - ts_code: "SR.ZCE"
+      name: "白糖"
+      exchange: "郑商所"
+      category: "农产品"
+      multiplier: 10
+    - ts_code: "TA.ZCE"
+      name: "PTA"
+      exchange: "郑商所"
+      category: "能源化工"
+      multiplier: 5
+    - ts_code: "I.DCE"
+      name: "铁矿石"
+      exchange: "大商所"
+      category: "黑色"
+      multiplier: 100
+    - ts_code: "SC.INE"
+      name: "原油"
+      exchange: "能源中心"
+      category: "能源"
+      multiplier: 1000
 
 # ── 回测区间（ETF） ──
 backtest:

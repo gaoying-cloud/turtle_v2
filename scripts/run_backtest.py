@@ -32,7 +32,11 @@ sys.path.insert(0, str(ROOT))
 
 from src.turtle_core import TurtleSignals
 from strategies.turtle_trading import TurtleStrategy
-from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols, get_trading_symbols, get_bond_symbol, get_all_symbols, get_t0_symbols
+from src.config_loader import (
+    get_shortable_symbols, get_t_plus_one_symbols, get_trading_symbols,
+    get_bond_symbol, get_all_symbols, get_t0_symbols, get_futures_symbols,
+    get_futures_multipliers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,22 +51,8 @@ SIX_SYMBOLS = get_trading_symbols(_CONFIG)
 BOND_SYMBOL = get_bond_symbol(_CONFIG)
 ALL_SYMBOLS = get_all_symbols(_CONFIG)
 T0_SYMBOLS = get_t0_symbols(_CONFIG)
-
-# 期货品种（12 个，跨市场不相关）
-FUTURES_SYMBOLS = [
-    "CU.SHF",   # 沪铜
-    "RB.SHF",   # 螺纹钢
-    "RU.SHF",   # 橡胶
-    "M.DCE",    # 豆粕
-    "Y.DCE",    # 豆油
-    "P.DCE",    # 棕榈油
-    "JM.DCE",   # 焦煤
-    "CF.ZCE",   # 棉花（郑商所主连后缀 .ZCE）
-    "SR.ZCE",   # 白糖
-    "TA.ZCE",   # PTA
-    "I.DCE",    # 铁矿石
-    "SC.INE",   # 原油
-]
+# 期货品种（12 个，跨市场不相关）—— 统一从 config 读取
+FUTURES_SYMBOLS = get_futures_symbols(_CONFIG)
 
 FUTURES_DATA_DIR = ROOT / "data" / "futures_daily"
 
@@ -259,14 +249,8 @@ def run_backtest(
         shortable = get_shortable_symbols(config)
         t_plus_one = get_t_plus_one_symbols(config)
 
-    # ── 期货合约乘数 ──
-    FUTURES_MULTIPLIERS = {
-        "CU.SHF": 5, "RB.SHF": 10, "RU.SHF": 10,
-        "M.DCE": 10, "Y.DCE": 10, "P.DCE": 10,
-        "JM.DCE": 60, "I.DCE": 100,
-        "CF.ZCE": 5, "SR.ZCE": 10, "TA.ZCE": 5,
-        "SC.INE": 1000,
-    }
+    # ── 期货合约乘数（统一从 config 读取） ──
+    FUTURES_MULTIPLIERS = get_futures_multipliers(config) if futures else {}
 
     # ── 添加策略（含 S4 风险平价权重参数） ──
     cerebro.addstrategy(

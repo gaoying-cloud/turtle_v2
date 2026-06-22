@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+from unittest.mock import patch
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -122,8 +123,30 @@ class TestGenerateParamsSection:
         assert "⚠️" in section or "尚未运行" in section
 
     def test_with_mock_data(self):
-        df_full = pd.DataFrame({"sharpe": [0.9, 0.8], "cagr": [12.0, 10.0]})
-        section = generate_params_section(df_full, df_full)
+        import json
+        from scripts.gen_report import generate_params_section
+
+        # 创建临时 best_params.json（含 IS 指标）
+        best_data = [
+            {"mode": "A", "atr_period": 20, "breakout_period": 20,
+             "stop_period": 10, "stop_atr_multiple": 2.0, "alpha": 0.05,
+             "sharpe": 0.9, "cagr": 12.0}
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            (tmpdir_path / "best_params.json").write_text(
+                json.dumps(best_data), encoding="utf-8")
+
+            # df_oos 含完整参数列 + OOS 指标，可被衰减代码精确匹配
+            df_oos = pd.DataFrame({
+                "atr_period": [20], "breakout_period": [20],
+                "stop_period": [10], "stop_atr_multiple": [2.0],
+                "alpha": [0.05], "mode": ["A"],
+                "sharpe": [0.7], "cagr": [10.0],
+            })
+            with patch.object(sys.modules["scripts.gen_report"], "GRID_DIR", tmpdir_path):
+                section = generate_params_section(df_oos, df_oos)
+
         assert "样本外衰减" in section
 
 

@@ -275,7 +275,7 @@ class TurtleStrategy(bt.Strategy):
         T, N = returns.shape
         if T < 10 or N < 2:
             # 数据不足时回退到 base_risk_per_unit
-            logger.warning("[风险平价] 数据不足 (T=%d, N=%d)，回退到纯 ATR", T, N)
+            logger.debug("[风险平价] 数据不足 (T=%d, N=%d)，回退到纯 ATR", T, N)
             self._alpha_risk_pcts = None
             return
 
@@ -921,7 +921,7 @@ class TurtleStrategy(bt.Strategy):
             pause_days = 5  # 全局熔断暂停 5 天
             for code in self.params.symbols:
                 self._paused_until[code] = today + timedelta(days=pause_days)
-            logger.warning("[风控] 5日回撤 %.1f%% ≥ %.0f%%，全部品种暂停 %d 天",
+            logger.debug("[风控] 5日回撤 %.1f%% ≥ %.0f%%，全部品种暂停 %d 天",
                            drawdown * 100, self.params.max_5day_drawdown_pct * 100, pause_days)
 
     def _enter_pause(self, code: str, reason: str):
@@ -930,7 +930,7 @@ class TurtleStrategy(bt.Strategy):
         current = self.datas[0].datetime.date(0)
         self._paused_until[code] = current + timedelta(days=pause_days)
         self._consecutive_losses[code] = 0
-        logger.warning("[风控] %s 暂停交易 %d 天（至 %s）: %s",
+        logger.debug("[风控] %s 暂停交易 %d 天（至 %s）: %s",
                        code, pause_days, self._paused_until[code], reason)
 
     # ════════════════════════════════════════════════════════

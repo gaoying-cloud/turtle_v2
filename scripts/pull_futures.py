@@ -41,25 +41,14 @@ STD_COLUMNS = [
     "date", "open", "high", "low", "close", "volume", "amount",
 ]
 
-
 # ════════════════════════════════════════════════════════════
-#  期货品种列表
+#  期货品种列表（从 config/turtle_config.yaml 读取，单一来源）
 # ════════════════════════════════════════════════════════════
+from src.config_loader import get_futures_list
 
-FUTURES_SYMBOLS = [
-    {"ts_code": "CU.SHF",  "name": "沪铜",     "exchange": "上期所", "category": "金属"},
-    {"ts_code": "RB.SHF",  "name": "螺纹钢",   "exchange": "上期所", "category": "金属"},
-    {"ts_code": "RU.SHF",  "name": "橡胶",     "exchange": "上期所", "category": "能源化工"},
-    {"ts_code": "M.DCE",   "name": "豆粕",     "exchange": "大商所", "category": "农产品"},
-    {"ts_code": "Y.DCE",   "name": "豆油",     "exchange": "大商所", "category": "农产品"},
-    {"ts_code": "P.DCE",   "name": "棕榈油",   "exchange": "大商所", "category": "农产品"},
-    {"ts_code": "JM.DCE",  "name": "焦煤",     "exchange": "大商所", "category": "能源"},
-    {"ts_code": "CF.ZCE",  "name": "棉花",     "exchange": "郑商所", "category": "农产品"},
-    {"ts_code": "SR.ZCE",  "name": "白糖",     "exchange": "郑商所", "category": "农产品"},
-    {"ts_code": "TA.ZCE",  "name": "PTA",      "exchange": "郑商所", "category": "能源化工"},
-    {"ts_code": "I.DCE",   "name": "铁矿石",   "exchange": "大商所", "category": "黑色"},
-    {"ts_code": "SC.INE",  "name": "原油",     "exchange": "能源中心", "category": "能源"},
-]
+with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
+    _CONFIG = yaml.safe_load(_f)
+FUTURES_SYMBOLS = get_futures_list(_CONFIG)
 
 
 # ════════════════════════════════════════════════════════════

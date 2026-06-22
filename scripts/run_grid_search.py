@@ -12,6 +12,7 @@
     py scripts/run_grid_search.py --quick                   # 快速验证（抽样 10 组）
     py scripts/run_grid_search.py --workers 4               # 4 核并行
     py scripts/run_grid_search.py --rolling                 # 滚动窗口检验
+    py scripts/run_grid_search.py --stability               # 参数稳定性面扫描
     py scripts/run_grid_search.py --plot                    # 生成敏感性图
 """
 
@@ -35,6 +36,7 @@ import pandas as pd
 import yaml
 
 warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -359,10 +361,17 @@ def run_single_backtest(
 # ════════════════════════════════════════════════════════════
 
 def _worker(task: tuple) -> Optional[dict]:
-    """多进程 worker。
+    """多进程 worker（子进程入口，抑制日志/警告噪音）。
 
     task = (params, mode, start_date, end_date, run_id)
     """
+    # 子进程重置警告过滤（Windows spawn 不继承父进程）
+    warnings.filterwarnings("ignore", category=UserWarning)
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
+    # 抑制策略层 info/debug 日志（网格搜索阶段不需要入场/退出细节）
+    logging.getLogger("strategies.turtle_trading").setLevel(logging.WARNING)
+    logging.getLogger("src.risk_parity").setLevel(logging.WARNING)
+
     params, mode, start_date, end_date, run_id = task
     return run_single_backtest(params, mode, start_date, end_date, run_id)
 
@@ -497,7 +506,7 @@ def _run_tasks(tasks: list, workers: int, verbose: bool) -> List[dict]:
                 except Exception as e:
                     logger.error("任务异常 (run_id=%d): %s", task[4], e)
 
-                if done % max(1, n_total // 20) == 0 or done == n_total:
+                if done == 1 or done % 50 == 0 or done == n_total:
                     logger.info("  进度: %d / %d (%.0f%%)", done, n_total, done / n_total * 100)
     else:
         logger.info("串行执行")
@@ -505,7 +514,7 @@ def _run_tasks(tasks: list, workers: int, verbose: bool) -> List[dict]:
             result = _worker(task)
             if result is not None:
                 results.append(result)
-            if (i + 1) % max(1, n_total // 20) == 0 or (i + 1) == n_total:
+            if (i + 1) == 1 or (i + 1) % 50 == 0 or (i + 1) == n_total:
                 logger.info("  进度: %d / %d (%.0f%%)", i + 1, n_total, (i + 1) / n_total * 100)
 
     logger.info("完成 %d / %d 次回测", len(results), n_total)
@@ -727,6 +736,377 @@ def plot_results(df: pd.DataFrame, output_dir: Path):
 
 
 # ════════════════════════════════════════════════════════════
+#  7. 滚动窗口验证
+# ════════════════════════════════════════════════════════════
+
+def run_rolling_validation(
+    df_best: pd.DataFrame,
+    *,
+    modes: List[str] = MODES,
+    base_start: str = "2020-01-01",
+    base_end: str = "2026-06-10",
+    workers: int = 1,
+) -> pd.DataFrame:
+    """对最优参数组合执行滚动窗口验证。
+
+    固定窗口 3 年，步长 1 年，产生 3 个窗口：
+        W1: IS 2020-01~2022-12, OOS 2023-01~2023-12
+        W2: IS 2021-01~2023-12, OOS 2024-01~2024-12
+        W3: IS 2022-01~2024-12, OOS 2025-01~base_end
+
+    返回每个窗口的 OOS 指标表（宽表），
+    以及在报告中直接打印的汇总行（含 CV 标记）。
+
+    Parameters
+    ----------
+    df_best : pd.DataFrame
+        Top-N 最优参数组合表（含 atr_period / breakout_period / stop_period 等列）。
+    modes : list[str]
+        需要验证的模式列表。
+    base_start, base_end : str
+        数据总区间（用于 W3 OOS 截断）。
+    workers : int
+        并行进程数。
+
+    Returns
+    -------
+    pd.DataFrame
+        行 = (mode, param_idx, window), 列 = 各项指标。
+    """
+    from datetime import datetime
+
+    # ── 定义 3 个窗口 ──
+    windows = [
+        ("W1", "2020-01-01", "2022-12-31", "2023-01-01", "2023-12-31"),
+        ("W2", "2021-01-01", "2023-12-31", "2024-01-01", "2024-12-31"),
+        ("W3", "2022-01-01", "2024-12-31", "2025-01-01", base_end),
+    ]
+
+    logger.info("=" * 60)
+    logger.info("滚动窗口验证 (%d 个窗口)", len(windows))
+    for wname, is_s, is_e, oos_s, oos_e in windows:
+        logger.info("  %s: IS %s~%s → OOS %s~%s", wname, is_s, is_e, oos_s, oos_e)
+    logger.info("=" * 60)
+
+    all_rows = []
+    all_tasks = []
+    task_meta = {}  # run_id -> (idx, mode, wname, phase)
+
+    run_counter = 20000  # avoid collision
+
+    for idx, (_, row) in enumerate(df_best.iterrows()):
+        params = {
+            "atr_period": int(row["atr_period"]),
+            "breakout_period": int(row["breakout_period"]),
+            "stop_period": int(row["stop_period"]),
+            "stop_atr_multiple": float(row["stop_atr_multiple"]),
+            "alpha": float(row["alpha"]),
+            "max_cumulative_loss_pct": float(row.get("max_cumulative_loss_pct", 0.15)),
+            "max_consecutive_losses": int(row.get("max_consecutive_losses", 8)),
+        }
+
+        for mode in modes:
+            for wname, is_s, is_e, oos_s, oos_e in windows:
+                # IS 任务
+                rid = run_counter
+                run_counter += 1
+                task_meta[rid] = (params, mode, idx, wname, "is")
+                all_tasks.append((params, mode, is_s, is_e, rid))
+                # OOS 任务
+                rid = run_counter
+                run_counter += 1
+                task_meta[rid] = (params, mode, idx, wname, "oos")
+                all_tasks.append((params, mode, oos_s, oos_e, rid))
+
+    # ── 并行/串行执行 ──
+    logger.info("滚动窗口: %d 次回测, workers=%d", len(all_tasks), workers)
+    raw_results = _run_tasks(all_tasks, workers, verbose=False)
+
+    # ── 按 run_id 匹配组装 ──
+    # 先收集: (idx, mode, wname) -> {is_result, oos_result}
+    roll_map: dict = {}
+    for result in raw_results:
+        if result is None:
+            continue
+        rid = result.get("run_id")
+        if rid is None or rid not in task_meta:
+            continue
+        params, mode, idx, wname, phase = task_meta[rid]
+        key = (idx, mode, wname)
+        if key not in roll_map:
+            roll_map[key] = {"params": params}
+        roll_map[key][f"{phase}_result"] = result
+
+    # 组装最终行
+    for (idx, mode, wname), data in roll_map.items():
+        is_r = data.get("is_result")
+        oos_r = data.get("oos_result")
+        if is_r is None or oos_r is None:
+            continue
+        entry = {
+            "window": wname,
+            "mode": mode,
+            "param_idx": idx,
+            "atr_period": data["params"]["atr_period"],
+            "breakout_period": data["params"]["breakout_period"],
+            "stop_period": data["params"]["stop_period"],
+            "stop_atr_multiple": data["params"]["stop_atr_multiple"],
+            "alpha": data["params"]["alpha"],
+            "is_sharpe": is_r.get("sharpe"),
+            "is_cagr": is_r.get("cagr"),
+            "is_mdd": is_r.get("max_drawdown"),
+            "is_trades": is_r.get("total_trades"),
+            "oos_sharpe": oos_r.get("sharpe"),
+            "oos_cagr": oos_r.get("cagr"),
+            "oos_mdd": oos_r.get("max_drawdown"),
+            "oos_trades": oos_r.get("total_trades"),
+        }
+        all_rows.append(entry)
+
+    if not all_rows:
+        logger.warning("滚动窗口验证未产生任何有效结果")
+        return pd.DataFrame()
+
+    df_rolling = pd.DataFrame(all_rows)
+
+    # ── 打印汇总 ──
+    logger.info("")
+    logger.info("滚动窗口验证汇总")
+    logger.info("-" * 80)
+
+    groups = df_rolling.groupby(["mode", "param_idx"])
+    for (mode_val, pidx), grp in groups:
+        sharpe_vals = grp["oos_sharpe"].dropna()
+        cagr_vals = grp["oos_cagr"].dropna()
+        mdd_vals = grp["oos_mdd"].dropna()
+
+        if len(sharpe_vals) < 2:
+            logger.info("  [%s param#%d] 有效窗口不足", mode_val, pidx)
+            continue
+
+        sharpe_mean = sharpe_vals.mean()
+        sharpe_std = sharpe_vals.std()
+        sharpe_cv = sharpe_std / max(abs(sharpe_mean), 0.01)
+
+        cagr_mean = cagr_vals.mean()
+        cagr_std = cagr_vals.std()
+
+        flag = " ⚠️ CV>0.5" if sharpe_cv > 0.5 else ""
+        logger.info(
+            "  [%s param#%d] OOS Sharpe: %.3f ± %.3f (CV=%.2f)%s | CAGR: %.2f%% ± %.2f%% | MDD: %.2f%%",
+            mode_val, pidx,
+            sharpe_mean, sharpe_std, sharpe_cv, flag,
+            cagr_mean, cagr_std,
+            mdd_vals.mean(),
+        )
+
+        # 逐窗口明细
+        for _, wrow in grp.sort_values("window").iterrows():
+            logger.info(
+                "    %s: IS Sharpe=%.3f OOS Sharpe=%.3f | IS CAGR=%.2f%% OOS CAGR=%.2f%% | OOS MDD=%.2f%%",
+                wrow["window"],
+                wrow["is_sharpe"] if pd.notna(wrow.get("is_sharpe")) else 0,
+                wrow["oos_sharpe"] if pd.notna(wrow.get("oos_sharpe")) else 0,
+                wrow["is_cagr"] if pd.notna(wrow.get("is_cagr")) else 0,
+                wrow["oos_cagr"] if pd.notna(wrow.get("oos_cagr")) else 0,
+                wrow["oos_mdd"] if pd.notna(wrow.get("oos_mdd")) else 0,
+            )
+
+    return df_rolling
+
+
+# ════════════════════════════════════════════════════════════
+#  8. 参数稳定性面扫描 (±1 邻域)
+# ════════════════════════════════════════════════════════════
+
+def run_stability_scan(
+    df_best: pd.DataFrame,
+    *,
+    modes: List[str] = MODES,
+    start_date: str = "2020-01-01",
+    end_date: str = "2026-06-10",
+    workers: int = 1,
+) -> pd.DataFrame:
+    """对最优参数组合执行 ±1 邻域稳定性扫描。
+
+    对离散参数 (atr_period, breakout_period, stop_period) 做 ±1 全排列，
+    对连续参数 (stop_atr_multiple, alpha) 做中心值。
+    统计目标指标在邻域内的分布，判断参数是否为尖锐峰值。
+
+    Parameters
+    ----------
+    df_best : pd.DataFrame
+        Top-N 最优参数组合表。
+    modes : list[str]
+        需要验证的模式列表。
+    start_date, end_date : str
+        回测区间（全区间回测）。
+    workers : int
+        并行进程数。
+
+    Returns
+    -------
+    pd.DataFrame
+        邻域内所有参数组合的绩效指标。
+    """
+    logger.info("=" * 60)
+    logger.info("参数稳定性面扫描 (±1 邻域)")
+    logger.info("=" * 60)
+
+    all_rows = []
+    all_tasks = []  # for parallel execution
+    task_map = {}   # run_id -> (params, mode, idx)
+
+    run_counter = 10000  # avoid collision with grid search run_ids
+
+    for idx, (_, row) in enumerate(df_best.iterrows()):
+        # 中心参数
+        atr_c = int(row["atr_period"])
+        break_c = int(row["breakout_period"])
+        stop_c = int(row["stop_period"])
+        mult_c = float(row["stop_atr_multiple"])
+        alpha_c = float(row["alpha"])
+        max_loss = float(row.get("max_cumulative_loss_pct", 0.15))
+        max_consec = int(row.get("max_consecutive_losses", 8))
+
+        logger.info("Top param #%d: atr=%d breakout=%d stop=%d mult=%.1f α=%.2f",
+                     idx, atr_c, break_c, stop_c, mult_c, alpha_c)
+
+        # 构建邻域: 离散参数 ±1，确保 ≥ 1
+        atr_vals = [max(1, atr_c - 1), atr_c, atr_c + 1]
+        break_vals = [max(1, break_c - 1), break_c, break_c + 1]
+        stop_vals = [max(1, stop_c - 1), stop_c, stop_c + 1]
+
+        # 去重
+        atr_vals = sorted(set(atr_vals))
+        break_vals = sorted(set(break_vals))
+        stop_vals = sorted(set(stop_vals))
+
+        n_combo = len(atr_vals) * len(break_vals) * len(stop_vals)
+        logger.info("  邻域: atr=%s, breakout=%s, stop=%s (%d 组合 × %d 模式 = %d 次回测)",
+                     atr_vals, break_vals, stop_vals, n_combo, len(modes), n_combo * len(modes))
+
+        for mode in modes:
+            for a in atr_vals:
+                for b in break_vals:
+                    for s in stop_vals:
+                        params = {
+                            "atr_period": a,
+                            "breakout_period": b,
+                            "stop_period": s,
+                            "stop_atr_multiple": mult_c,
+                            "alpha": alpha_c,
+                            "max_cumulative_loss_pct": max_loss,
+                            "max_consecutive_losses": max_consec,
+                        }
+                        rid = run_counter
+                        run_counter += 1
+                        task_map[rid] = (params, mode, idx)
+                        all_tasks.append((params, mode, start_date, end_date, rid))
+
+    # ── 并行/串行执行所有回测 ──
+    logger.info("稳定性扫描: %d 次回测, workers=%d", len(all_tasks), workers)
+    raw_results = _run_tasks(all_tasks, workers, verbose=False)
+
+    # ── 按 run_id 匹配回参数组装 DataFrame ──
+    for result in raw_results:
+        if result is None:
+            continue
+        rid = result.get("run_id")
+        if rid is None or rid not in task_map:
+            continue
+        params, mode, idx = task_map[rid]
+        entry = {
+            "param_idx": idx,
+            "mode": mode,
+            "atr_period": params["atr_period"],
+            "breakout_period": params["breakout_period"],
+            "stop_period": params["stop_period"],
+            "stop_atr_multiple": params["stop_atr_multiple"],
+            "alpha": params["alpha"],
+            "sharpe": result.get("sharpe"),
+            "cagr": result.get("cagr"),
+            "max_drawdown": result.get("max_drawdown"),
+            "total_trades": result.get("total_trades"),
+            "calmar": result.get("calmar"),
+            "annual_vol": result.get("annual_vol"),
+        }
+        all_rows.append(entry)
+
+    if not all_rows:
+        logger.warning("稳定性扫描未产生任何有效结果")
+        return pd.DataFrame()
+
+    df_stab = pd.DataFrame(all_rows)
+
+    # ── 打印汇总 ──
+    logger.info("")
+    logger.info("稳定性扫描汇总")
+    logger.info("-" * 80)
+
+    groups = df_stab.groupby(["mode", "param_idx"])
+    for (mode_val, pidx), grp in groups:
+        sharpe_vals = grp["sharpe"].dropna()
+        cagr_vals = grp["cagr"].dropna()
+        mdd_vals = grp["max_drawdown"].dropna()
+
+        if len(sharpe_vals) < 2:
+            continue
+
+        # 从 df_best 查找中心参数
+        best_row = df_best.iloc[pidx]
+        bc_atr = int(best_row["atr_period"])
+        bc_break = int(best_row["breakout_period"])
+        bc_stop = int(best_row["stop_period"])
+
+        # 中心点指标
+        center = grp[
+            (grp["atr_period"] == bc_atr)
+            & (grp["breakout_period"] == bc_break)
+            & (grp["stop_period"] == bc_stop)
+        ]
+        center_sharpe = center["sharpe"].values[0] if len(center) > 0 and pd.notna(center["sharpe"].values[0]) else 0
+        center_cagr = center["cagr"].values[0] if len(center) > 0 and pd.notna(center["cagr"].values[0]) else 0
+
+        # 邻域分布
+        sharpe_p25 = sharpe_vals.quantile(0.25)
+        sharpe_p75 = sharpe_vals.quantile(0.75)
+        sharpe_min = sharpe_vals.min()
+        sharpe_max = sharpe_vals.max()
+        sharpe_iqr = sharpe_p75 - sharpe_p25
+
+        # 峰值判断: 邻域中 ≥50% 组合 Sharpe < 中心Sharpe × 0.7 → 尖锐
+        poor_count = (sharpe_vals < center_sharpe * 0.7).sum()
+        poor_pct = poor_count / len(sharpe_vals) * 100
+        sharp_flag = " 🔴 尖锐峰值" if poor_pct >= 50 else ""
+
+        logger.info(
+            "  [%s param#%d] 邻域 %d 组 | 中心Sharpe=%.3f CAGR=%.2f%%",
+            mode_val, pidx, len(sharpe_vals), center_sharpe, center_cagr,
+        )
+        logger.info(
+            "    Sharpe 分布: P25=%.3f P50=%.3f P75=%.3f 区间=[%.3f, %.3f] IQR=%.3f",
+            sharpe_p25, sharpe_vals.median(), sharpe_p75,
+            sharpe_min, sharpe_max, sharpe_iqr,
+        )
+        logger.info(
+            "    CAGR 分布: P25=%.2f%% P50=%.2f%% P75=%.2f%% 区间=[%.2f%%, %.2f%%]",
+            cagr_vals.quantile(0.25), cagr_vals.median(), cagr_vals.quantile(0.75),
+            cagr_vals.min(), cagr_vals.max(),
+        )
+        logger.info(
+            "    MDD 分布: P25=%.2f%% P50=%.2f%% P75=%.2f%%",
+            mdd_vals.quantile(0.25), mdd_vals.median(), mdd_vals.quantile(0.75),
+        )
+        logger.info(
+            "    邻域劣化(Sharpe<70%%中心): %d/%d (%.0f%%)%s",
+            poor_count, len(sharpe_vals), poor_pct, sharp_flag,
+        )
+
+    return df_stab
+
+
+# ════════════════════════════════════════════════════════════
 #  CLI 入口
 # ════════════════════════════════════════════════════════════
 
@@ -753,7 +1133,11 @@ def main():
     )
     parser.add_argument(
         "--rolling", action="store_true", default=False,
-        help="启用滚动窗口稳健性检验 (默认关闭)",
+        help="启用滚动窗口检验 (默认关闭)",
+    )
+    parser.add_argument(
+        "--stability", action="store_true", default=False,
+        help="启用参数稳定性面扫描 (±1 邻域) (默认关闭)",
     )
     parser.add_argument(
         "--workers", "-w", type=int, default=4,
@@ -829,6 +1213,40 @@ def main():
     if args.plot:
         plot_results(pd.concat([df_full, df_oos], ignore_index=True), OUTPUT_DIR)
 
+    # ── 滚动窗口检验（可选） ──
+    if args.rolling:
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("运行滚动窗口检验...")
+        df_roll = run_rolling_validation(
+            df_best,
+            modes=modes,
+            base_start=args.start,
+            base_end=args.end,
+            workers=args.workers,
+        )
+        if not df_roll.empty:
+            roll_path = OUTPUT_DIR / "rolling_validation.csv"
+            df_roll.to_csv(roll_path, index=False, encoding="utf-8")
+            logger.info("滚动窗口结果已保存: %s", roll_path)
+
+    # ── 参数稳定性面扫描（可选） ──
+    if args.stability:
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("运行参数稳定性面扫描...")
+        df_stab = run_stability_scan(
+            df_best,
+            modes=modes,
+            start_date=args.start,
+            end_date=args.end,
+            workers=args.workers,
+        )
+        if not df_stab.empty:
+            stab_path = OUTPUT_DIR / "stability_scan.csv"
+            df_stab.to_csv(stab_path, index=False, encoding="utf-8")
+            logger.info("稳定性扫描结果已保存: %s", stab_path)
+
     # ── 汇总 ──
     print()
     print("=" * 60)
@@ -837,6 +1255,10 @@ def main():
     print(f"  样本内结果: {OUTPUT_DIR / 'grid_results_full.csv'}")
     print(f"  样本外验证: {OUTPUT_DIR / 'oos_validation.csv'}")
     print(f"  最优参数:   {OUTPUT_DIR / 'best_params.json'}")
+    if args.rolling:
+        print(f"  滚动窗口:   {OUTPUT_DIR / 'rolling_validation.csv'}")
+    if args.stability:
+        print(f"  稳定性扫描: {OUTPUT_DIR / 'stability_scan.csv'}")
     print()
     print("  推荐手动步骤：")
     print("    1. 查看 best_params.json 选取最终参数")

@@ -218,6 +218,7 @@ def risk_parity_weights(
         # 其中 mrc_i = w_i * (Σw)_i
         mrc = w * sw                  # shape (N,) 当前每个品种的边际风险贡献
         ratio = target / (mrc + 1e-30)  # 避免除零
+        ratio = np.maximum(ratio, 0.0)  # 防止负值导致 sqrt NaN
         w = w * np.sqrt(ratio)
 
         # 归一化

@@ -49,11 +49,23 @@ def get_t0_symbols(config: Dict[str, Any]) -> List[str]:
 
 
 def get_futures_symbols(config: Dict[str, Any]) -> List[str]:
-    """期货品种列表（从 futures.futures_list 读取，兼容旧 SIX_SYMBOLS 模式）。"""
-    # 为兼容 run_backtest 中 FUTURES_SYMBOLS，直接从配置或默认返回
-    # 当前期货品种尚未加入 config，保留硬编码默认值供期货模式用
-    return [
-        "CU.SHF", "RB.SHF", "RU.SHF", "M.DCE", "Y.DCE",
-        "P.DCE", "JM.DCE", "I.DCE", "CF.ZCE", "TA.ZCE",
-        "MA.ZCE", "FG.ZCE",
-    ]
+    """期货品种 code 列表（从 futures.futures_list 读取）。
+
+    字段命名为 ts_code（Tushare 术语），本函数返回纯 code 字符串列表。
+    """
+    return [s["ts_code"] for s in config.get("futures", {}).get("futures_list", [])]
+
+
+def get_futures_list(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """期货品种完整列表（含 name/exchange/category/multiplier 等元信息）。
+    供 pull_futures.py 等需要品种详情的脚本使用。
+    """
+    return config.get("futures", {}).get("futures_list", [])
+
+
+def get_futures_multipliers(config: Dict[str, Any]) -> Dict[str, int]:
+    """期货合约乘数映射 {ts_code: multiplier}，供 run_backtest 计算手数价值使用。"""
+    return {
+        s["ts_code"]: s.get("multiplier", 1)
+        for s in config.get("futures", {}).get("futures_list", [])
+    }
