@@ -114,6 +114,18 @@ def load_oos_results() -> Optional[pd.DataFrame]:
     return None
 
 
+def load_comparison_results() -> Optional[pd.DataFrame]:
+    """从 results/backtest/ 加载最新对比 CSV。"""
+    backtest_dir = ROOT / "results" / "backtest"
+    if not backtest_dir.exists():
+        return None
+    csvs = sorted(backtest_dir.glob("comparison_*.csv"))
+    if not csvs:
+        return None
+    df = pd.read_csv(csvs[-1], index_col=0)
+    return df
+
+
 # ════════════════════════════════════════════════════════════
 #  2. 回测运行
 # ════════════════════════════════════════════════════════════
@@ -325,6 +337,16 @@ def generate_params_section(df_full: Optional[pd.DataFrame], df_oos: Optional[pd
     if best_path.exists():
         with open(best_path, "r", encoding="utf-8") as f:
             best = json.load(f)
+        # 去重：只按海龟核心参数去重（排除风控参数重复行）
+        seen = set()
+        unique_best = []
+        for b in best:
+            key = (b.get("mode"), b.get("atr_period"), b.get("breakout_period"),
+                   b.get("stop_period"), b.get("stop_atr_multiple"), b.get("alpha"))
+            if key not in seen:
+                seen.add(key)
+                unique_best.append(b)
+        best = unique_best
         lines.append("| 模式 | ATR | 突破 | 止损 | 倍数 | α | Sharpe | CAGR% | MDD% | Trades | 评分 |")
         lines.append("|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|")
         for b in best[:5]:
@@ -339,6 +361,16 @@ def generate_params_section(df_full: Optional[pd.DataFrame], df_oos: Optional[pd
     if df_full is not None and df_oos is not None and best_path.exists():
         with open(best_path, "r", encoding="utf-8") as f:
             best = json.load(f)
+        # 去重（同核心参数只保留首个）
+        seen = set()
+        unique_best = []
+        for b in best:
+            key = (b.get("mode"), b.get("atr_period"), b.get("breakout_period"),
+                   b.get("stop_period"), b.get("stop_atr_multiple"), b.get("alpha"))
+            if key not in seen:
+                seen.add(key)
+                unique_best.append(b)
+        best = unique_best
 
         decay_rows = []
         for b in best[:5]:
@@ -517,10 +549,34 @@ def _per_symbol_table(per_symbol: dict) -> str:
     return "\n".join(lines)
 
 
+def generate_comparison_section(df: Optional[pd.DataFrame]) -> str:
+    """生成基准对比表格，数据不存在时返回占位符。"""
+    if df is None or df.empty:
+        return (
+            "## 3. 基准对比 (B1-B4)\n\n"
+            "> ⚠️ 请先执行 `py scripts/run_comparison.py --save` 生成对比数据。\n\n"
+            "基准定义（§4.4）：\n"
+            "- B1：买入等权持有\n- B2：等权定期再平衡\n"
+            "- B3：ATR 等风险贡献\n- B4：海龟（纯策略，国债逻辑已移除）\n"
+        )
+    lines = ["## 3. 基准对比 (B1-B4)\n"]
+    lines.append("| 策略 | 总收益率% | 年化收益% | 夏普 | 最大回撤% | 年化波动% | 胜率% | 盈亏比 | 交易次数 | 最终净值 |")
+    lines.append("|:--|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|")
+    for idx, row in df.iterrows():
+        lines.append(
+            f"| {idx} | {row.get('总收益率%', 'N/A')} | {row.get('年化收益%', 'N/A')} | "
+            f"{row.get('夏普', 'N/A')} | {row.get('最大回撤%', 'N/A')} | {row.get('年化波动%', 'N/A')} | "
+            f"{row.get('胜率%', 'N/A')} | {row.get('盈亏比', 'N/A')} | {row.get('交易次数', 'N/A')} | "
+            f"{row.get('最终净值', 'N/A')} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def generate_report(metrics: dict, df_full: Optional[pd.DataFrame] = None,
                     df_oos: Optional[pd.DataFrame] = None, mode: str = "A",
                     start_date: str = "2020-01-01", end_date: str = "2026-06-10",
-                    per_symbol: Optional[dict] = None) -> str:
+                    per_symbol: Optional[dict] = None,
+                    comparison_df: Optional[pd.DataFrame] = None) -> str:
     mode_label = f"模式 {'A (无过滤)' if mode == 'A' else 'B (55日过滤)'}"
     sections = [
         f"# 跨市场ETF海龟组合策略 — 综合回测报告\n",
@@ -532,11 +588,7 @@ def generate_report(metrics: dict, df_full: Optional[pd.DataFrame] = None,
         "## 2. 核心绩效\n",
         generate_performance_table(metrics),
         "\n---\n",
-        "## 3. 基准对比 (B1-B4)\n",
-        "> ⚠️ 请先执行 `py scripts/run_comparison.py` 生成对比数据。\n\n"
-        "基准定义（§4.4）：\n"
-        "- B1：买入等权持有\n- B2：等权定期再平衡\n"
-        "- B3：ATR 等风险贡献\n- B4：海龟（纯策略，国债逻辑已移除）\n",
+        generate_comparison_section(comparison_df),
         "\n---\n",
         generate_params_section(df_full, df_oos),
         # ── 品种级交易统计（可选） ──
@@ -590,7 +642,11 @@ def main():
     # 从指标中取出品种级数据（run_backtest_with_best 已提取）
     per_symbol = metrics.pop("per_symbol", {})
 
-    report = generate_report(metrics, df_full, df_oos, args.mode, args.start, args.end, per_symbol=per_symbol)
+    # 加载基准对比数据
+    comparison_df = load_comparison_results()
+
+    report = generate_report(metrics, df_full, df_oos, args.mode, args.start, args.end,
+                             per_symbol=per_symbol, comparison_df=comparison_df)
     output_path.write_text(report, encoding="utf-8")
     logger.info("报告已保存: %s (%d 行)", output_path, len(report.splitlines()))
     metrics_path = output_path.with_suffix(".json").with_stem(output_path.stem + "_metrics")

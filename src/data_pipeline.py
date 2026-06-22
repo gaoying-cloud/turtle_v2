@@ -288,7 +288,7 @@ def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataF
     # 确保每个交易日都有因子可用，避免 missing date 留下未调整行
     all_dates = df["date"].dropna().unique()
     adj_series = pd.Series(index=pd.DatetimeIndex(adj_map.keys()), data=list(adj_map.values()))
-    adj_series = adj_series.reindex(pd.DatetimeIndex(all_dates), method="ffill")
+    adj_series = adj_series.reindex(pd.DatetimeIndex(all_dates), method="ffill").bfill()
     full_adj_map = adj_series.to_dict()
 
     for idx, row in df.iterrows():

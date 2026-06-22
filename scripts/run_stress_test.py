@@ -511,7 +511,7 @@ def _run_shock_scenario(
     monthly_first: list[str] = []
     current_month = None
     for d_str in sorted_dates:
-        d = datetime.strptime(d_str, "%Y-%m-%d")
+        d = d_str.to_pydatetime() if hasattr(d_str, "to_pydatetime") else datetime.strptime(str(d_str)[:10], "%Y-%m-%d")
         if d.month != current_month:
             current_month = d.month
             monthly_first.append(d_str)
@@ -562,7 +562,7 @@ def _run_shock_scenario(
 
         # 组合损失百分比
         loss_pct = float(total_position_value / initial_cash) * 100
-        month_label = datetime.strptime(shock_date, "%Y-%m-%d").strftime("%Y-%m")
+        month_label = pd.Timestamp(shock_date).to_pydatetime().strftime("%Y-%m")
         monthly_losses[month_label] = round(loss_pct, 4)
 
     return monthly_losses
@@ -1064,7 +1064,7 @@ def main():
         print(f"  B1 合成冲击              | {shock_df.shape[0]} 冲击幅度 × {shock_df.shape[1]} 月")
     if liquidity_result is not None:
         print(f"  B2 流动性枯竭            | 最大损失 {liquidity_result['max_loss_pct']}% "
-              f"(¥{liquidity_result['max_loss_amount']:,.2f})")
+              f"(CNY {liquidity_result['max_loss_amount']:,.2f})")
     print(f"  报告: {output_dir / 'stress_report.md'}")
     print(f"  结论: {output_dir / 'stress_conclusion.json'}")
     print("=" * 60)
