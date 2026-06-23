@@ -240,6 +240,10 @@ def run_backtest(
     # 滑点通过 commission 模拟（单边）
     cerebro.broker.setcommission(commission=commission + slippage)
 
+    # ── 期货模式：cheat_on_close 消除 1-bar 执行延迟 ──
+    if futures:
+        cerebro.broker.set_coc(True)
+
     # ── 品种属性 ──
     if futures:
         # 期货全部可做空，无 T+1 约束
@@ -252,19 +256,27 @@ def run_backtest(
     # ── 期货合约乘数（统一从 config 读取） ──
     FUTURES_MULTIPLIERS = get_futures_multipliers(config) if futures else {}
 
+    # ── 期货专用参数覆盖 ──
+    fc = config.get("futures", {})
+    futures_risk_per_unit = fc.get("risk_per_unit", 0.02) if futures else None
+    futures_single_max_risk = fc.get("single_max_risk") if futures else None
+    futures_max_portfolio_risk = fc.get("max_portfolio_risk") if futures else None
+    futures_max_consecutive = fc.get("max_consecutive_losses") if futures else None
+    futures_pause_days = fc.get("pause_days") if futures else None
+
     # ── 添加策略（含 S4 风险平价权重参数） ──
     cerebro.addstrategy(
         TurtleStrategy,
         turtle_params=config["turtle"],
         symbols=trading_symbols,  # 不含国债（国债是现金管理工具）
         use_55_filter=(mode == "B"),
-        risk_per_unit=config["turtle"]["risk_per_unit"],
+        risk_per_unit=futures_risk_per_unit if futures else config["turtle"]["risk_per_unit"],
         concentration_trigger=config["risk"]["concentration_trigger"],
-        max_consecutive_losses=config["risk"]["max_consecutive_losses"],
+        max_consecutive_losses=futures_max_consecutive if futures else config["risk"]["max_consecutive_losses"],
         max_cumulative_loss_pct=config["risk"]["max_cumulative_loss_pct"],
-        pause_days=config["risk"]["pause_days"],
-        single_max_risk=config["risk"]["single_max_risk"],
-        max_portfolio_risk=config["risk"]["max_portfolio_risk"],
+        pause_days=futures_pause_days if futures else config["risk"]["pause_days"],
+        single_max_risk=futures_single_max_risk if futures else config["risk"]["single_max_risk"],
+        max_portfolio_risk=futures_max_portfolio_risk if futures else config["risk"]["max_portfolio_risk"],
         alpha=config["weighting"]["alpha"],
         cov_lookback_days=config["weighting"]["cov_lookback_days"],
         rebalance_quarterly=config["weighting"]["rebalance_quarterly"],
@@ -584,6 +596,8 @@ def main():
         action="store_true",
         default=False,
         help="按年拆分回测，输出各年度指标对比表",
+    )
+    parser.add_argument(
     )
     parser.add_argument(
         "--entry-mode",

@@ -1,0 +1,20 @@
+{
+  "mode": "A",
+  "start_date": "2014-01-02",
+  "end_date": "2026-06-22",
+  "initial_cash": 120000,
+  "final_value": 653669.36,
+  "total_return": 444.72,
+  "cagr": 14.56,
+  "sharpe": 0.4498,
+  "max_drawdown": 15.38,
+  "win_rate": 44.59,
+  "profit_factor": 5.1963,
+  "total_trades": 74,
+  "annual_vol": 0.0,
+  "calmar": 0.9471,
+  "concentration_cut": 0,
+  "dd_warning": 0,
+  "loss_pause": 0,
+  "t1_stop_delay": 0
+}

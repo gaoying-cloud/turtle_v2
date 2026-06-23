@@ -114,6 +114,7 @@ def run_full_backtest(start: str, end: str):
 
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)
+    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn", timeframe=bt.TimeFrame.Days)
 
     results = cerebro.run()
     if not results:
@@ -241,58 +242,71 @@ def compute_entry_features(trades_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(features_list)
 
 
-def run_yearly_breakdown(start: str, end: str) -> pd.DataFrame:
-    """Run backtest per year and return yearly metrics."""
+def run_yearly_breakdown(strat, features_df: pd.DataFrame,
+                         initial_cash: float = 120000) -> pd.DataFrame:
+    """从全周期回测的 TimeReturn analyzer 切年度指标。
+
+    旧实现每年独立 run_full_backtest，导致:
+      (a) 复利断裂 — 跨年持仓被切断，年度收益不连续;
+      (b) pnl 重复计入 — 每年独立从 initial_cash 起算，Σpnl ≠ 真实账户增长。
+    新实现只跑一次全周期回测，用每日收益率序列聚合年度收益、MDD、Calmar，
+    年度交易数/胜率/pnl 则从全周期 features_df 按入场年聚合。
+    """
+    if strat is None or features_df.empty:
+        return pd.DataFrame()
+
+    # ── 每日净值序列（从 TimeReturn analyzer 反推 cumulative 净值）──
+    tr = strat.analyzers.timereturn.get_analysis()
+    daily_ret = pd.Series(dict(tr))  # index=日期, value=当日收益率
+    if daily_ret.empty:
+        return pd.DataFrame()
+    daily_ret.index = pd.to_datetime(daily_ret.index)
+    # 净值 = initial_cash × (1+r).cumprod()
+    nav = initial_cash * (1 + daily_ret).cumprod()
+
+    years = sorted(set(nav.index.year))
+    df = features_df.copy()
+    df["entry_year"] = pd.to_datetime(df["entry_date"]).dt.year
+
     rows = []
-    years = list(range(int(start[:4]), int(end[:4]) + 1))
-    initial_cash = CONFIG["initial_cash"]
-
     for y in years:
-        y_start = f"{y}-01-01"
-        y_end = f"{y}-12-31" if y < int(end[:4]) else end
-
-        strat, _ = run_full_backtest(y_start, y_end)
-        if strat is None:
+        # ── 当年净值切片（含上年末最后一个交易日作起点，保证连续复利）──
+        prev_idx = nav.index[nav.index.year < y]
+        start_nav = nav.loc[prev_idx[-1]] if len(prev_idx) else initial_cash
+        year_nav = nav[nav.index.year == y]
+        if year_nav.empty:
             continue
+        end_nav = year_nav.iloc[-1]
+        ret = (end_nav / start_nav - 1) * 100
 
-        fv = strat.broker.getvalue()
-        ret = (fv / initial_cash - 1) * 100
+        # ── 当年 MDD（基于当年净值序列的回撤）──
+        running_max = year_nav.cummax()
+        dd = (year_nav - running_max) / running_max * 100
+        mdd = abs(dd.min()) if not dd.empty else 0.0
+        calmar_val = round(ret / mdd, 4) if mdd > 1e-9 else None
 
-        # Drawdown & Calmar
-        dd = strat.analyzers.drawdown.get_analysis()
-        mdd = dd.get("max", {}).get("drawdown", 0.0) if dd else 0.0
-        calmar_val = round(ret / abs(mdd), 4) if mdd and mdd != 0 else None
-
-        trades = getattr(strat, "_my_trades", [])
-        n_trades = len(trades)
-        wins = sum(1 for t in trades if t["was_win"])
+        # ── 当年交易（按入场年归属）──
+        yr_trades = df[df["entry_year"] == y]
+        n_trades = len(yr_trades)
+        wins = int(yr_trades["was_win"].sum()) if n_trades else 0
         wr = wins / n_trades * 100 if n_trades > 0 else 0
-        total_pnl = sum(t["pnl"] for t in trades)
-        avg_win = np.mean([t["pnl"] for t in trades if t["pnl"] > 0]) if wins > 0 else 0
-        avg_loss = abs(np.mean([t["pnl"] for t in trades if t["pnl"] < 0])) if n_trades > wins else 0
-        pf = avg_win / avg_loss if avg_loss > 0 else float("inf")
-        max_hold = max((t["holding_days"] for t in trades), default=0)
-
-        # Max simultaneous positions
-        pos_ts = pd.Series(0, index=range(252))
-        for t in trades:
-            try:
-                ed = pd.Timestamp(t["entry_date"])
-                xd = pd.Timestamp(t["exit_date"])
-            except:
-                continue
-        max_pos = 0  # simplified
+        total_pnl = float(yr_trades["pnl"].sum()) if n_trades else 0.0
+        win_pnls = yr_trades.loc[yr_trades["pnl"] > 0, "pnl"]
+        loss_pnls = yr_trades.loc[yr_trades["pnl"] < 0, "pnl"]
+        avg_win = float(win_pnls.mean()) if len(win_pnls) else 0
+        avg_loss = abs(float(loss_pnls.mean())) if len(loss_pnls) else 0
+        pf = avg_win / avg_loss if avg_loss > 0 else None
+        max_hold = int(yr_trades["holding_days"].max()) if n_trades else 0
 
         rows.append({
             "year": y, "return_pct": round(ret, 2),
-            "mdd_pct": round(mdd, 2) if mdd else None,
+            "mdd_pct": round(mdd, 2) if mdd > 0 else None,
             "calmar": calmar_val,
             "trades": n_trades, "win_rate": round(wr, 1),
-            "profit_factor": round(pf, 2) if pf != float("inf") else None,
+            "profit_factor": round(pf, 2) if pf is not None else None,
             "total_pnl": round(total_pnl, 2),
             "max_holding_days": max_hold,
         })
-        del strat; gc.collect()
 
     return pd.DataFrame(rows)
 
@@ -497,11 +511,17 @@ def holding_analysis(features_df: pd.DataFrame) -> dict:
 #  8. Slippage Sensitivity Stress Test
 # ════════════════════════════════════════════════════════════
 
-def slippage_stress(features_df: pd.DataFrame, years: int = 12.5) -> dict:
-    """Stress test: add fixed slippage to each trade, recompute CAGR."""
+def slippage_stress(features_df: pd.DataFrame, baseline_final_value: float,
+                    initial_cash: float = 120000, years: int = 12.5) -> dict:
+    """Stress test: add fixed slippage to each trade, recompute CAGR from TRUE final value.
+
+    baseline_final_value 必须来自 Backtrader broker.getvalue() 的真实终值（含复利），
+    不能用 initial_cash + Σpnl。原实现把每笔 pnl 当成从同一初始资金独立起算、忽略复利，
+    导致 CAGR 被高估（27.18% vs 扩展报告真实 14.56%）。
+    """
     df = features_df.copy()
 
-    # Approximate shares and turnover
+    # Approximate shares and turnover per trade
     df["price_diff"] = abs(df["exit_price"] - df["entry_price"])
     df["approx_shares"] = np.where(df["price_diff"] > 0,
                                     abs(df["pnl"]) / df["price_diff"],
@@ -513,7 +533,7 @@ def slippage_stress(features_df: pd.DataFrame, years: int = 12.5) -> dict:
     df["tick_cost"] = df["approx_shares"] * tick * 2  # entry + exit
 
     baseline_pnl = df["pnl"].sum()
-    initial_cash = 120000
+    baseline_cagr = ((baseline_final_value / initial_cash) ** (1 / years) - 1) * 100
 
     results = []
     scenarios = [
@@ -532,25 +552,20 @@ def slippage_stress(features_df: pd.DataFrame, years: int = 12.5) -> dict:
         else:
             total_cost = 0.0
 
-        net_pnl = baseline_pnl - total_cost
-        fv = initial_cash + net_pnl
+        # 从真实终值扣除执行成本
+        fv = baseline_final_value - total_cost
         cagr = ((fv / initial_cash) ** (1 / years) - 1) * 100
 
         results.append({
             "scenario": label,
             "total_cost": round(total_cost, 2),
-            "net_pnl": round(net_pnl, 2),
+            "net_pnl": round(baseline_pnl - total_cost, 2),
             "final_value": round(fv, 2),
             "cagr": round(cagr, 2),
-            "cagr_delta_pct": 0.0,  # fill below
+            "cagr_delta_pct": round(cagr - baseline_cagr, 2),
         })
 
-    # Calculate CAGR delta from baseline
-    baseline_cagr = results[0]["cagr"]
-    for r in results[1:]:
-        r["cagr_delta_pct"] = round(r["cagr"] - baseline_cagr, 2)
-
-    return {"slippage_scenarios": results, "baseline_cagr": baseline_cagr}
+    return {"slippage_scenarios": results, "baseline_cagr": round(baseline_cagr, 2)}
 
 
 def generate_report(yearly_df: pd.DataFrame, features_df: pd.DataFrame, mw_df: pd.DataFrame,
@@ -734,27 +749,25 @@ if __name__ == "__main__":
     print("Trade Diagnostics")
     print("=" * 60)
 
-    # Phase 1: Yearly breakdown
-    print("\n[1/8] Running yearly breakdown...")
-    yearly = run_yearly_breakdown("2014-01-02", "2026-06-22")
-    if not yearly.empty:
-        yearly.to_csv(OUT_DIR / "yearly_breakdown.csv", index=False, encoding="utf-8")
-        print(f"  {len(yearly)} years, saved to results/diagnostics/yearly_breakdown.csv")
-
-    # Phase 2: Full backtest -> trades
-    print("\n[2/8] Running full backtest (2014-2026)...")
+    # ── 一次全周期回测，复用 strat 派生年度/交易/终值 ──
+    print("\n[1/8] Running full-period backtest (2014-2026)...")
     strat, _ = run_full_backtest("2014-01-02", "2026-06-22")
     if strat is None:
         print("  ERROR: Backtest failed!")
         sys.exit(1)
 
+    baseline_final_value = strat.broker.getvalue()
+    years_span = 12.5
+    print(f"  True final value: {baseline_final_value:,.0f} "
+          f"(CAGR={((baseline_final_value/CONFIG['initial_cash'])**(1/years_span)-1)*100:.2f}%)")
+
     raw_trades = getattr(strat, "_my_trades", [])
     print(f"  Total trades: {len(raw_trades)}")
     raw_df = pd.DataFrame(raw_trades) if raw_trades else pd.DataFrame()
-    del strat; gc.collect()
 
-    # Phase 3: Feature annotation
-    print("\n[3/8] Computing entry features...")
+    # ── 年度 breakdown：从全周期净值序列切（不再每年独立回测）──
+    # 先做特征标注（年度统计需要 features_df），再算 yearly
+    print("\n[2/8] Computing entry features...")
     features_df = compute_entry_features(raw_df)
     print(f"  {len(features_df)} trades annotated")
     if features_df.empty:
@@ -764,6 +777,15 @@ if __name__ == "__main__":
     wins = features_df["was_win"].sum()
     losses = len(features_df) - wins
     print(f"  Wins: {wins} / Losses: {losses}")
+
+    print("\n[3/8] Yearly breakdown (from full-period NAV series)...")
+    yearly = run_yearly_breakdown(strat, features_df, initial_cash=CONFIG["initial_cash"])
+    if not yearly.empty:
+        yearly.to_csv(OUT_DIR / "yearly_breakdown.csv", index=False, encoding="utf-8")
+        print(f"  {len(yearly)} years, saved to results/diagnostics/yearly_breakdown.csv")
+
+    # 释放 strat 后续不再需要（保留 features_df）
+    del strat; gc.collect()
 
     # Phase 4: Mann-Whitney U
     print("\n[4/8] Running Mann-Whitney U tests...")
@@ -789,9 +811,10 @@ if __name__ == "__main__":
     if holding:
         print(f"  Avg holding: win={holding['avg_holding_win']}d / loss={holding['avg_holding_loss']}d")
 
-    # Phase 8: Slippage stress test
+    # Phase 8: Slippage stress test (CAGR 从真实终值算)
     print("\n[8/8] Slippage sensitivity stress test...")
-    slippage = slippage_stress(features_df)
+    slippage = slippage_stress(features_df, baseline_final_value=baseline_final_value,
+                               initial_cash=CONFIG["initial_cash"], years=years_span)
     if slippage:
         for s in slippage["slippage_scenarios"]:
             d_flag = " [DOWN]" if s["cagr_delta_pct"] < -2 else ""

@@ -1,5 +1,16 @@
 # Changelog
 
+## [V5.16-期货版选品校准 + 参数释放] - 2026-06-23
+### 期货独立配置 + 小资金选品 + 数据修复
+- **期货独立风控参数**: `config/turtle_config.yaml` 新增 `futures.risk_per_unit=0.035`, `single_max_risk=0.10`, `max_portfolio_risk=0.35`, `max_consecutive_losses=12`, `pause_days=3` — 与ETF版完全解耦
+- **小资金选品（10万）**: 从12品种精减到4品种（豆粕M.DCE/棉花CF.ZCE/螺纹RB.SHF/PTA TA.ZCE），按保证金占用+相关性+波动率+Hurst四维筛选。排除沪铜CU(保证金7.9万)和原油SC(7.7万)
+- **cheat_on_close修复**: `run_backtest.py` 期货模式下启用 `set_coc(True)`，消除回测中1-bar执行延迟
+- **risk_parity NaN bug修复**: `src/risk_parity.py` Spinu迭代中ratio变负导致sqrt(NaN)→风险平价静默失效，添加 `np.maximum(ratio, 0.0)` 截断
+- **2014年数据修复**: `src/data_pipeline.py` 复权因子 `reindex(..., ffill).bfill()`——2014-2017年价格NaN问题，因 adj_factor 仅从2018年开始
+- **日志降噪**: `strategies/turtle_trading.py` 3处 `logger.warning`→`debug`（风险平价数据不足、风控暂停、5日回撤）
+- **期货版回测结果**: 4品种×10万，CAGR~3.5%，MDD~15%，收益24.81%/6.5年
+- **ETF版不受影响**: 除risk_parity bug fix外所有改动在 `futures` 分支内
+
 ## [V5.15-纯多头策略重新定位] - 2026-06-21
 ### 做空删除 + 选品原则重定 + T+0 优先规则废除
 - **战略定位**：纯多头趋势跟踪。做空在实操中不可行（融券门槛50万+券源不足+年化8-10%成本），全部删除
