@@ -66,6 +66,7 @@ futures:
   margin_rate: 0.15          # 保证金比例 15%
   risk_per_unit: 0.035       # 每单位风险比例
   single_max_risk: 0.10      # 单品种最大风险 ≤ 10%（小资金需放宽）
+                             # TODO: 资金规模 > 50万后回调至 0.04，与 ETF 版对齐
   max_portfolio_risk: 0.35   # 组合总风险敞口 ≤ 35%
   max_consecutive_losses: 12 # 连续亏损暂停阈值
   pause_days: 3              # 风控暂停天数

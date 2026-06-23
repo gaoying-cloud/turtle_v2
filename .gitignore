@@ -30,3 +30,14 @@ Thumbs.db
 
 # Backup
 *.bak
+
+# Runtime state (auto-generated, do not commit)
+data/daily_state.json
+
+# Temporary verification scripts (underscore-prefixed, local only)
+_verify_*.py
+_verify_*.txt
+_test_bug1_result.txt
+
+# Windows redirect artifact
+nul

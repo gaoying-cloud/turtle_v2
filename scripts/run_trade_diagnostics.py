@@ -251,6 +251,12 @@ def run_yearly_breakdown(strat, features_df: pd.DataFrame,
       (b) pnl 重复计入 — 每年独立从 initial_cash 起算，Σpnl ≠ 真实账户增长。
     新实现只跑一次全周期回测，用每日收益率序列聚合年度收益、MDD、Calmar，
     年度交易数/胜率/pnl 则从全周期 features_df 按入场年聚合。
+
+    ⚠️ 口径提示：return_pct / mdd_pct / calmar 基于**净值序列**
+    （含跨年持仓的浮动盈亏与复利效应），而 trades / win_rate / total_pnl
+    按**入场年**归属（一笔跨年交易的 pnl 全部计入开仓所在年）。
+    二者口径不同，不可用 total_pnl / initial_cash 反推 return_pct
+    （会因跨年持仓与复利而失配，可能出现符号相反或量级不匹配）。
     """
     if strat is None or features_df.empty:
         return pd.DataFrame()

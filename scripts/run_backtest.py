@@ -241,6 +241,9 @@ def run_backtest(
     cerebro.broker.setcommission(commission=commission + slippage)
 
     # ── 期货模式：cheat_on_close 消除 1-bar 执行延迟 ──
+    # 期货：当日 close 信号 → 当日 close 成交（无 T+1 约束，期货可日内开平）
+    # ETF ：保持默认 coc=False，T+1 次日 open 成交（A股 T+1 制度）
+    # 两套执行口径并存，故 risk_per_unit 等参数也按 futures/ETF 分别读取
     if futures:
         cerebro.broker.set_coc(True)
 
@@ -596,8 +599,6 @@ def main():
         action="store_true",
         default=False,
         help="按年拆分回测，输出各年度指标对比表",
-    )
-    parser.add_argument(
     )
     parser.add_argument(
         "--entry-mode",
