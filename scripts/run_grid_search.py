@@ -383,7 +383,7 @@ def _worker(task: tuple) -> Optional[dict]:
 def run_grid_search(
     *,
     modes: List[str] = MODES,
-    start_date: str = "2020-01-01",
+    start_date: str = "2014-01-01",
     split_date: str = "2024-01-01",
     end_date: str = "2026-06-10",
     workers: int = 1,
@@ -743,7 +743,7 @@ def run_rolling_validation(
     df_best: pd.DataFrame,
     *,
     modes: List[str] = MODES,
-    base_start: str = "2020-01-01",
+    base_start: str = "2014-01-01",
     base_end: str = "2026-06-10",
     workers: int = 1,
 ) -> pd.DataFrame:
@@ -777,7 +777,7 @@ def run_rolling_validation(
 
     # ── 定义 3 个窗口 ──
     windows = [
-        ("W1", "2020-01-01", "2022-12-31", "2023-01-01", "2023-12-31"),
+        ("W1", "2014-01-01", "2022-12-31", "2023-01-01", "2023-12-31"),
         ("W2", "2021-01-01", "2023-12-31", "2024-01-01", "2024-12-31"),
         ("W3", "2022-01-01", "2024-12-31", "2025-01-01", base_end),
     ]
@@ -923,7 +923,7 @@ def run_stability_scan(
     df_best: pd.DataFrame,
     *,
     modes: List[str] = MODES,
-    start_date: str = "2020-01-01",
+    start_date: str = "2014-01-01",
     end_date: str = "2026-06-10",
     workers: int = 1,
 ) -> pd.DataFrame:
@@ -1120,8 +1120,8 @@ def main():
         help="搜索模式 (默认: all, AB 都跑)",
     )
     parser.add_argument(
-        "--start", type=str, default="2020-01-01",
-        help="样本内起始日期 (默认: 2020-01-01)",
+        "--start", type=str, default="2014-01-01",
+        help="样本内起始日期 (默认: 2014-01-01)",
     )
     parser.add_argument(
         "--split", type=str, default="2024-01-01",

@@ -828,8 +828,8 @@ def main():
     parser.add_argument(
         "--start",
         type=str,
-        default="2020-01-01",
-        help="回测区间起始 (默认: 2020-01-01)",
+        default="2014-01-01",
+        help="回测区间起始 (默认: 2014-01-01)",
     )
     parser.add_argument(
         "--end",

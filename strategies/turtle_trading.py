@@ -116,12 +116,13 @@ class TurtleStrategy(bt.Strategy):
         ("hurst_min", 0.50),                # H < 此值拒绝入场（均值回归）
         ("use_rsi_filter", False),          # 开启 RSI/布林带过度延伸过滤
         ("rsi_overbought", 70),             # RSI 超买阈值（>此值且触及布林带上轨→过滤）
+        ("max_units", 4),                   # 最多加仓单位数（期货小资金建议2）
     )
 
     def __init__(self):
         # ── 初始化 S2 组件 ──
         self._signals: Dict[str, dict] = {}
-        self._positions = TurtlePositions(max_units=4)
+        self._positions = TurtlePositions(max_units=self.p.max_units)
         self._filter = SignalFilter(max_rejections=3)
 
         # ── 预计算所有品种的信号序列 ──
@@ -692,13 +693,14 @@ class TurtleStrategy(bt.Strategy):
         if shares == 0:
             return
         # P0: 校验单品种风险敞口 ≤ single_max_risk
-        per_share_risk = 2.0 * n
+        stop_mult = float(self.params.turtle_params.get("stop_atr_multiple", 2.0))
+        per_share_risk = stop_mult * n
         requested_risk = shares * per_share_risk
         # 已有该品种的敞口
         existing_risk = 0.0
         pos = self._positions.get(code)
         if pos is not None:
-            existing_risk = pos.total_shares * 2.0 * pos.n_at_entry
+            existing_risk = pos.total_shares * stop_mult * pos.n_at_entry
         total_symbol_risk_pct = (existing_risk + requested_risk) / equity if equity > 0 else 0
         if total_symbol_risk_pct > self.params.single_max_risk:
             max_new = equity * self.params.single_max_risk - existing_risk
@@ -711,7 +713,7 @@ class TurtleStrategy(bt.Strategy):
         # P0: 校验全账户风险敞口 ≤ 15% (max_total_risk=0.15)
         total_existing_risk = 0.0
         for existing_pos in self._positions.all_positions():
-            total_existing_risk += existing_pos.total_shares * 2.0 * existing_pos.n_at_entry
+            total_existing_risk += existing_pos.total_shares * stop_mult * existing_pos.n_at_entry
         total_new_risk_pct = (total_existing_risk + shares * per_share_risk) / equity if equity > 0 else 0
         if total_new_risk_pct > self.params.max_portfolio_risk:
             max_new = equity * self.params.max_portfolio_risk - total_existing_risk
@@ -855,7 +857,7 @@ class TurtleStrategy(bt.Strategy):
 
     def _check_pyramid(self, code: str, data: bt.feeds.PandasData, pos: Position):
         """检查并执行加仓。"""
-        if pos.units >= 4:
+        if pos.units >= self._positions._max_units:
             return
 
         idx = self._next_idx(code)
@@ -868,7 +870,7 @@ class TurtleStrategy(bt.Strategy):
             return
 
         can_add, trigger = pyramid_add(
-            pos.units, 4, pos.base_price, pos.n_at_entry,
+            pos.units, self._positions._max_units, pos.base_price, pos.n_at_entry,
             direction=pos.direction,
         )
         if not can_add:

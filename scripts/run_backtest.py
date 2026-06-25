@@ -146,7 +146,7 @@ def df_to_feed(df: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
 
 def run_backtest(
     *,
-    start_date: str = "2020-01-01",
+    start_date: str = "2014-01-01",
     end_date: str = "2026-06-10",
     mode: str = "A",
     plot: bool = False,
@@ -249,8 +249,8 @@ def run_backtest(
 
     # ── 品种属性 ──
     if futures:
-        # 期货全部可做空，无 T+1 约束
-        shortable = set(trading_symbols)
+        # 期货：纯多头（V5.16 诊断：做空净亏 -46,617 吃掉全部多头利润，关做空后盈利恢复）
+        shortable = set()
         t_plus_one = set()
     else:
         shortable = get_shortable_symbols(config)
@@ -425,7 +425,7 @@ def run_backtest(
 
 def run_yearly_breakdown(
     *,
-    start_date: str = "2020-01-01",
+    start_date: str = "2014-01-01",
     end_date: str = "2026-06-10",
     mode: str = "A",
     t0_only: bool = False,
@@ -573,7 +573,7 @@ def main():
     parser.add_argument(
         "--start",
         type=str,
-        default="2020-01-01",
+        default="2014-01-01",
         help="回测起始日期 YYYY-MM-DD (默认: 2020-01-01)",
     )
     parser.add_argument(

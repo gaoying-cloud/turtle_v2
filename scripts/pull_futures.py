@@ -7,7 +7,7 @@
 用法：
     py scripts/pull_futures.py                          # 全量拉取
     py scripts/pull_futures.py --symbol I.DCE           # 单个品种
-    py scripts/pull_futures.py --start 2020-01-01       # 指定起始日期
+    py scripts/pull_futures.py --start 2014-01-01       # 指定起始日期
     py scripts/pull_futures.py --end 2024-12-31         # 指定截止日期
     py scripts/pull_futures.py --force                  # 强制重新拉取
     py scripts/pull_futures.py --status                 # 查看本地缓存状态

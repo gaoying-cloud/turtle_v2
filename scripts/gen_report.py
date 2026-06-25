@@ -151,7 +151,7 @@ def df_to_feed(df: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
     return bt.feeds.PandasData(dataname=feed_df, plot=False)
 
 
-def run_backtest_with_best(params: dict, start_date: str = "2020-01-01",
+def run_backtest_with_best(params: dict, start_date: str = "2014-01-01",
                            end_date: str = "2026-06-10", mode: str = "A") -> dict:
     """用给定参数运行一次全区间回测，返回完整指标集。"""
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -574,7 +574,7 @@ def generate_comparison_section(df: Optional[pd.DataFrame]) -> str:
 
 def generate_report(metrics: dict, df_full: Optional[pd.DataFrame] = None,
                     df_oos: Optional[pd.DataFrame] = None, mode: str = "A",
-                    start_date: str = "2020-01-01", end_date: str = "2026-06-10",
+                    start_date: str = "2014-01-01", end_date: str = "2026-06-10",
                     per_symbol: Optional[dict] = None,
                     comparison_df: Optional[pd.DataFrame] = None) -> str:
     mode_label = f"模式 {'A (无过滤)' if mode == 'A' else 'B (55日过滤)'}"
@@ -608,7 +608,7 @@ def generate_report(metrics: dict, df_full: Optional[pd.DataFrame] = None,
 def main():
     parser = argparse.ArgumentParser(description="跨市场ETF海龟组合策略 — 综合报告生成 (S8)")
     parser.add_argument("--params", type=str, default=None)
-    parser.add_argument("--start", type=str, default="2020-01-01")
+    parser.add_argument("--start", type=str, default="2014-01-01")
     parser.add_argument("--end", type=str, default="2026-06-10")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--mode", type=str, choices=["A", "B"], default="A")

@@ -222,7 +222,7 @@ def run_single(
 
 
 def run_comparison(
-    start_date: str = "2020-01-01",
+    start_date: str = "2014-01-01",
     end_date: str = "2026-06-10",
     mode: str = "A",
     save_csv: bool = False,
@@ -397,8 +397,8 @@ def main():
         description="跨市场ETF海龟组合策略 — 四种基准对比",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--start", type=str, default="2020-01-01",
-                        help="回测起始日期 (默认: 2020-01-01)")
+    parser.add_argument("--start", type=str, default="2014-01-01",
+                        help="回测起始日期 (默认: 2014-01-01)")
     parser.add_argument("--end", type=str, default="2026-06-10",
                         help="回测截止日期 (默认: 2026-06-10)")
     parser.add_argument("--mode", "-m", type=str, choices=["A", "B"], default="A",

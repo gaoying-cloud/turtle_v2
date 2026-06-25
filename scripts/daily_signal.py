@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-海龟 V5.15 每日信号生成器。
+海龟 V5.16 每日信号生成器。
 每天 16:30 后运行（Tushare 日线数据约 16:00-17:00 更新），
 输出次日操作清单。
 
@@ -15,7 +15,7 @@
     T+1日 16:30 py scripts/daily_signal.py --settle 510500=9.05  → 结算+出后天表
 """
 from __future__ import annotations
-import sys, json, logging, warnings, subprocess
+import sys, json, logging, warnings
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -23,7 +23,7 @@ from typing import Optional
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import yaml
+from src.config_loader import load_config, get_trading_symbols
 import numpy as np
 import pandas as pd
 
@@ -33,19 +33,19 @@ logging.disable(logging.CRITICAL)
 from src.turtle_core import TurtleSignals, calc_position_size
 
 # ── 常量 ──
-CONFIG_PATH = ROOT / "config" / "turtle_config.yaml"
 STATE_PATH = ROOT / "data" / "daily_state.json"
 DATA_DIR = ROOT / "data" / "etf_daily"
-ETFS = ["510500.SH", "159915.SZ", "513100.SH", "518880.SH"]
-T_PLUS_ONE = {"510500.SH", "159915.SZ"}  # T+1
-T0_SYMBOLS = {"513100.SH", "518880.SH"}  # T+0
 MIN_UNIT = 100
-MAX_UNITS = 4
-RISK_PER_UNIT = 0.01
 
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    CONFIG = yaml.safe_load(f)
+CONFIG = load_config()
 INITIAL_CASH = CONFIG["initial_cash"]
+TURTLE = CONFIG["turtle"]
+MAX_UNITS = TURTLE["max_units"]
+RISK_PER_UNIT = TURTLE["risk_per_unit"]
+STOP_MULT = float(TURTLE.get("stop_atr_multiple", 2.0))  # V5.16: 从配置读取，对齐策略核心
+COMMISSION = CONFIG["commission_pct"]
+SLIPPAGE = CONFIG["slippage_pct"]
+ETFS = get_trading_symbols(CONFIG)
 
 
 # ════════════════════════════════════════════════════════════
@@ -61,13 +61,20 @@ def _default_state() -> dict:
         "signal_filter": {},
         "consecutive_losses": {},
         "buy_today": {},
+        "last_signal_date": "",          # V5.16: 用于跨日清空 buy_today
     }
 
 
 def load_state() -> dict:
     if STATE_PATH.exists():
         with open(STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            s = json.load(f)
+        # V5.16: 向后兼容旧 state（无 last_signal_date / shares_per_unit）
+        s.setdefault("last_signal_date", "")
+        for pos in s.get("positions", []):
+            if "shares_per_unit" not in pos:
+                pos["shares_per_unit"] = pos.get("shares", 0)
+        return s
     s = _default_state()
     save_state(s)
     return s
@@ -109,7 +116,7 @@ def check_data_freshness() -> date | None:
             latest = df["date"].max().date()
             latest_dates.append(latest)
             if latest < today:
-                pass  # 统一在下面打印
+                pass
         except Exception as e:
             print(f"  [ERROR] {sym}: 数据文件读取失败 ({e})")
             missing_any = True
@@ -137,14 +144,8 @@ def check_data_freshness() -> date | None:
 
 def compute_signals(df: pd.DataFrame) -> dict:
     """用 TurtleSignals 计算信号序列，返回最新一行指标."""
-    turtle_params = {
-        "atr_period": 15, "breakout_period": 20,
-        "stop_period": 12, "exit_period": 10,
-        "risk_per_unit": 0.01, "max_units": 5, "unit_step": 1,
-    }
-    calcs = TurtleSignals(turtle_params)
+    calcs = TurtleSignals(TURTLE)
     si = calcs.precompute_all(df["high"], df["low"], df["close"])
-    # 提取最末值
     last = {}
     for k, s in si.items():
         if isinstance(s, pd.Series):
@@ -160,25 +161,50 @@ def compute_signals(df: pd.DataFrame) -> dict:
 # ════════════════════════════════════════════════════════════
 
 def should_enter(symbol: str, close: float, signals: dict, state: dict, today: date) -> bool:
-    """入场条件：close > 20日高点，且不受 SignalFilter 阻挡."""
+    """入场条件：close > 20日高点，且通过 SignalFilter（对齐 turtle_core.SignalFilter）。
+
+    SignalFilter 规则：
+        规则1: 该品种首个信号 → 无条件接受
+        规则2: 同品种已持仓 → 拒绝（主流程已处理）
+        规则3: 上次同品种交易亏损 → 跳过下一次入场
+        规则4: 连续拒绝 ≥ 3 次 → 强制放行
+    """
     entry_high = signals.get("entry_high_20")
     if entry_high is None or close <= entry_high:
         return False
 
-    # T+1 今天已买过
+    # T+1 约束：当日已买入同品种，不可再入场
     if state.get("buy_today", {}).get(symbol, False):
         return False
 
-    # SignalFilter
-    sf = state["signal_filter"].get(symbol, {"rejections": 0, "last_was_win": None})
+    # ── SignalFilter ──
+    sf = _get_sf(state, symbol)
+    last_was_win = sf.get("last_was_win")
+
+    if last_was_win is None:
+        # 规则1：首个信号，无条件接受
+        return True
+
+    if last_was_win:
+        # 规则3：上次盈利出场 → 接受
+        return True
+
+    # 上次亏损出场 → 递增连续拒绝计数
+    sf["rejections"] = sf.get("rejections", 0) + 1
+
     if sf["rejections"] >= 3:
+        # 规则4：连续拒绝 ≥ 3 → 强制放行
+        sf["rejections"] = 0
+        return True
+
+    # 规则3：拒绝本次入场
+    return False
+
+
+def should_exit(symbol: str, low: float, signals: dict, state: dict) -> bool:
+    """退出条件：最低价 <= 10日低点。T+1 品种当日已买入则不可退出。"""
+    if state.get("buy_today", {}).get(symbol, False):
         return False
-
-    return True
-
-
-def should_exit(symbol: str, low: float, signals: dict) -> bool:
-    """退出条件：最低价 <= 10日低点."""
     stop_low = signals.get("stop_low_10")
     if stop_low is None:
         return False
@@ -186,7 +212,7 @@ def should_exit(symbol: str, low: float, signals: dict) -> bool:
 
 
 def should_add(symbol: str, close: float, n: float, pos: dict) -> bool:
-    """加仓条件：价格 >= entry_price + units * 0.5 * N_at_entry."""
+    """加仓条件：价格 >= entry_price + units * 0.5 * n_at_entry（n_at_entry 保持不变，对齐策略核心）。"""
     if pos["units"] >= MAX_UNITS:
         return False
     threshold = pos["entry_price"] + pos["units"] * 0.5 * pos["n_at_entry"]
@@ -197,15 +223,15 @@ def should_add(symbol: str, close: float, n: float, pos: dict) -> bool:
 #  仓位计算
 # ════════════════════════════════════════════════════════════
 
-def calc_shares(equity: float, n: float, price: float) -> int:
+def calc_shares(cash: float, n: float, price: float) -> int:
     if n is None or n <= 0 or price is None or price <= 0:
         return 0
     raw = calc_position_size(
-        equity=equity,
+        equity=cash,
         n_value=n,
         price=price,
         risk_pct=RISK_PER_UNIT,
-        stop_mult=1.0,
+        stop_mult=STOP_MULT,            # V5.16: 从配置读取，对齐策略核心
     )
     return max(MIN_UNIT, int(raw // MIN_UNIT) * MIN_UNIT)
 
@@ -220,18 +246,14 @@ def _get_sf(state: dict, sym: str) -> dict:
     return state["signal_filter"][sym]
 
 
-def record_entry_rejection(state: dict, sym: str):
-    sf = _get_sf(state, sym)
-    sf["rejections"] += 1
-
-
 def record_trade_result(state: dict, sym: str, was_win: bool):
+    """记录一笔交易结果，更新 SignalFilter 状态（对齐 turtle_core.SignalFilter.record_result）。
+
+    重置连续拒绝计数；last_was_win 下次入场时用于规则3判断。
+    """
     sf = _get_sf(state, sym)
-    if was_win:
-        sf["rejections"] = 0
-    else:
-        sf["rejections"] += 1
     sf["last_was_win"] = was_win
+    sf["rejections"] = 0
 
 
 # ════════════════════════════════════════════════════════════
@@ -243,12 +265,14 @@ def run():
     today_str = today.isoformat()
     state = load_state()
 
-    # 重置 buy_today
-    state["buy_today"] = {}
+    # ── V5.16: 跨日清空 buy_today（对齐策略核心 _is_new_day + _buy_today.clear） ──
+    if state.get("last_signal_date", "") != today_str:
+        state["buy_today"] = {}
+        state["last_signal_date"] = today_str
 
     # 拉取最新数据
     print(f"\n{'=' * 58}")
-    print(f"  海龟 V5.15 每日信号   {today_str} ({today.strftime('%A')})")
+    print(f"  海龟 V5.16 每日信号   {today_str} ({today.strftime('%A')})")
     print(f"{'=' * 58}")
 
     # 数据新鲜度检查
@@ -265,6 +289,9 @@ def run():
         df = get_data_for(sym)
         if df is None or len(df) < 100:
             continue
+        df = df[df["date"] <= pd.Timestamp(today)].reset_index(drop=True)
+        if len(df) < 100:
+            continue
         data_cache[sym] = df
         sig_cache[sym] = compute_signals(df)
 
@@ -273,9 +300,9 @@ def run():
         return
 
     # ══════════════════════════════════════════════════════
-    # 退出检查
+    # 退出检查（仅记录信号，不自动执行）
     # ══════════════════════════════════════════════════════
-    closed_positions = []
+    exit_signals = []
     for pos in state["positions"]:
         sym = pos["code"]
         if sym not in data_cache:
@@ -283,36 +310,22 @@ def run():
         df = data_cache[sym]
         sig = sig_cache[sym]
         low = df["low"].iloc[-1]
-        if should_exit(sym, low, sig):
-            close_price = df["close"].iloc[-1]
-            pnl = (close_price - pos["entry_price"]) * pos["shares"]
-            was_win = pnl > 0
-            # 记录
-            record_trade_result(state, sym, was_win)
-            cl = state["consecutive_losses"].get(sym, 0)
-            if was_win:
-                state["consecutive_losses"][sym] = 0
-            else:
-                state["consecutive_losses"][sym] = cl + 1
-            state["equity"] += pnl
-            state["trade_history"].append({
-                "symbol": sym, "direction": "long",
-                "entry_date": pos["entry_date"], "exit_date": today_str,
-                "entry_price": pos["entry_price"], "exit_price": close_price,
-                "shares": pos["shares"], "pnl": round(pnl, 2), "was_win": was_win,
+        if should_exit(sym, low, sig, state):
+            exit_signals.append({
+                "code": sym,
+                "shares": pos["shares"],
+                "entry_price": pos["entry_price"],
+                "exit_price": float(df["close"].iloc[-1]),
             })
-            closed_positions.append(pos)
-
-    for cp in closed_positions:
-        state["positions"].remove(cp)
 
     # ══════════════════════════════════════════════════════
-    # 加仓检查（仅对剩余持仓）
+    # 加仓检查（仅对剩余持仓，跳过已触发退出信号的）
     # ══════════════════════════════════════════════════════
     add_actions = []
+    exiting_symbols = {e["code"] for e in exit_signals}
     for pos in state["positions"]:
         sym = pos["code"]
-        if sym not in data_cache:
+        if sym in exiting_symbols or sym not in data_cache:
             continue
         df = data_cache[sym]
         sig = sig_cache[sym]
@@ -321,13 +334,15 @@ def run():
             continue
         close = df["close"].iloc[-1]
         if should_add(sym, close, n, pos):
-            shares = calc_shares(state["equity"], n, close)
+            # V5.16: 加仓股数复用初始 shares_per_unit（对齐策略核心 pos.shares_per_unit）
+            shares = pos.get("shares_per_unit", pos["shares"])
             if shares <= 0:
                 continue
-            # 更新持仓
+            # 更新持仓（n_at_entry 保持不变，对齐策略核心）
             pos["shares"] += shares
             pos["units"] += 1
-            pos["n_at_entry"] = (pos["n_at_entry"] * (pos["units"] - 1) + n) / pos["units"]
+            # T+1 标记
+            state["buy_today"][sym] = True
             add_actions.append({"symbol": sym, "shares": shares, "units": pos["units"], "price": close})
 
     # ══════════════════════════════════════════════════════
@@ -347,7 +362,7 @@ def run():
             n = sig.get("n")
             if n is None or n <= 0:
                 continue
-            shares = calc_shares(state["equity"], n, close)
+            shares = calc_shares(state["cash"], n, close)
             if shares <= 0:
                 continue
             entry_high = sig.get("entry_high_20", close)
@@ -358,16 +373,20 @@ def run():
                 "entry_date": today_str,
                 "entry_price": float(close),
                 "shares": shares,
+                "shares_per_unit": shares,      # V5.16: 初始单位股数（加仓复用）
                 "units": 1,
                 "n_at_entry": float(n),
                 "trail_high": float(close),
             }
-            state["positions"].append(pos)
-            if sym in T_PLUS_ONE:
-                state["buy_today"][sym] = True
             entry_actions.append(pos)
-            # SignalFilter reset on entry
-            _get_sf(state, sym)["rejections"] = 0
+
+    # ── V5.16: 计算持仓市值，修正 equity ──
+    position_value = sum(
+        p["shares"] * float(data_cache[p["code"]]["close"].iloc[-1])
+        for p in state["positions"]
+        if p["code"] in data_cache
+    )
+    state["equity"] = state["cash"] + position_value
 
     # ══════════════════════════════════════════════════════
     # 打印输出
@@ -383,17 +402,18 @@ def run():
         pos = next((p for p in state["positions"] if p["code"] == sym), None)
         pos_str = f"{pos['shares']}股" if pos else "空仓"
         holding_days = (today - datetime.strptime(pos["entry_date"], "%Y-%m-%d").date()).days if pos else 0
-        notes = []
 
-        # 有持仓
         if pos:
-            # 检查是否触发了退出（已在上方处理，这里显示退出信号）
-            if any(cp["code"] == sym for cp in closed_positions):
+            # 检查是否触发了退出信号
+            exit_info = next((e for e in exit_signals if e["code"] == sym), None)
+            if exit_info:
                 showing_any = True
+                pnl_est = (exit_info["exit_price"] - exit_info["entry_price"]) * exit_info["shares"]
                 print(line_fmt.format(sym, pos_str, "平仓", "卖出",
-                       f"{pos['shares']}股",
-                       f"{pos['entry_price']:.3f}",
-                       f"{df['close'].iloc[-1]:.3f}", "10日低点突破"))
+                       f"{exit_info['shares']}股",
+                       f"{exit_info['entry_price']:.3f}",
+                       f"{exit_info['exit_price']:.3f}",
+                       f"10日低点突破 PnL≈{pnl_est:+.0f}"))
                 continue
 
             # 加仓了？
@@ -407,18 +427,15 @@ def run():
 
             # 持有中
             if holding_days > 12:
-                notes.append("别动")
+                notes = "别动"
+            else:
+                notes = ""
             stop_val = sig.get("stop_low_10")
-            stop_s = f"{stop_val:.2f}" if stop_val else "—"
-            cl = state["consecutive_losses"].get(sym, 0)
-            trail = pos.get("trail_high", 0)
-            trail_s = f"高{trail:.2f}" if trail else ""
-            shown = False
             showing_any = True
             print(line_fmt.format(sym, pos_str, "持有", "—", "—",
                    f"{pos['entry_price']:.3f}",
                    f"{stop_val:.2f}" if stop_val else "—",
-                   f"{'⚠️'+'别动' if holding_days>12 else ''}"))
+                   f"{'⚠️'+notes if notes else ''}"))
 
         else:
             # 空仓—入场信号
@@ -438,8 +455,8 @@ def run():
                     if entry_high and close <= entry_high:
                         reason = f"未突破({close:.2f}<{entry_high:.2f})"
                     sf = _get_sf(state, sym)
-                    if sf["rejections"] >= 3:
-                        reason += "  SignalFilter暂停"
+                    if sf.get("rejections", 0) > 0 and sf.get("last_was_win") is False:
+                        reason += f"  SignalFilter拒绝({sf['rejections']}/3)"
                 if not any(True for _ in state["positions"]) and not entry_actions:
                     showing_any = True
                     print(line_fmt.format(sym, "空仓", "—", "—", "—", "—", "—", reason))
@@ -462,13 +479,13 @@ def run():
     print(f"  下次操作: 明日 9:30 按上表执行")
     print()
 
-    # 保存状态
+    # V5.16: 保存 state（SignalFilter 连续拒绝计数需跨 run() 持久化）
     save_state(state)
 
 
 def cmd_settle(state: dict, settle_str: str):
-    """记录实际成交价，更新持仓的 entry_price 为真实成交价。"""
-    # 格式: symbol=price, 如 513100=22.38
+    """记录实际成交价，确认入场。未持仓的符号会自动创建持仓。"""
+    today_str = date.today().isoformat()
     for part in settle_str.split(","):
         part = part.strip()
         if "=" not in part:
@@ -477,20 +494,76 @@ def cmd_settle(state: dict, settle_str: str):
         sym, price_str = part.split("=", 1)
         sym = sym.strip().upper()
         if not sym.endswith((".SH", ".SZ")):
-            sym = sym + ".SH" if sym in ["510500", "513100", "518880"] else sym + ".SZ"
+            matched = [c for c in ETFS if c.startswith(sym + ".")]
+            sym = matched[0] if matched else sym + ".SH"
         try:
             price = float(price_str)
         except ValueError:
             print(f"  ⚠ 价格格式错误: {price_str}")
             continue
-        # 在持仓中找该品种（查找最近一笔买入信号对应的空位）
+
         pos = next((p for p in state["positions"] if p["code"] == sym), None)
         if pos:
-            old_price = pos["entry_price"]
-            pos["entry_price"] = price
-            print(f"  [OK] {sym} 成交价更新: {old_price:.3f} -> {price:.3f}")
+            # 已有持仓 → 平仓
+            exit_price = price
+            pnl = (exit_price - pos["entry_price"]) * pos["shares"]
+            fee = pos["shares"] * exit_price * (COMMISSION * 2 + SLIPPAGE)
+            net_pnl = pnl - fee
+            was_win = net_pnl > 0
+            record_trade_result(state, sym, was_win)
+            cl = state["consecutive_losses"].get(sym, 0)
+            if was_win:
+                state["consecutive_losses"][sym] = 0
+            else:
+                state["consecutive_losses"][sym] = cl + 1
+            state["cash"] += pos["shares"] * exit_price * (1 - COMMISSION - SLIPPAGE)
+            state["trade_history"].append({
+                "symbol": sym, "direction": "long",
+                "entry_date": pos["entry_date"], "exit_date": today_str,
+                "entry_price": pos["entry_price"], "exit_price": exit_price,
+                "shares": pos["shares"], "pnl": round(net_pnl, 2), "was_win": was_win,
+            })
+            state["positions"].remove(pos)
+            # V5.16: equity = cash（平仓后无持仓，正确）
+            state["equity"] = state["cash"]
+            print(f"  [OK] {sym} 平仓: {pos['shares']}股 @ {exit_price:.3f} PnL={net_pnl:+,.0f}")
         else:
-            print(f"  [WARN] {sym} 不在持仓中，忽略")
+            df = get_data_for(sym)
+            if df is None or len(df) < 100:
+                print(f"  [WARN] {sym} 无足够数据，无法入场")
+                continue
+            df = df[df["date"] <= pd.Timestamp(date.today())].reset_index(drop=True)
+            if len(df) < 100:
+                print(f"  [WARN] {sym} 截断后数据不足，无法入场")
+                continue
+            sig = compute_signals(df)
+            n = sig.get("n")
+            if n is None or n <= 0:
+                print(f"  [WARN] {sym} ATR 计算异常，无法入场")
+                continue
+            shares = calc_shares(state["cash"], n, price)
+            if shares <= 0:
+                print(f"  [WARN] {sym} 可买股数为 0，无法入场")
+                continue
+            pos = {
+                "code": sym,
+                "direction": "long",
+                "entry_date": today_str,
+                "entry_price": price,
+                "shares": shares,
+                "shares_per_unit": shares,      # V5.16: 初始单位股数
+                "units": 1,
+                "n_at_entry": float(n),
+                "trail_high": price,
+            }
+            state["positions"].append(pos)
+            state["cash"] -= shares * price
+            # V5.16: equity = cash + 持仓市值（刚入场：持仓市值 = 买入成本价 × 股数）
+            state["equity"] = state["cash"] + shares * price
+            state["buy_today"][sym] = True
+            _get_sf(state, sym)["rejections"] = 0
+            print(f"  [OK] {sym} 确认入场: {shares}股 @ {price:.3f} (N={n:.4f})")
+
     save_state(state)
 
 
@@ -511,7 +584,7 @@ def cmd_status(state: dict):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="海龟 V5.15 每日信号")
+    parser = argparse.ArgumentParser(description="海龟 V5.16 每日信号")
     parser.add_argument("--settle", type=str, default=None,
                         help="记录成交价: symbol=price[,symbol=price...]")
     parser.add_argument("--status", action="store_true", help="查看持仓状态")

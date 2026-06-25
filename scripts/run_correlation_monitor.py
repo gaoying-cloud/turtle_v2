@@ -435,8 +435,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--start", type=str, default="2020-01-01",
-        help="起始日期 (默认: 2020-01-01)",
+        "--start", type=str, default="2014-01-01",
+        help="起始日期 (默认: 2014-01-01)",
     )
     parser.add_argument(
         "--end", type=str, default="2026-06-10",

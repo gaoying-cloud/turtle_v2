@@ -273,34 +273,49 @@ def compute_alpha_weights(
     if T < 2 or N < 2:
         raise ValueError(f"数据维度不足，当前 T={T}, N={N}")
 
-    # Step 1: Ledoit-Wolf 收缩协方差
-    cov = ledoit_wolf_cov(returns)
-    effective_n = cov.shape[0]  # 可能少于 N（全 NaN 列被剔除）
+    # V5.17: pre-scan valid columns to avoid index OOB
+    finite_mask = np.isfinite(returns)
+    col_valid = finite_mask.all(axis=0)
+    valid_indices = np.where(col_valid)[0]
 
-    # Step 2: 风险平价权重
+    if len(valid_indices) < 2:
+        # no valid columns, fall back to equal ATR
+        risk_pcts = np.full(N, base_risk_pct)
+        rp_weights = np.full(N, 1.0 / N)
+        return {
+            "risk_pcts": risk_pcts,
+            "rp_weights": rp_weights,
+            "cov": np.eye(N),
+            "converged": False,
+            "n_assets": N,
+        }
+
+    # Step 1: LW cov only on valid columns
+    cov = ledoit_wolf_cov(returns[:, valid_indices])
+    effective_n = cov.shape[0]
+
+    # Step 2: risk parity weights
     rp_weights, converged = risk_parity_weights(cov)
 
-    # Step 3: ATR 等权基准 (每个品种对 ATR 的 risk_pct 贡献相等)
-    # 注意：ATR 层本身是等 risk_pct（所有品种都用 base_risk_pct）
-    # 所以 ATR 层的"权重"暗示为等权 1/N
+    # Step 3: ATR equal weight baseline
     atr_weight = 1.0 / effective_n
 
-    # Step 4: α 融合
-    # 融合后的品种相对权重
+    # Step 4: alpha fusion
     fused_weight = (1 - alpha) * atr_weight + alpha * rp_weights
+    risk_pcts_valid = base_risk_pct * fused_weight / atr_weight
 
-    # 转回 risk_pct：base_risk_pct × (融合权重 / 等权)
-    # 等权 = 1/N
-    risk_pcts = base_risk_pct * fused_weight / atr_weight
-
-    # 归一化：保持总风险敞口不变
-    # 在 _check_entry 中，risk_pct 会逐个品种使用
-    # base_risk_pct 对应 1%，经 α 融合后，高波动品种 risk_pct 降低，低波动品种提高
+    # Step 5: reconstruct full-length arrays, dropped columns keep ATR weight
+    risk_pcts = np.full(N, base_risk_pct)
+    full_rp_weights = np.full(N, 1.0 / N)
+    for j, idx in enumerate(valid_indices):
+        risk_pcts[idx] = risk_pcts_valid[j]
+        full_rp_weights[idx] = rp_weights[j]
+    rp_weights = full_rp_weights
 
     return {
         "risk_pcts": risk_pcts,
         "rp_weights": rp_weights,
         "cov": cov,
         "converged": converged,
-        "n_assets": effective_n,
+        "n_assets": N,
     }
