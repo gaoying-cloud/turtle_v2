@@ -223,17 +223,46 @@ def should_add(symbol: str, close: float, n: float, pos: dict) -> bool:
 #  仓位计算
 # ════════════════════════════════════════════════════════════
 
-def calc_shares(cash: float, n: float, price: float) -> int:
+def market_equity(state: dict, data_cache: dict | None = None) -> float:
+    """账户总权益 = 现金 + 持仓市值。
+
+    data_cache 为 None 时退化为"按持仓 entry_price 估值"（settle 早期阶段，
+    数据尚未加载）。有 data_cache 时按最新收盘价估值（run() 主流程）。
+    """
+    pos_value = 0.0
+    for p in state["positions"]:
+        if data_cache and p["code"] in data_cache:
+            px = float(data_cache[p["code"]]["close"].iloc[-1])
+        else:
+            px = float(p["entry_price"])
+        pos_value += p["shares"] * px
+    return state["cash"] + pos_value
+
+
+def calc_shares(equity: float, n: float, price: float, max_cash: float | None = None) -> int:
+    """按 equity 计算 1% 风险预算股数。
+
+    equity : 账户总权益（sizing 基数，多笔入场共享同一基数）。
+    n      : 当前 ATR(N)。
+    price  : 入场价（仅用于现金上限判断，不影响 sizing 公式）。
+    max_cash : 可选，本笔最多占用的现金。用于 cash < equity 时按
+               先到先得（配置顺序）兜底，避免现金不足时超买。None 表示不限制。
+    """
     if n is None or n <= 0 or price is None or price <= 0:
         return 0
     raw = calc_position_size(
-        equity=cash,
+        equity=equity,
         n_value=n,
         price=price,
         risk_pct=RISK_PER_UNIT,
         stop_mult=STOP_MULT,            # V5.16: 从配置读取，对齐策略核心
     )
-    return max(MIN_UNIT, int(raw // MIN_UNIT) * MIN_UNIT)
+    shares = max(MIN_UNIT, int(raw // MIN_UNIT) * MIN_UNIT)
+    # 现金上限兜底：cash 不足时按比例缩到可用现金买得起的整手数
+    if max_cash is not None and max_cash < shares * price:
+        lots = int(max_cash // (price * MIN_UNIT))
+        shares = max(0, lots * MIN_UNIT)
+    return shares
 
 
 # ════════════════════════════════════════════════════════════
@@ -299,6 +328,13 @@ def run():
         print("\n  [ERROR] 无可用数据，请先运行 py scripts/pull_data.py 拉取数据")
         return
 
+    # ── V5.17: 入场前先确定 sizing 基数 = equity（账户总权益）──
+    # 多笔入场共享同一 equity 基数（对齐 turtle_core：1% 风险基于净值，
+    # 不是基于"买入后剩余的现金"）。同时用 sim_cash 模拟多笔入场的现金
+    # 扣减，作为先到先得（配置顺序）的现金上限兜底。
+    sizing_equity = market_equity(state, data_cache)
+    sim_cash = state["cash"]
+
     # ══════════════════════════════════════════════════════
     # 退出检查（仅记录信号，不自动执行）
     # ══════════════════════════════════════════════════════
@@ -362,9 +398,12 @@ def run():
             n = sig.get("n")
             if n is None or n <= 0:
                 continue
-            shares = calc_shares(state["cash"], n, close)
+            # V5.17: sizing 基于 equity（多笔入场共享同一基数），
+            #        sim_cash 作为现金上限兜底（配置顺序先到先得）。
+            shares = calc_shares(sizing_equity, n, close, max_cash=sim_cash)
             if shares <= 0:
                 continue
+            sim_cash -= shares * close          # 模拟本笔占用，供后续入场兜底
             entry_high = sig.get("entry_high_20", close)
             stop_low = sig.get("stop_low_10", close * 0.9)
             pos = {
@@ -380,13 +419,8 @@ def run():
             }
             entry_actions.append(pos)
 
-    # ── V5.16: 计算持仓市值，修正 equity ──
-    position_value = sum(
-        p["shares"] * float(data_cache[p["code"]]["close"].iloc[-1])
-        for p in state["positions"]
-        if p["code"] in data_cache
-    )
-    state["equity"] = state["cash"] + position_value
+    # ── V5.17: equity 由 market_equity 统一计算（持仓按最新收盘价估值）──
+    state["equity"] = market_equity(state, data_cache)
 
     # ══════════════════════════════════════════════════════
     # 打印输出
@@ -486,6 +520,9 @@ def run():
 def cmd_settle(state: dict, settle_str: str):
     """记录实际成交价，确认入场。未持仓的符号会自动创建持仓。"""
     today_str = date.today().isoformat()
+    # V5.17: sizing 基数 = equity（账户总权益），多笔入场共享同一基数，
+    #        与 run() 预览一致。settle 早期无 data_cache，按 entry_price 估值。
+    sizing_equity = market_equity(state)
     for part in settle_str.split(","):
         part = part.strip()
         if "=" not in part:
@@ -524,8 +561,8 @@ def cmd_settle(state: dict, settle_str: str):
                 "shares": pos["shares"], "pnl": round(net_pnl, 2), "was_win": was_win,
             })
             state["positions"].remove(pos)
-            # V5.16: equity = cash（平仓后无持仓，正确）
-            state["equity"] = state["cash"]
+            # V5.17: equity 统一由 market_equity 计算（此处平仓后无持仓，等于 cash）
+            state["equity"] = market_equity(state)
             print(f"  [OK] {sym} 平仓: {pos['shares']}股 @ {exit_price:.3f} PnL={net_pnl:+,.0f}")
         else:
             df = get_data_for(sym)
@@ -541,7 +578,7 @@ def cmd_settle(state: dict, settle_str: str):
             if n is None or n <= 0:
                 print(f"  [WARN] {sym} ATR 计算异常，无法入场")
                 continue
-            shares = calc_shares(state["cash"], n, price)
+            shares = calc_shares(sizing_equity, n, price, max_cash=state["cash"])
             if shares <= 0:
                 print(f"  [WARN] {sym} 可买股数为 0，无法入场")
                 continue
@@ -558,8 +595,8 @@ def cmd_settle(state: dict, settle_str: str):
             }
             state["positions"].append(pos)
             state["cash"] -= shares * price
-            # V5.16: equity = cash + 持仓市值（刚入场：持仓市值 = 买入成本价 × 股数）
-            state["equity"] = state["cash"] + shares * price
+            # V5.17: equity 统一由 market_equity 计算（刚入场按 entry_price 估值）
+            state["equity"] = market_equity(state)
             state["buy_today"][sym] = True
             _get_sf(state, sym)["rejections"] = 0
             print(f"  [OK] {sym} 确认入场: {shares}股 @ {price:.3f} (N={n:.4f})")

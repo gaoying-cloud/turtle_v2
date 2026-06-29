@@ -1,0 +1,50 @@
+{
+  "equity": 100000,
+  "cash": 100000,
+  "positions": [
+    {
+      "code": "510500.SH",
+      "direction": "long",
+      "entry_date": "2026-06-25",
+      "entry_price": 9.085,
+      "shares": 4800,
+      "units": 1,
+      "n_at_entry": 0.2048,
+      "trail_high": 9.085
+    },
+    {
+      "code": "159915.SZ",
+      "direction": "long",
+      "entry_date": "2026-06-25",
+      "entry_price": 4.395,
+      "shares": 7500,
+      "units": 1,
+      "n_at_entry": 0.1329,
+      "trail_high": 4.395
+    }
+  ],
+  "trade_history": [],
+  "signal_filter": {
+    "510500.SH": {
+      "rejections": 0,
+      "last_was_win": null
+    },
+    "159915.SZ": {
+      "rejections": 0,
+      "last_was_win": null
+    },
+    "513100.SH": {
+      "rejections": 0,
+      "last_was_win": null
+    },
+    "518880.SH": {
+      "rejections": 0,
+      "last_was_win": null
+    }
+  },
+  "consecutive_losses": {},
+  "buy_today": {
+    "510500.SH": true,
+    "159915.SZ": true
+  }
+}

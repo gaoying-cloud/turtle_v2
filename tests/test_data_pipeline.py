@@ -111,8 +111,9 @@ class TestCleanAndStandardize:
 
     def test_column_names_and_types(self, sample_raw_data):
         df = _clean_and_standardize(sample_raw_data)
-        # 列名
-        assert list(df.columns) == STD_COLUMNS
+        # 列名（adj_factor 由 _adjust_backward 后续添加）
+        expected = [c for c in STD_COLUMNS if c != "adj_factor"]
+        assert list(df.columns) == expected
         # 类型
         assert df["date"].dtype in ("datetime64[ns]", "datetime64[us]")
         assert df["open"].dtype == "float64"
@@ -230,9 +231,11 @@ class TestFetchSingle:
             new_row = sample_raw_data.iloc[[2]].copy()
             mock_fetch.return_value = new_row
 
-            df = fetch_single("510500.SH", start_date="2024-01-02", end_date="2024-01-04")
-            mock_fetch.assert_called_once()
-            assert len(df) == 3  # 合并后应有 3 行
+            with patch("src.data_pipeline._adjust_forward") as mock_adj:
+                mock_adj.side_effect = lambda df, code: df
+                df = fetch_single("510500.SH", start_date="2024-01-02", end_date="2024-01-04")
+                mock_fetch.assert_called_once()
+                assert len(df) == 3  # 合并后应有 3 行
 
     def test_fetch_failure_returns_empty(self):
         """Tushare 请求失败时返回空 DataFrame。"""

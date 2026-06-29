@@ -1,0 +1,95 @@
+initial_cash: 100000
+commission_pct: 0.00015
+slippage_pct: 0.001
+turtle:
+  breakout_period: 20
+  atr_period: 20
+  stop_period: 10
+  stop_atr_multiple: 2.0
+  risk_per_unit: 0.01
+  max_units: 4
+  unit_step: 0.5
+  use_55_filter: false
+  regime_filter: 'off'
+  choppy_threshold: 0.35
+  use_trend_duration_filter: false
+  trend_duration_min_days: 5
+  exit_period: 10
+weighting:
+  alpha: 0.05
+  cov_lookback_days: 252
+  rebalance_quarterly: true
+  atr_change_threshold: 0.3
+symbols:
+- code: 510500.SH
+  name: 中证500
+  market: A股
+  shortable: false
+  t_plus_one: true
+- code: 159915.SZ
+  name: 创业板
+  market: A股
+  shortable: false
+  t_plus_one: true
+- code: 513100.SH
+  name: 纳指ETF
+  market: 跨境
+  shortable: false
+  t_plus_one: false
+- code: 518880.SH
+  name: 黄金ETF
+  market: 商品
+  shortable: false
+  t_plus_one: false
+bond:
+  code: 511010.SH
+  name: 国债ETF
+  annual_return: 0.025
+futures:
+  initial_cash: 100000
+  margin_rate: 0.15
+  risk_per_unit: 0.035
+  single_max_risk: 0.1
+  max_portfolio_risk: 0.35
+  max_consecutive_losses: 12
+  pause_days: 3
+  start_date: '2020-01-02'
+  end_date: '2026-06-10'
+  max_units: 2
+  futures_list:
+  - ts_code: M.DCE
+    name: 豆粕
+    exchange: 大商所
+    category: 农产品
+    multiplier: 10
+  - ts_code: CF.ZCE
+    name: 棉花
+    exchange: 郑商所
+    category: 农产品
+    multiplier: 5
+  - ts_code: RB.SHF
+    name: 螺纹钢
+    exchange: 上期所
+    category: 金属
+    multiplier: 10
+backtest:
+  start_date: '2020-01-01'
+  end_date: '2026-06-10'
+risk:
+  max_portfolio_risk: 0.2
+  single_max_risk: 0.04
+  concentration_trigger: 3
+  concentrated_risk_per_unit: 0.005
+  max_consecutive_losses: 8
+  max_cumulative_loss_pct: 0.15
+  pause_days: 5
+  correlation_warning: 0.6
+  correlation_lookback: 60
+  degradation:
+    silent_annual_signals: 2
+    entry_conv_min: 0.3
+    entry_conv_min_signals: 10
+    wear_window_short: 3
+    wear_window_long: 6
+    wear_win_rate_max: 0.25
+    wear_min_loss_pct: 0.05

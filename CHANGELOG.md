@@ -1,5 +1,16 @@
 # Changelog
 
+## [V5.18-后复权缺失修复] - 2026-06-29
+### 数据缓存重拉 + 降级保护 + 全量报告重做
+- **数据修复**: 发现缓存ETF行情数据为未复权原始价格（因早期拉取时 Tushare token 缺失导致 fund_adj 降级、价格检测未触发），使用 `--force` 重拉全部 5 只 ETF，正确写入后复权数据
+- **降级保护加固** (`src/data_pipeline.py`):
+  - `_detect_and_adjust_splits` 无事件分支不再静默写入，改为 `return pd.DataFrame()` + warning
+  - `_adjust_backward` 降级路径增加空值判断与日志
+  - `fetch_single` 在复权结果为空时跳过 `_save_to_parquet`，保留旧缓存，杜绝污染数据写入
+- **受影响的品种**: 中证500(+590%→+130%后复权)、纳指ETF(−63%→+85%后复权)、国债ETF
+- **全量报告重做**: report.md、report_metrics.json、策略对比、交易诊断、压力测试、交叉验证均基于修正数据重新生成
+- **回测结果**: 总收益 +444.28%，夏普 0.45，最大回撤 15.3%（grid_search 最佳参数，基于未复权数据搜出的参数，新网格搜索进行中）
+
 ## [V5.16-期货版选品校准 + 参数释放] - 2026-06-23
 ### 期货独立配置 + 小资金选品 + 数据修复
 - **期货独立风控参数**: `config/turtle_config.yaml` 新增 `futures.risk_per_unit=0.035`, `single_max_risk=0.10`, `max_portfolio_risk=0.35`, `max_consecutive_losses=12`, `pause_days=3` — 与ETF版完全解耦

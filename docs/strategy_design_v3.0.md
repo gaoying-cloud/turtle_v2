@@ -1,10 +1,13 @@
 ---
-version: "5.16"
-date: "2026-06-23"
-based_on: "V5.16 (2026-06-23)"
+version: "5.18"
+date: "2026-06-29"
+based_on: "V5.18 (2026-06-29)"
 ---
 
 # 跨市场ETF海龟组合策略 — 设计文件 V5.11
+
+**V5.18 变更**：
+- 缓存数据复权缺失修复：因早期 Tushare token 不可用，`fund_adj` 降级后静默写入未复权数据。现已 `--force` 重拉，并加固降级保护——`_detect_and_adjust_splits` 无事件时返回空不再写入；`fetch_single` 复权失败时跳过保存保留旧缓存
 
 **V5.8~V5.11 变更**：
 - 数据复权深度修复：`_apply_factor_adjustment` 中 `pre_close` 改为 `close.shift(1)` 消除人工价格缺口；`_save_to_parquet` 新增 `overwrite` 参数，`force` 模式覆盖旧缓存
@@ -369,6 +372,7 @@ adjusted_price[t] = raw_price[t] × (latest_adj_factor / adj_factor[t])
 1. `_fetch_adj_factors(code)` — 从 Tushare `fund_adj` 拉取复权因子序列
 2. `_apply_factor_adjustment(df, adj_df)` — 应用后复权，跳过因子变化 < 0.1% 的日期
 3. 若 `fund_adj` 不可用（token 缺失/接口异常），降级为 `_detect_and_adjust_splits(df)` — 检测 pre_close 与昨日 close 比值偏离 ±15% 的事件，累积因子修正
+4. **降级保护**（V5.18）：若价格检测未发现 >15% 的偏差事件，`_detect_and_adjust_splits` 返回空 DataFrame，上层 `fetch_single` 跳过写入保留旧缓存，避免静默写入未复权污染数据
 
 **品种覆盖**：全部 7 只 ETF（含国债）。期货无分红拆分，不适用。
 
