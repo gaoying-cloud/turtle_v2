@@ -22,7 +22,7 @@ based_on: "V5.18 (2026-06-29)"
 - 全量测试 185/185 passed
 - 回测基线：模式 A +127.73%，模式 B -18.36%，4 策略对比 B4 +141.78%
 - 新增 `scripts/analyze_n_percentile.py` — 历史验证脚本，逐年计算 regime score 并与策略收益关联
-- 数据管道新增后复权处理：Tushare `fund_adj` 获取复权因子 → 后复权 OHLC，消除 ETF 份额折算/分红导致的价格跳跃
+- 数据管道新增前复权处理：Tushare `fund_adj` 获取复权因子 → 前复权 OHLC，消除 ETF 份额折算/分红导致的价格跳跃
 - 备选方案：Tushare 不可用时自动降级为价格检测法（pre_close vs prev_close 跳跃检测 + 累积因子修正）
 - 对应更新 §2.3 补充复权说明、新增 §5.2.1 复权处理、新增 §5.11 市场状态判断
 
@@ -209,7 +209,7 @@ based_on: "V5.18 (2026-06-29)"
 | Baostock（备选源） | ✅ 已验证 | A 股 ETF 日线可获取，跨境 ETF 不可用 |
 | yfinance | ⏳ 待验证 | 跨境数据应急源，国内网络稳定性未知 |
 
-> **复权处理**：Tushare `fund_daily` 返回的价格为不复权数据。数据管道在清洗后自动调用 `fund_adj` 接口获取复权因子，以最新日期为基准做**后复权**（backward adjustment），消除 ETF 份额折算/分拆/合并对历史价格的跳跃影响。若 `fund_adj` 不可用，降级为价格跳跃检测法（对比 pre_close 与昨日 close）。详见 §5.2.1。
+> **复权处理**：Tushare `fund_daily` 返回的价格为不复权数据。数据管道在清洗后自动调用 `fund_adj` 接口获取复权因子，以最新日期为基准做**前复权**（forward adjustment），消除 ETF 份额折算/分拆/合并对历史价格的跳跃影响。若 `fund_adj` 不可用，降级为价格跳跃检测法（对比 pre_close 与昨日 close）。详见 §5.2.1。
 
 ### 2.4 交易日历方案
 
@@ -359,7 +359,7 @@ based_on: "V5.18 (2026-06-29)"
 
 ETF 日线原始数据来自 Tushare `fund_daily`，该接口返回**不复权**价格。ETF 在存续期内可能发生份额折算（拆分/合并）和分红，导致历史价格出现非交易性跳跃。
 
-**复权方案：后复权（Backward Adjustment）**
+**复权方案：前复权（Forward Adjustment）**
 
 以最新交易日为基准，将历史 OHLC 等比例缩放：
 
@@ -370,7 +370,7 @@ adjusted_price[t] = raw_price[t] × (latest_adj_factor / adj_factor[t])
 **实现流程**（`src/data_pipeline.py`）：
 
 1. `_fetch_adj_factors(code)` — 从 Tushare `fund_adj` 拉取复权因子序列
-2. `_apply_factor_adjustment(df, adj_df)` — 应用后复权，跳过因子变化 < 0.1% 的日期
+2. `_apply_factor_adjustment(df, adj_df)` — 应用前复权，跳过因子变化 < 0.1% 的日期
 3. 若 `fund_adj` 不可用（token 缺失/接口异常），降级为 `_detect_and_adjust_splits(df)` — 检测 pre_close 与昨日 close 比值偏离 ±15% 的事件，累积因子修正
 4. **降级保护**（V5.18）：若价格检测未发现 >15% 的偏差事件，`_detect_and_adjust_splits` 返回空 DataFrame，上层 `fetch_single` 跳过写入保留旧缓存，避免静默写入未复权污染数据
 
@@ -1101,7 +1101,7 @@ results/                         # 回测输出
 | 阶段 | 任务 | 周期 | 交付物 | 状态 |
 |:--|:--|:--|:--|:--:|
 | **S0** | 项目骨架搭建 | 即时 | 项目结构 + 管控模型 + 配置 | ✅ |
-| **S1** | 数据管道 | 0.5天 | src/data_pipeline.py + scripts/pull_data.py | ✅ 含后复权 |
+| **S1** | 数据管道 | 0.5天 | src/data_pipeline.py + scripts/pull_data.py | ✅ 含前复权 |
 | **S2** | 海龟核心移植 | 1天 | src/turtle_core.py（从 strategy_engine.py 提取） | ✅ |
 | **S3** | Backtrader 策略层 | 1天 | strategies/turtle_trading.py + scripts/run_backtest.py | ✅ |
 | **S4** | 风险平价权重 | 1天 | src/risk_parity.py | ✅ |
