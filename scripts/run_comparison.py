@@ -36,7 +36,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.benchmarks import BuyAndHold, EqualWeightRebalance, ATREqualRisk
 from strategies.turtle_trading import TurtleStrategy
-from scripts.run_backtest import load_data, df_to_feed
+from scripts.run_backtest import load_data, df_to_feed, align_to_common_dates
 from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols, get_trading_symbols, get_bond_symbol, get_all_symbols
 
 logger = logging.getLogger(__name__)
@@ -251,12 +251,19 @@ def run_comparison(
 
     # 加载所有数据
     feeds: dict[str, bt.feeds.PandasData] = {}
+    all_dfs = {}
     for symbol in ALL_SYMBOLS:
         df = load_data(symbol, start_date, end_date)
         if df is None:
             logger.error("品种 %s 数据加载失败，终止对比", symbol)
             return None
-        feed = df_to_feed(df, symbol)
+        all_dfs[symbol] = df
+
+    # 所有品种对齐到公共日期，消除多品种信号数组长度差异
+    all_dfs = align_to_common_dates(all_dfs)
+
+    for symbol in ALL_SYMBOLS:
+        feed = df_to_feed(all_dfs[symbol], symbol)
         feed._name = symbol
         feeds[symbol] = feed
 
@@ -276,7 +283,6 @@ def run_comparison(
         logger.info("=" * 50)
 
         if name == "B4":
-            # B4 使用独立 Cerebro 避免与前序策略状态冲突
             _cerebro4 = bt.Cerebro()
             for _s in SIX_SYMBOLS:
                 _cerebro4.adddata(feeds[_s], name=_s)
@@ -298,6 +304,7 @@ def run_comparison(
                 t_plus_one_symbols=get_t_plus_one_symbols(config),
             )
             _cerebro4.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)
+            _cerebro4.addanalyzer(bt.analyzers.AnnualReturn, _name="annual_return")
             _cerebro4.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
             _cerebro4.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
             _cerebro4.addanalyzer(bt.analyzers.Returns, _name="returns")
@@ -312,13 +319,33 @@ def run_comparison(
             _trades4 = _strat4.analyzers.trades.get_analysis() or {}
             _total4 = _trades4.get("total", {}).get("total", 0)
             _won4 = _trades4.get("won", {}).get("total", 0)
+
+            # 提取 B4 分析器指标（与其他策略一致）
+            _sharpe4 = _strat4.analyzers.sharpe.get_analysis()
+            _sharpe_ratio4 = _sharpe4.get("sharperatio") if _sharpe4 else None
+
+            _ann4 = _strat4.analyzers.annual_return.get_analysis()
+            _annual_ret4 = None
+            if _ann4:
+                _vals4 = [v for v in _ann4.values() if v is not None and isinstance(v, (int, float))]
+                if _vals4:
+                    _annual_ret4 = float(np.mean(_vals4)) * 100
+
+            _dd4 = _strat4.analyzers.drawdown.get_analysis()
+            _max_dd4 = _dd4["max"]["drawdown"] if _dd4 and "max" in _dd4 else None
+
+            _rets4 = _strat4.analyzers.returns.get_analysis()
+            _vol4 = _rets4.get("rnorm") * 100 if _rets4 and "rnorm" in _rets4 else None
+
             result = {
                 "strategy": "B4",
                 "initial_cash": config["initial_cash"],
                 "final_value": round(fv, 2),
                 "total_return_pct": round((fv / config["initial_cash"] - 1) * 100, 2),
-                "annual_return_pct": None, "sharpe_ratio": None,
-                "max_drawdown_pct": None, "annual_volatility_pct": None,
+                "annual_return_pct": round(_annual_ret4, 2) if _annual_ret4 else None,
+                "sharpe_ratio": round(_sharpe_ratio4, 4) if _sharpe_ratio4 else None,
+                "max_drawdown_pct": round(_max_dd4, 2) if _max_dd4 else None,
+                "annual_volatility_pct": round(_vol4, 2) if _vol4 else None,
                 "total_trades": _total4,
                 "win_rate_pct": round(_won4 / _total4 * 100, 2) if _total4 > 0 else 0,
                 "profit_factor": None,
@@ -326,8 +353,57 @@ def run_comparison(
             results.append(result)
             print(f"B4 B4 海龟(纯策略): 最终 {fv:>10.2f} | "
                   f"收益 {result['total_return_pct']:>7.2f}% | "
-                  f"夏普 N/A     | 回撤 N/A   | "
+                  f"夏普 {result['sharpe_ratio'] or 'N/A':>8} | "
+                  f"回撤 {result['max_drawdown_pct'] or 'N/A':>6}% | "
                   f"交易 {_total4:>4}次")
+
+            # ── B4 分品种和分年度表格（从 _my_trades 聚合）──
+            _my_trades4 = getattr(_strat4, "_my_trades", [])
+            if _my_trades4:
+                # 分品种表
+                _sym_stats: dict[str, dict] = {}
+                for _t in _my_trades4:
+                    _s = _t["symbol"]
+                    if _s not in _sym_stats:
+                        _sym_stats[_s] = {"total": 0, "won": 0, "pnl": 0.0}
+                    _sym_stats[_s]["total"] += 1
+                    if _t["was_win"]:
+                        _sym_stats[_s]["won"] += 1
+                    _sym_stats[_s]["pnl"] += _t["pnl"]
+                print()
+                print("  B4 分品种交易统计")
+                print(f"  {'品种':<14} {'交易次数':>8} {'盈利次数':>8} {'胜率':>7} {'总盈亏':>12}")
+                print("  " + "-" * 55)
+                for _s in sorted(_sym_stats):
+                    _st = _sym_stats[_s]
+                    _wr = _st["won"] / _st["total"] * 100 if _st["total"] > 0 else 0
+                    print(f"  {_s:<14} {_st['total']:>8} {_st['won']:>8} {_wr:>6.1f}% {_st['pnl']:>+10.0f}")
+                _T = sum(v["total"] for v in _sym_stats.values())
+                _W = sum(v["won"] for v in _sym_stats.values())
+                _P = sum(v["pnl"] for v in _sym_stats.values())
+                print(f"  {'合计':<14} {_T:>8} {_W:>8} {(_W/_T*100 if _T else 0):>6.1f}% {_P:>+10.0f}")
+
+                # 分年度表
+                _yr_stats: dict[str, dict] = {}
+                for _t in _my_trades4:
+                    _y = str(_t["exit_date"])[:4]
+                    if _y not in _yr_stats:
+                        _yr_stats[_y] = {"total": 0, "won": 0, "pnl": 0.0}
+                    _yr_stats[_y]["total"] += 1
+                    if _t["was_win"]:
+                        _yr_stats[_y]["won"] += 1
+                    _yr_stats[_y]["pnl"] += _t["pnl"]
+                print()
+                print("  B4 分年度交易统计")
+                print(f"  {'年份':<8} {'交易次数':>8} {'盈利次数':>8} {'胜率':>7} {'总盈亏':>12} {'年化收益':>9}")
+                print("  " + "-" * 59)
+                for _y in sorted(_yr_stats):
+                    _yt = _yr_stats[_y]
+                    _wr = _yt["won"] / _yt["total"] * 100 if _yt["total"] > 0 else 0
+                    _yr_ret = _ann4.get(int(_y)) if _ann4 and int(_y) in _ann4 else None
+                    _yr_str = f"{_yr_ret*100:>+7.2f}%" if _yr_ret is not None else "   N/A  "
+                    print(f"  {_y:<8} {_yt['total']:>8} {_yt['won']:>8} {_wr:>6.1f}% {_yt['pnl']:>+10.0f} {_yr_str:>9}")
+                print()
             continue
 
         result = run_single(name, feeds, config, mode)

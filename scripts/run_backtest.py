@@ -114,7 +114,36 @@ def load_data(
     return df
 
 
-def df_to_feed(df: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
+def align_to_common_dates(
+    dataframes: dict[str, pd.DataFrame],
+) -> dict[str, pd.DataFrame]:
+    """将所有品种对齐到公共日期索引（并集），消除多品种数组长度差异。
+
+    OHLC 前向填充（非交易日沿用上一个交易日价格），volume 填 0。
+    """
+    all_dates = sorted(
+        set.union(*(set(df["date"].dropna()) for df in dataframes.values()))
+    )
+    all_dates = pd.DatetimeIndex(all_dates)
+    aligned = {}
+    for sym, df in dataframes.items():
+        df = df.set_index("date").reindex(all_dates)
+        for col in ["open", "high", "low", "close", "pre_close"]:
+            if col in df.columns:
+                df[col] = df[col].ffill()
+        df["volume"] = df["volume"].fillna(0).astype(float)
+        if "amount" in df.columns:
+            df["amount"] = df["amount"].fillna(0).astype(float)
+        if "adj_factor" in df.columns:
+            df["adj_factor"] = df["adj_factor"].ffill()
+        df = df.reset_index().rename(columns={"index": "date"})
+        aligned[sym] = df
+    logger.info("公共交易日: %d 天", len(all_dates))
+    return aligned
+
+
+def df_to_feed(df: pd.DataFrame, symbol: str,
+               common_dates: pd.DatetimeIndex | None = None) -> bt.feeds.PandasData:
     """将 pandas DataFrame 转换为 Backtrader PandasData feed。
 
     字段映射：
@@ -124,10 +153,19 @@ def df_to_feed(df: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
         low       → low
         close     → close
         volume    → volume
+
+    若提供 common_dates，会将 DataFrame 对其到该日期索引
+    （用于多品种回测时避免 Backtrader 对齐导致的索索引错位）。
     """
     feed_df = df[["date", "open", "high", "low", "close", "volume"]].copy()
     feed_df["date"] = pd.to_datetime(feed_df["date"])
-    feed_df.set_index("date", inplace=True)
+
+    if common_dates is not None:
+        feed_df = feed_df.set_index("date").reindex(common_dates)
+        feed_df = feed_df.ffill().bfill()
+        # keep DatetimeIndex for Backtrader
+    else:
+        feed_df.set_index("date", inplace=True)
 
     return bt.feeds.PandasData(
         dataname=feed_df,

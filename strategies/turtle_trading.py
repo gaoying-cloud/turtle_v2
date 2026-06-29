@@ -128,6 +128,7 @@ class TurtleStrategy(bt.Strategy):
         # ── 预计算所有品种的信号序列 ──
         self._close_series: Dict[str, pd.Series] = {}
         signal_calc = TurtleSignals(self.params.turtle_params)
+
         for i, code in enumerate(self.params.symbols):
             data = self.datas[i]
             # 将 Backtrader lines 转为 pandas Series
@@ -173,15 +174,12 @@ class TurtleStrategy(bt.Strategy):
         self._enter_count: Dict[str, int] = {}           # 实际入场次数
 
     def _next_idx(self, code: str) -> int:
-        """获取安全索引，防止 runonce 模式下 len(self) 与信号数组长度不匹配。"""
-        idx = len(self) - 1
-        if idx < 0:
-            return 0
-        if code in self._signals and "n" in self._signals[code]:
-            max_idx = len(self._signals[code]["n"]) - 1
-            if idx > max_idx:
-                return max_idx
-        return idx
+        """获取当前 bar 在预计算信号数组中的索引。
+
+        所有品种已通过 common_dates 对齐到相同长度，无需 clamp。
+        保留负值保护（__init__ 中调用时 len(self) 可能为 0）。
+        """
+        return max(0, len(self) - 1)
 
     def _is_new_day(self) -> bool:
         """检测是否进入新的交易日（用于重置 T+1 标记）。"""

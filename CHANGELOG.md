@@ -1,5 +1,34 @@
 # Changelog
 
+## [V5.20-多品种信号索引漂移+SignalFilter计数器归零修复] - 2026-06-29
+### 两大 P0 bug 修复 → 所有回测结果需重跑
+- **Bug 1: 多品种信号数组索引漂移** — 四个品种全部在某个高点后永久沉默（510500 停 11 年、159915 停 5 年、513100 停 4 年）。根因：各品种 data feed 数组长度不一致，`_next_idx` 的 clamp 导致 20 日高点/N 值/均线冻结在最后一个有效值，突破永不触发
+  - `scripts/run_backtest.py`: 新增 `align_to_common_dates()` — 所有品种 reindex 到公共日期并集（OHLC ffill, volume 填 0）后再建 feed
+  - `strategies/turtle_trading.py`: `_next_idx` 简化为 `return max(0, len(self) - 1)`，不再需要 clamp
+  - 已对齐 6 个脚本：`run_backtest.py` `run_comparison.py` `gen_report.py` `run_grid_search.py` `run_stress_test.py` `run_trade_diagnostics.py`
+- **Bug 2: SignalFilter 强制放行计数器归零** — `check_entry` 规则 4 放行时立即归零 `consecutive_rejections`，若入场因现金不足/风险约束失败则 `record_result` 不被调用、计数器白归零→每 4 信号放行一次、放行即失败、死循环
+  - `src/turtle_core.py`: 删除规则 4 中的 `state.consecutive_rejections = 0`，归零只在 `record_result`（真正成交时）做
+- **修复效果**: B4 净值从 ¥323,046→¥422,290（+31%），交易次数 79→120，510500 从 8 笔→44 笔，513100 从 34 笔→50 笔，159915 从 22 笔→37 笔
+- **诊断脚本**: `scripts/_ad_hoc/_diag_signal_rejections.py` — 纯 pandas 状态机逐信号追踪拒绝理由，输出 `results/diagnostics/signal_rejection_trace.csv`
+- **⚠️ 此前所有回测结果作废**（V5.15 定案、网格搜索、参数优化、扩展回测、压力测试全部需要重跑）
+
+## [V5.19-前复权逻辑修复] - 2026-06-29
+### 复权核心 bug 修复 + 自愈校验 + 测试补齐
+- **根因**: `data_pipeline.py` 前复权从未真正生效——缓存的 `close` 为未复权原始价（513100 在 2022-01-14 拆分日存 25.97→1.015 的 80% 假跌，510500 有 −24% 假跌），海龟 ATR/唐奇安通道被虚假跳空污染
+- **P0 `_apply_factor_adjustment` 修复**:
+  - 比率方向修正为前复权正确公式 `ratio = adj_factor[t] / adj_factor[latest]`（旧代码 `latest/adj[t]` 是后复权方向，会放大旧价）
+  - 修复索引错位静默失效 bug：`reindex(df['date'])` 产生 Timestamp 索引，与 `df[col]` 整数索引按位对齐出全 NaN，导致价格乘法从未执行——改用 `df['date'].map(factor_map).ffill().bfill()` 对齐
+  - `pre_close` 重算为复权后 `close.shift(1)`，消除跨除权日的虚假前收对 ATR/TR 污染
+  - 存储的 `adj_factor` 列改为前复权比率（最新日=1.0），与降级路径语义统一
+- **P0 `_detect_and_adjust_splits` 修复**: 多拆分事件价格调整漏乘累积因子（早期段仅乘单事件因子，应为累积乘积）——改为先算每行累积比率再统一缩放；检测信号从 `pre_close[t]/close[t-1]` 改为 `close[t]/close[t-1]`，使其既能处理原始数据也能处理已部分复权但残留跳空的数据
+- **新增组合策略 `_adjust_forward`**: fund_adj 后若 `_has_residual_cliff` 仍检测到 >50% 跳空，自动叠加 `_detect_and_adjust_splits` 补齐 fund_adj 漏记的早期事件（实测修复 510500 的 2015-04 份额合并：Tushare fund_adj 因子最早只到 2022 年，漏记 2015 的 3.567:1 合并，叠加价格检测后 248% 假涨消除为 0%）
+- **新增 `_validate_adjustment` 自愈校验**: 前复权后 `close` 单日涨跌幅 >50% 即判定复权失败返回空，触发 `fetch_single` 跳过写入保留旧缓存，杜绝坏数据落盘（可拦截 fund_adj 漏记折算事件等数据质量问题）
+- **新增 `_reset_pre_close` 辅助**: 两路径共用 pre_close 重算逻辑
+- **`check_adj.py` 修正**: 真实累计收益改为直接由前复权 `close` 计算（旧 `close×adj_factor` 在前复权数据下无后复权含义）
+- **文档**: `docs/strategy_design_v3.0.md` §5.2.1 公式更正为前复权 `adj[t]/adj[latest]`（旧 `latest/adj[t]` 实为后复权）
+- **测试**: `tests/test_data_pipeline.py` 新增 `TestApplyFactorAdjustment`/`TestDetectAndAdjustSplits`/`TestValidateAdjustment`/`TestAdjustForwardCombined` 共 14 个测试（原复权逻辑零覆盖），全量 219/219 passed
+- **实拉验证**: `--force` 重拉后 `verify_adjustment.py` 5/5 品种通过（latest_ratio=1.0，max单日变动 ≤20%）
+
 ## [V5.18-后复权缺失修复] - 2026-06-29
 ### 数据缓存重拉 + 降级保护 + 全量报告重做
 - **数据修复**: 发现缓存ETF行情数据为未复权原始价格（因早期拉取时 Tushare token 缺失导致 fund_adj 降级、价格检测未触发），使用 `--force` 重拉全部 5 只 ETF，正确写入后复权数据

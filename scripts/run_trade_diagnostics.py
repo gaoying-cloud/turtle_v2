@@ -62,13 +62,25 @@ def load_data(symbol: str, start: str, end: str) -> pd.DataFrame | None:
 def run_full_backtest(start: str, end: str):
     """Run the full backtest with BEST_PARAMS, return (strat, cerebro)."""
     config = CONFIG
-    feeds = {}
+    all_dfs = {}
     for sym in SYMBOLS:
         df = load_data(sym, start, end)
-        if df is None or df.empty:
-            continue
+        if df is not None and not df.empty:
+            all_dfs[sym] = df
+
+    # 计算公共日期索引，避免多品种信号索引错位
+    common_dates = pd.DatetimeIndex(all_dfs[list(all_dfs.keys())[0]]["date"])
+    for sym, df in all_dfs.items():
+        common_dates = common_dates.intersection(pd.DatetimeIndex(df["date"]))
+    common_dates = common_dates.sort_values()
+
+    feeds = {}
+    for sym, df in all_dfs.items():
+        feed_df = df[["date", "open", "high", "low", "close", "volume"]].copy()
+        feed_df["date"] = pd.to_datetime(feed_df["date"])
+        feed_df = feed_df.set_index("date").reindex(common_dates).ffill().bfill()
         feed = bt.feeds.PandasData(
-            dataname=df[["date", "open", "high", "low", "close", "volume"]].set_index("date"),
+            dataname=feed_df,
             open="open", high="high", low="low", close="close", volume="volume")
         feed._name = sym
         feeds[sym] = feed

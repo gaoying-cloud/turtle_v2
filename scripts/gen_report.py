@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.risk_parity import compute_alpha_weights
+from scripts.run_backtest import load_data, df_to_feed, align_to_common_dates
 from strategies.turtle_trading import TurtleStrategy
 from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
 
@@ -144,26 +144,27 @@ def load_data(symbol: str, start_date: str, end_date: str) -> Optional[pd.DataFr
     return df
 
 
-def df_to_feed(df: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
-    feed_df = df[["date", "open", "high", "low", "close", "volume"]].copy()
-    feed_df["date"] = pd.to_datetime(feed_df["date"])
-    feed_df.set_index("date", inplace=True)
-    return bt.feeds.PandasData(dataname=feed_df, plot=False)
-
-
 def run_backtest_with_best(params: dict, start_date: str = "2014-01-01",
                            end_date: str = "2026-06-10", mode: str = "A") -> dict:
     """用给定参数运行一次全区间回测，返回完整指标集。"""
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    feeds = {}
+    # 加载全部数据并计算公共日期
+    all_dfs = {}
     for symbol in ALL_SYMBOLS:
         df = load_data(symbol, start_date, end_date)
-        if df is None:
+        if df is not None:
+            all_dfs[symbol] = df
+    # 所有品种对齐到公共日期
+    all_dfs = align_to_common_dates(all_dfs)
+    # 创建对齐的 feeds
+    feeds = {}
+    for symbol in ALL_SYMBOLS:
+        if symbol not in all_dfs:
             logger.warning("[%s] 数据不可用，跳过", symbol)
             continue
-        feed = df_to_feed(df, symbol)
+        feed = df_to_feed(all_dfs[symbol], symbol)
         feed._name = symbol
         feeds[symbol] = feed
     if len(feeds) < 2:

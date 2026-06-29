@@ -161,11 +161,15 @@ def build_param_grid(use_two_stage: bool = False) -> List[dict]:
 # ════════════════════════════════════════════════════════════
 # 2. 单次回测运行
 # ════════════════════════════════════════════════════════════
-def df_to_feed(df: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
+def df_to_feed(df: pd.DataFrame, symbol: str,
+               common_dates: pd.DatetimeIndex | None = None) -> bt.feeds.PandasData:
     """将 pandas DataFrame 转换为 Backtrader PandasData feed。"""
     feed_df = df[["date", "open", "high", "low", "close", "volume"]].copy()
     feed_df["date"] = pd.to_datetime(feed_df["date"])
-    feed_df.set_index("date", inplace=True)
+    if common_dates is not None:
+        feed_df = feed_df.set_index("date").reindex(common_dates).ffill().bfill()
+    else:
+        feed_df.set_index("date", inplace=True)
     return bt.feeds.PandasData(
         dataname=feed_df, open="open", high="high", low="low",
         close="close", volume="volume", plot=False,

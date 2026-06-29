@@ -871,11 +871,13 @@ class SignalFilter:
             state.consecutive_rejections = 0
             return True, "上次交易盈利出场，接受"
 
-        # 规则 4：上限保护
+        # 规则 4：上限保护 — 不放行计数器，只放行信号
         if state.consecutive_rejections >= self.max_rejections:
             actual = state.consecutive_rejections + 1
             state.total_accepted += 1
-            state.consecutive_rejections = 0
+            # 不归零 consecutive_rejections！归零在 record_result 中做。
+            # 若 entry 因外部原因（现金不足/风险约束）未成交，record_result 不会被调用，
+            # 计数器保持 ≥3，后续每个信号都强制放行，直到真正成交。
             logger.info(
                 "[滤波器] %s 连续拒绝 %d 次 → 强制放行",
                 symbol, actual,
