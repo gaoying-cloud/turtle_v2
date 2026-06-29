@@ -49,6 +49,7 @@ from src.turtle_core import (
 from src.risk_parity import compute_alpha_weights
 from strategies.turtle_trading import TurtleStrategy
 from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
+from scripts.run_backtest import align_to_common_dates
 
 logger = logging.getLogger(__name__)
 
@@ -187,13 +188,17 @@ def run_single_backtest(
     config = _get_config()
 
     # 使用缓存加载数据
-    feeds: dict[str, bt.feeds.PandasData] = {}
+    df_dict: dict[str, pd.DataFrame] = {}
     for symbol in ALL_SYMBOLS:
         df = _load_data_cached(symbol, start_date, end_date)
         if df is None:
             logger.error("[run_id=%d] 品种 %s 数据加载失败", run_id, symbol)
             return None
-        feed = df_to_feed(df, symbol)
+        df_dict[symbol] = df
+    df_dict = align_to_common_dates(df_dict)
+    feeds: dict[str, bt.feeds.PandasData] = {}
+    for symbol in ALL_SYMBOLS:
+        feed = df_to_feed(df_dict[symbol], symbol)
         feed._name = symbol
         feeds[symbol] = feed
 
