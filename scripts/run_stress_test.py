@@ -241,7 +241,7 @@ def run_historical_scenario(
 
     # ── 加载数据 ──
     feeds: dict[str, bt.feeds.PandasData] = {}
-    for symbol in ALL_SYMBOLS:
+    for symbol in SIX_SYMBOLS:
         df = load_data(symbol, start, end)
         if df is None:
             logger.error("[%s] 品种 %s 数据加载失败", scenario["id"], symbol)
@@ -254,7 +254,6 @@ def run_historical_scenario(
     cerebro = bt.Cerebro()
     for symbol in SIX_SYMBOLS:
         cerebro.adddata(feeds[symbol], name=symbol)
-    cerebro.adddata(feeds[BOND_SYMBOL], name=BOND_SYMBOL)
     cerebro.broker.setcash(config["initial_cash"])
     commission = config["commission_pct"]
     slippage = config["slippage_pct"]
@@ -697,12 +696,12 @@ def _check_stress_pass(metrics: dict) -> Tuple[bool, dict]:
         "threshold": PASS_THRESHOLDS["monthly_max_loss"],
         "pass": max_monthly <= PASS_THRESHOLDS["monthly_max_loss"],
     }
-    # 连续止损暂停至少触发 1 次（从 t1_stop_delay_hits 推断）
+    # 连续止损暂停最多触发 1 次（越少越好，0=策略稳健）
     pause_hits = metrics.get("t1_stop_delay_hits", 0) or 0
     checks["consecutive_stop_pause"] = {
         "value": pause_hits,
         "threshold": PASS_THRESHOLDS["consecutive_stop_pause"],
-        "pass": pause_hits >= PASS_THRESHOLDS["consecutive_stop_pause"],
+        "pass": pause_hits <= PASS_THRESHOLDS["consecutive_stop_pause"],
     }
 
     passed = all(c["pass"] for c in checks.values())
@@ -754,13 +753,14 @@ def generate_report(
         passed, checks = _check_stress_pass(h)
         if not passed:
             all_passed = False
-        var95 = f"{h.get('daily_var_95', 'N/A')}" if h.get('daily_var_95') is not None else "N/A"
-        var99 = f"{h.get('daily_var_99', 'N/A')}" if h.get('daily_var_99') is not None else "N/A"
-        corr = f"{h.get('correlation_avg', 'N/A')}" if h.get('correlation_avg') is not None else "N/A"
+        var95 = f"{abs(h['daily_var_95'])*100:.2f}%" if h.get('daily_var_95') is not None else "N/A"
+        var99 = f"{abs(h['daily_var_99'])*100:.2f}%" if h.get('daily_var_99') is not None else "N/A"
+        corr = f"{h['correlation_avg']:.4f}" if h.get('correlation_avg') is not None else "N/A"
         status = "✅" if passed else "⚠️" if sum(1 for c in checks.values() if c["pass"]) >= 3 else "❌"
+        sharpe_str = f"{h['sharpe']:.2f}" if h.get('sharpe') is not None else "N/A(区间过短)"
         lines.append(
             f"| {h['scenario_name']} | {h['date_range']} | {h['total_return']} | {h['cagr']} "
-            f"| {h.get('sharpe', 'N/A')} | {h['max_drawdown']} | {h['max_dd_duration']} "
+            f"| {sharpe_str} | {h['max_drawdown']} | {h['max_dd_duration']} "
             f"| {h['total_trades']} | {var95} | {var99} | {corr} | {status} |"
         )
 
@@ -771,7 +771,7 @@ def generate_report(
         ("回撤持续时间 ≤ 60 天", f"{PASS_THRESHOLDS['max_dd_duration']} 日"),
         ("99% VaR ≤ 5%", f"{PASS_THRESHOLDS['daily_var_99']}%"),
         ("月度最大亏损 ≤ 15%", f"{PASS_THRESHOLDS['monthly_max_loss']}%"),
-        ("连续止损暂停 ≥ 1 次", f"≥ {PASS_THRESHOLDS['consecutive_stop_pause']} 次"),
+        ("连续止损暂停 ≤ 1 次", f"≤ {PASS_THRESHOLDS['consecutive_stop_pause']} 次"),
     ]:
         lines.append(f"| {check_name} | {check_info} |")
 

@@ -379,7 +379,7 @@ class TestCheckStressPass:
             "max_dd_duration": 30,
             "daily_var_99": -0.03,
             "total_return": -5.0,
-            "t1_stop_delay_hits": 2,
+            "t1_stop_delay_hits": 0,  # 0次暂停=策略稳健
         }
         passed, checks = _check_stress_pass(metrics)
         assert passed

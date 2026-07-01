@@ -237,10 +237,10 @@ class TestExit:
         pos = strat._positions.open("510500.SH", entry_price=10.0, shares=800,
                                      n_at_entry=0.5, stop_loss=9.0)
         d = strat.datas[0]
-        d.low[0] = 9.4   # ≤ 9.5 (stop_low_10)
+        d.low[0] = 9.4   # < 9.5 (stop_low_10)
 
         with patch.object(strat, "_next_idx", return_value=2):
-            assert strat._should_exit("510500.SH", d, pos)
+            assert strat._should_exit("510500.SH", d, pos) != "none"
 
     def test_above_stop(self, strat):
         """在止损上方 → 不退出。"""
@@ -251,7 +251,7 @@ class TestExit:
         d.close[0] = 101.0  # > 98
 
         with patch.object(strat, "_next_idx", return_value=2):
-            assert not strat._should_exit("518880.SH", d, pos)
+            assert strat._should_exit("518880.SH", d, pos) == "none"
 
     def test_10day_break(self, strat):
         """跌破10日低点 → 退出。"""
@@ -261,10 +261,10 @@ class TestExit:
         pos = strat._positions.open("510500.SH", entry_price=10.5, shares=800,
                                      n_at_entry=0.3, stop_loss=9.0)
         d = strat.datas[0]
-        d.low[0] = 9.8   # ≤ 9.9
+        d.low[0] = 9.8   # < 9.9
 
         with patch.object(strat, "_next_idx", return_value=2):
-            assert strat._should_exit("510500.SH", d, pos)
+            assert strat._should_exit("510500.SH", d, pos) != "none"
 
 
 # ════════════════════════════════════════════════════════════
@@ -282,7 +282,7 @@ class TestTPlusOne:
         d.close[0] = 9.5
 
         with patch.object(strat, "_next_idx", return_value=2):
-            assert not strat._should_exit("510500.SH", d, pos)
+            assert strat._should_exit("510500.SH", d, pos) == "none"
 
     def test_t0_can_exit_same_day(self, strat):
         """T+0 当日买入 → 可同日退出（由10日低点触发）。"""
@@ -293,10 +293,10 @@ class TestTPlusOne:
         pos = strat._positions.open("518880.SH", entry_price=101, shares=500,
                                      n_at_entry=1.0, stop_loss=99.0)
         d = strat.datas[0]
-        d.low[0] = 98.0   # ≤ 99.0 (stop_low_10)
+        d.low[0] = 98.0   # < 99.0 (stop_low_10)
 
         with patch.object(strat, "_next_idx", return_value=2):
-            assert strat._should_exit("518880.SH", d, pos)
+            assert strat._should_exit("518880.SH", d, pos) != "none"
 
     def test_t1_next_day_can_exit(self, strat):
         """T+1 隔日 → 可退出（由10日低点触发）。"""
@@ -307,10 +307,10 @@ class TestTPlusOne:
         pos = strat._positions.open("510500.SH", entry_price=10.5, shares=800,
                                      n_at_entry=0.5, stop_loss=10.0)
         d = strat.datas[0]
-        d.low[0] = 9.5   # ≤ 10.0 (stop_low_10)
+        d.low[0] = 9.5   # < 10.0 (stop_low_10)
 
         with patch.object(strat, "_next_idx", return_value=2):
-            assert strat._should_exit("510500.SH", d, pos)
+            assert strat._should_exit("510500.SH", d, pos) != "none"
 
 
 # ════════════════════════════════════════════════════════════

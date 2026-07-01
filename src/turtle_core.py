@@ -534,10 +534,13 @@ class Position:
     stop_loss: float = 0.0
     stop_type: str = "fixed"          # "fixed" | "trailing"
     trail_high: float = 0.0           # 10日收盘价高点（移动止损用）
-    n_at_entry: float = 0.0           # 入场时的 N 值
+    n_at_entry: float = 0.0           # 入场时的 N 值（整笔交易固定使用）
     base_price: float = 0.0           # 初始入场价（加仓基准点）
     holding_days: int = 0
     entry_mode: str = "breakout"      # "breakout" | "ma20_cross"（决定止损方式）
+    high_since_entry: float = 0.0     # 持仓以来最高价（用于利润保护跟踪）
+    half_closed: bool = False         # 是否已执行过半仓锁定利润
+    protection_activated: bool = False  # 利润保护是否已激活（状态机，一旦激活永久保持）
 
     @property
     def total_shares(self) -> int:
@@ -793,6 +796,34 @@ class TurtlePositions:
         if pos is not None:
             if new_high > pos.trail_high:
                 pos.trail_high = new_high
+
+    def reduce_shares(self, symbol: str, reduce_by: int) -> bool:
+        """减仓指定股数（不关闭持仓），标记 half_closed。
+
+        Parameters
+        ----------
+        symbol : str
+            品种代码。
+        reduce_by : int
+            要减掉的股数。
+
+        Returns
+        -------
+        bool
+            是否成功减仓。
+        """
+        pos = self.get(symbol)
+        if pos is None:
+            return False
+        actual = min(reduce_by, pos.total_shares)
+        if actual <= 0:
+            return False
+        ratio = 1 - actual / pos.total_shares
+        pos.shares_per_unit = max(1, int(pos.shares_per_unit * ratio))
+        pos.half_closed = True
+        logger.info("[减仓] %s 减 %d 股，剩余 %d 股 (half_closed=True)",
+                     symbol, actual, pos.total_shares)
+        return True
 
 
 # ════════════════════════════════════════════════════════════

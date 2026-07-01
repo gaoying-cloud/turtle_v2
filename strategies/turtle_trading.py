@@ -425,8 +425,14 @@ class TurtleStrategy(bt.Strategy):
                 self._check_entry(code, data)
             else:
                 pos = self._positions.get(code)
-                if self._should_exit(code, data, pos):
+                # 每日更新持仓期最高价（利润保护用）
+                pos.high_since_entry = max(pos.high_since_entry, data.high[0])
+
+                exit_type = self._should_exit(code, data, pos)
+                if exit_type == "full":
                     self._execute_exit(code, data, pos)
+                elif exit_type == "half":
+                    self._execute_half_exit(code, data, pos)
                 else:
                     # 检查加仓
                     self._check_pyramid(code, data, pos)
@@ -758,8 +764,12 @@ class TurtleStrategy(bt.Strategy):
     #  退出（10 日反向突破，唯一退出规则）
     # ════════════════════════════════════════════════════════════
 
-    def _should_exit(self, code: str, data: bt.feeds.PandasData, pos: Position) -> bool:
-        """判断是否触发退出条件：仅 10 日反向突破（经典海龟退出规则）。"""
+    def _should_exit(self, code: str, data: bt.feeds.PandasData, pos: Position) -> str:
+        """判断退出类型：'full'（清仓）/ 'half'（减半）/ 'none'（不退出）。
+
+        full — 10日低点突破（low < stop_low_10）或 MA20 止损；
+        half — 利润保护：浮盈≥1N 且价格从持仓期最高点回撤2N。
+        """
         idx = self._next_idx(code)
         si = self._signals[code]
         high = data.high[0]
@@ -767,17 +777,18 @@ class TurtleStrategy(bt.Strategy):
         n = si["n"].iloc[idx]
 
         if pd.isna(n) or n <= 0:
-            return False
+            return "none"
 
         # ── T+1 约束 ──
         if code in self.params.t_plus_one_symbols and self._buy_today.get(code, False):
-            return False
+            return "none"
 
         if pos.direction == "short":
             # 10日向上突破退出（唯一退出规则）
             stop_high = si["stop_high_10"].iloc[idx]
             if not pd.isna(stop_high) and high >= stop_high:
-                return True
+                return "full"
+            return "none"
         else:
             ep = getattr(pos, "entry_mode", "breakout")
             if ep == "ma10_golden":
@@ -787,17 +798,40 @@ class TurtleStrategy(bt.Strategy):
                     c = data.close[0]
                     if pos.direction == "long":
                         if c < ma20.iloc[idx]:
-                            return True
+                            return "full"
                     else:
                         if c > ma20.iloc[idx]:
-                            return True
+                            return "full"
+                return "none"
             else:
-                # A 入场：10 日反向突破退出
+                # A 入场 (breakout)：利润保护 + 10日低点
                 stop_low = si["stop_low_10"].iloc[idx]
-                if not pd.isna(stop_low) and low <= stop_low:
-                    return True
 
-        return False
+                # ── 最终清仓：low < 10日低点（严格小于） ──
+                if not pd.isna(stop_low) and low < stop_low:
+                    return "full"
+
+                # ── 利润保护：浮盈≥19N 且 回撤2N（状态机：一旦激活永久保持） 不用20N原因：全部 10 次利润保护中，激活和减半发生在同一根K线──
+                if not pos.half_closed:
+                    # 首次激活检查（用持仓期最高价判断，不用 close）
+                    if not pos.protection_activated:
+                        peak_profit_n = (pos.high_since_entry - pos.entry_price) / pos.n_at_entry
+                        if peak_profit_n >= 19.0:
+                            pos.protection_activated = True
+                            logger.info("[利润保护] %s 激活 (最高=%.4f 入场=%.4f N0=%.4f 浮盈=%.1fN)",
+                                        code, pos.high_since_entry, pos.entry_price,
+                                        pos.n_at_entry, peak_profit_n)
+
+                    # 已激活 → 永久检查 2N 回撤
+                    if pos.protection_activated:
+                        half_trigger = max(
+                            pos.entry_price,
+                            pos.high_since_entry - 2.0 * pos.n_at_entry
+                        )
+                        if low <= half_trigger:
+                            return "half"
+
+                return "none"
 
     # ════════════════════════════════════════════════════════
     #  退出（执行）
@@ -840,14 +874,52 @@ class TurtleStrategy(bt.Strategy):
             "entry_price": pos.entry_price,
             "exit_price": price,
             "units": pos.units,
+            "shares": pos.total_shares,
             "pnl": round(pnl, 2),
             "was_win": was_win,
             "holding_days": pos.holding_days,
+            "account_cash": round(self.broker.getcash(), 2),
         })
 
         logger.info("[退出] %s → 卖出 %d 股 @ %.4f PnL=%.2f %s",
                     code, pos.total_shares, price, pnl,
                     "盈利" if was_win else "亏损")
+
+    # ════════════════════════════════════════════════════════
+    #  退出（半仓 — 利润保护）
+    # ════════════════════════════════════════════════════════
+
+    def _execute_half_exit(self, code: str, data: bt.feeds.PandasData, pos: Position):
+        """利润保护：平掉一半仓位，锁定半数利润（不关闭持仓）。"""
+        half_shares = pos.total_shares // 2
+        if half_shares <= 0:
+            return
+
+        dt = data.datetime.date(0)
+        price = data.close[0]
+        self.sell(data=data, size=half_shares)
+        self._positions.reduce_shares(code, half_shares)
+
+        pnl = (price - pos.entry_price) * half_shares
+        logger.info("[利润保护] %s → 减半 %d 股 @ %.4f PnL=%.2f",
+                    code, half_shares, price, pnl)
+
+        # 记录半仓事件（不更新 SignalFilter，不算完整交易）
+        self._my_trades.append({
+            "symbol": code,
+            "direction": pos.direction,
+            "entry_date": pos.entry_date.isoformat() if pos.entry_date else "",
+            "exit_date": dt.isoformat(),
+            "exit_type": "half_profit_protection",
+            "entry_price": pos.entry_price,
+            "exit_price": price,
+            "shares_exited": half_shares,
+            "shares_remaining": pos.total_shares,
+            "pnl": round(pnl, 2),
+            "was_win": pnl > 0,
+            "holding_days": pos.holding_days,
+            "account_cash": round(self.broker.getcash(), 2),
+        })
 
     # ════════════════════════════════════════════════════════
     #  加仓

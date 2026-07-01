@@ -308,9 +308,11 @@ based_on: "V5.18 (2026-06-29)"
 
 ### 4.2 止损与退出
 
-- **止损**：价格反向突破过去 10 日低点（多单）或高点（空单），即 `low ≤ stop_low_10`（多头），`high ≥ stop_high_10`（空头）。此为**唯一退出规则**。
-- **退出**：止损触发时平掉全部仓位。
-- **V3.8 → 方案A**：移除了原有的 2N 追尾止损规则（`close ≤ trail_high_10 - 2N`）。回测验证显示 2N 追尾止损在 A 股 ETF 震荡市中过早止盈/扩大亏损，导致盈亏比从 1.41 降至 0.93。回归经典 10 日低点退出后盈亏比恢复至 2.08，总收益率 +9.38%。方案A 进一步删除了代码中的 `_update_trailing_stop` 方法，当前仅 `_should_exit()` 一条退出线。
+- **止损**：价格反向突破过去 10 日低点（多单）或高点（空单），即 `low < stop_low_10`（多头），`high ≥ stop_high_10`（空头）。
+- **利润保护（V6.1 新增）**：做大 A 入场（breakout）的多单，当持仓期最高价较入场价浮盈 ≥ 19N 时自动激活利润保护状态机（永久保持），此后若价格从最高点回撤 2N 以上（`low ≤ max(entry_price, high_since_entry - 2×N₀)`），则平掉一半仓位锁定利润。剩余半仓仍通过 10 日低点止损清仓。
+- **退出**：止损触发时平掉全部仓位。利润保护触发时平半仓。
+- **V3.8 → 方案A**：移除了原有的 2N 追尾止损规则（`close ≤ trail_high_10 - 2N`）。回测验证显示 2N 追尾止损在 A 股 ETF 震荡市中过早止盈/扩大亏损，导致盈亏比从 1.41 降至 0.93。回归经典 10 日低点退出后盈亏比恢复至 2.08，总收益率 +9.38%。
+- **V6.1 利润保护**：在经典 10 日低点退出之上叠加了一层利润保护机制。`_should_exit()` 改为返回 `"full"/"half"/"none"` 三态——10 日低点触发全仓退出，19N 浮盈+2N 回撤触发半仓退出。<br>注意：本利润保护不同于 V3.8 移除的 2N 追尾止损。旧追尾止损用的是 `trail_high_close(close, 10)`（10 日滚动最高收盘价），每次退出后重新计算。新利润保护用的是 `high_since_entry`（持仓以来最高价）和固定的开仓日 ATR（N₀），状态机永久保持。
 
 ### 4.3 资金分配
 
@@ -361,18 +363,23 @@ ETF 日线原始数据来自 Tushare `fund_daily`，该接口返回**不复权**
 
 **复权方案：前复权（Forward Adjustment）**
 
-以最新交易日为基准，将历史 OHLC 等比例缩放：
+以最新交易日为基准，将历史 OHLC 等比例缩小（最新日价不变）：
 
 ```
-adjusted_price[t] = raw_price[t] × (latest_adj_factor / adj_factor[t])
+前复权价[t] = raw_price[t] × (adj_factor[t] / adj_factor[latest])
 ```
+
+其中 `adj_factor` 为 Tushare `fund_adj` 返回的累乘复权因子，`adj_factor[latest]` 为最新交易日因子。前复权比率 `adj_factor[t]/adj_factor[latest]` 在最新日为 1.0、历史日 ≤1。
+
+> 注：前复权后 `close` 已是连续序列，`close × adj_factor` 不具有后复权含义（后复权 = 前复权 × 常数，无法由随时间变化的因子还原）。真实累计收益直接由前复权 `close` 计算。
 
 **实现流程**（`src/data_pipeline.py`）：
 
-1. `_fetch_adj_factors(code)` — 从 Tushare `fund_adj` 拉取复权因子序列
-2. `_apply_factor_adjustment(df, adj_df)` — 应用前复权，跳过因子变化 < 0.1% 的日期
-3. 若 `fund_adj` 不可用（token 缺失/接口异常），降级为 `_detect_and_adjust_splits(df)` — 检测 pre_close 与昨日 close 比值偏离 ±15% 的事件，累积因子修正
-4. **降级保护**（V5.18）：若价格检测未发现 >15% 的偏差事件，`_detect_and_adjust_splits` 返回空 DataFrame，上层 `fetch_single` 跳过写入保留旧缓存，避免静默写入未复权污染数据
+1. `_fetch_adj_factors(code)` — 从 Tushare `fund_adj` 拉取复权因子序列，按交易日对齐（缺失日期 forward-fill）
+2. `_apply_factor_adjustment(df, adj_df)` — 用 `adj_factor[t]/adj_factor[latest]` 比率缩放 OHLC，重算 `pre_close = close.shift(1)`，存储前复权比率到 `adj_factor` 列
+3. 若 `fund_adj` 不可用（token 缺失/接口异常），降级为 `_detect_and_adjust_splits(df)` — 检测 pre_close 与昨日 close 比值偏离 ±15% 的事件，按累积比率前复权（V5.19 修复多事件中间段漏乘累积因子的 bug）
+4. **自愈校验**（V5.19）：`_validate_adjustment` 检查前复权后 `close` 单日涨跌幅 ≤50%，超过则判定复权失败返回空 DataFrame，上层 `fetch_single` 跳过写入保留旧缓存，杜绝污染数据落盘
+5. **降级保护**（V5.18）：若价格检测未发现 >15% 的偏差事件，`_detect_and_adjust_splits` 视为无需复权（`adj_factor=1.0`）
 
 **品种覆盖**：全部 7 只 ETF（含国债）。期货无分红拆分，不适用。
 

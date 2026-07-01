@@ -193,22 +193,49 @@ def should_enter(symbol: str, close: float, signals: dict, state: dict, today: d
     sf["rejections"] = sf.get("rejections", 0) + 1
 
     if sf["rejections"] >= 3:
-        # 规则4：连续拒绝 ≥ 3 → 强制放行
-        sf["rejections"] = 0
+        # 规则4：连续拒绝 ≥ 3 → 强制放行（不归零计数器）
+        # 归零在 record_trade_result 中做（真正成交时）。
+        # 若 calc_shares 因现金不足返回 0，入场失败但计数器保持 ≥3，
+        # 下次信号继续放行，直到真正入场。
         return True
 
     # 规则3：拒绝本次入场
     return False
 
 
-def should_exit(symbol: str, low: float, signals: dict, state: dict) -> bool:
-    """退出条件：最低价 <= 10日低点。T+1 品种当日已买入则不可退出。"""
+def check_exit(symbol: str, low: float, close: float, signals: dict, state: dict, pos: dict) -> str:
+    """退出检查：返回 'full'（清仓）/ 'half'（减半）/ 'none'（不退出）。"""
     if state.get("buy_today", {}).get(symbol, False):
-        return False
+        return "none"
+
     stop_low = signals.get("stop_low_10")
-    if stop_low is None:
-        return False
-    return low <= stop_low
+    n_at_entry = pos.get("n_at_entry")
+    entry_price = pos.get("entry_price", 0)
+    high_since_entry = pos.get("high_since_entry", entry_price or 0)
+    half_closed = pos.get("half_closed", False)
+
+    # ── 最终清仓：low < 10日低点 ──
+    if stop_low is not None and low < stop_low:
+        return "full"
+
+    # ── 利润保护减半仓 ──
+    if not half_closed and n_at_entry and n_at_entry > 0:
+
+        # ★★★ 修复 Bug 2：增加永久标记，用 high 判断，改门槛为 19N ★★★
+        if not pos.get("protection_activated", False):
+            peak_profit_n = (high_since_entry - entry_price) / n_at_entry
+            if peak_profit_n >= 19.0:  # 这里的 19.0 对应你的神级回测参数.不用20N，因为20N保护利润门槛，会有有好几笔交易都是，激活和减半发生在同一根K线。 会造成比较大的滑点。
+                pos["protection_activated"] = True
+                print(f"  [信号] {symbol} 利润保护激活 (最高={high_since_entry:.3f}, 浮盈={peak_profit_n:.1f}N)")
+
+        # 一旦激活，永久检查 2N 回撤
+        if pos.get("protection_activated", False):
+            trigger = max(entry_price, high_since_entry - 2 * n_at_entry)
+            if low <= trigger:
+                return "half"
+
+    return "none"
+
 
 
 def should_add(symbol: str, close: float, n: float, pos: dict) -> bool:
@@ -311,9 +338,10 @@ def run():
         print("  [ERROR] 无可用数据，请先运行 py scripts/pull_data.py")
         return
 
-    # 加载数据并计算信号
+    # 加载数据并计算信号（先全部加载，再对齐到公共日期，避免索引错位）
     data_cache = {}
     sig_cache = {}
+    raw_dfs = {}
     for sym in ETFS:
         df = get_data_for(sym)
         if df is None or len(df) < 100:
@@ -321,8 +349,20 @@ def run():
         df = df[df["date"] <= pd.Timestamp(today)].reset_index(drop=True)
         if len(df) < 100:
             continue
-        data_cache[sym] = df
-        sig_cache[sym] = compute_signals(df)
+        raw_dfs[sym] = df
+
+    if raw_dfs:
+        # 对齐到公共日期
+        all_dates = sorted(set.union(*(set(df["date"].dropna()) for df in raw_dfs.values())))
+        all_dates = pd.DatetimeIndex(all_dates)
+        for sym in ETFS:
+            if sym not in raw_dfs:
+                continue
+            df = raw_dfs[sym].set_index("date").reindex(all_dates)
+            df = df.ffill().bfill()
+            df = df.reset_index().rename(columns={"index": "date"})
+            data_cache[sym] = df
+            sig_cache[sym] = compute_signals(df)
 
     if not data_cache:
         print("\n  [ERROR] 无可用数据，请先运行 py scripts/pull_data.py 拉取数据")
@@ -346,12 +386,30 @@ def run():
         df = data_cache[sym]
         sig = sig_cache[sym]
         low = df["low"].iloc[-1]
-        if should_exit(sym, low, sig, state):
+        close = df["close"].iloc[-1]
+
+    # ★★★ 修复 Bug 1：更新持仓期最高价 ★★★
+        high_today = df["high"].iloc[-1]
+        if high_today > pos.get("high_since_entry", 0):
+            pos["high_since_entry"] = high_today
+
+        exit_type = check_exit(sym, low, close, sig, state, pos)
+    # ... 后续代码不变
+
+        if exit_type == "full":
             exit_signals.append({
-                "code": sym,
+                "code": sym, "type": "full",
                 "shares": pos["shares"],
                 "entry_price": pos["entry_price"],
-                "exit_price": float(df["close"].iloc[-1]),
+                "exit_price": float(close),
+            })
+        elif exit_type == "half":
+            half_shares = pos["shares"] // 2
+            exit_signals.append({
+                "code": sym, "type": "half",
+                "shares": half_shares,
+                "entry_price": pos["entry_price"],
+                "exit_price": float(close),
             })
 
     # ══════════════════════════════════════════════════════
@@ -416,6 +474,9 @@ def run():
                 "units": 1,
                 "n_at_entry": float(n),
                 "trail_high": float(close),
+                "high_since_entry": float(close),  # 利润保护用
+                "half_closed": False,               # 利润保护用
+                "protection_activated": False,      # ★ 新增初始化
             }
             entry_actions.append(pos)
 
@@ -443,11 +504,15 @@ def run():
             if exit_info:
                 showing_any = True
                 pnl_est = (exit_info["exit_price"] - exit_info["entry_price"]) * exit_info["shares"]
+                if exit_info["type"] == "half":
+                    note = f"利润保护回撤2N PnL≈{pnl_est:+.0f}"
+                else:
+                    note = f"10日低点突破 PnL≈{pnl_est:+.0f}"
                 print(line_fmt.format(sym, pos_str, "平仓", "卖出",
                        f"{exit_info['shares']}股",
                        f"{exit_info['entry_price']:.3f}",
                        f"{exit_info['exit_price']:.3f}",
-                       f"10日低点突破 PnL≈{pnl_est:+.0f}"))
+                       note))
                 continue
 
             # 加仓了？
@@ -460,7 +525,9 @@ def run():
                 continue
 
             # 持有中
-            if holding_days > 12:
+            if pos.get("half_closed"):
+                notes = "已减半仓"
+            elif holding_days > 12:
                 notes = "别动"
             else:
                 notes = ""
@@ -469,7 +536,7 @@ def run():
             print(line_fmt.format(sym, pos_str, "持有", "—", "—",
                    f"{pos['entry_price']:.3f}",
                    f"{stop_val:.2f}" if stop_val else "—",
-                   f"{'⚠️'+notes if notes else ''}"))
+                   notes))
 
         else:
             # 空仓—入场信号
@@ -592,6 +659,9 @@ def cmd_settle(state: dict, settle_str: str):
                 "units": 1,
                 "n_at_entry": float(n),
                 "trail_high": price,
+                "high_since_entry": price,           # 利润保护用
+                "half_closed": False,                # 利润保护用
+                "protection_activated": False,       # ★ 新增初始化
             }
             state["positions"].append(pos)
             state["cash"] -= shares * price
