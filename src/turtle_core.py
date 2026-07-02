@@ -614,6 +614,12 @@ class TurtleSignals:
             "entry_low_55": donchian_low(low, self.filter_period),
             "stop_high_10": donchian_high(high, self.stop_period),
             "stop_low_10": donchian_low(low, self.stop_period),
+            "stop_high_5": donchian_high(high, 5),   # 【新增】5日高点，减半仓后收紧退出用
+            "stop_low_5": donchian_low(low, 5),      # 【新增】5日低点，减半仓后收紧退出用
+            "stop_high_7": donchian_high(high, 7),   # 【实验】7日高点
+            "stop_low_7": donchian_low(low, 7),      # 【实验】7日低点
+            "stop_high_8": donchian_high(high, 8),   # 【实验】8日高点
+            "stop_low_8": donchian_low(low, 8),      # 【实验】8日低点
             "trail_high_10": trail_high_close(close, self.stop_period),
             "trail_low_10": trail_low_close(close, self.stop_period),
             "sma_50": close.rolling(50).mean(),  # 50日均线（趋势判断用）

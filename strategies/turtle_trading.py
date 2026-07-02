@@ -163,6 +163,7 @@ class TurtleStrategy(bt.Strategy):
         self._last_equity: float = self.broker.getvalue()
         self._trade_count: int = 0
         self._my_trades: List[dict] = []
+        self._half_exit_events: List[dict] = []  # 利润保护减半事件（与完整交易分离）
 
         # ── 调试计数器（排查信号不足用） ──
         self._signal_count: Dict[str, int] = {}          # 突破信号次数
@@ -784,8 +785,9 @@ class TurtleStrategy(bt.Strategy):
             return "none"
 
         if pos.direction == "short":
-            # 10日向上突破退出（唯一退出规则）
-            stop_high = si["stop_high_10"].iloc[idx]
+            # 10日向上突破退出；若已减半仓，收紧至5日退出
+            stop_high_period = "stop_high_5" if pos.half_closed else "stop_high_10"
+            stop_high = si[stop_high_period].iloc[idx]
             if not pd.isna(stop_high) and high >= stop_high:
                 return "full"
             return "none"
@@ -805,7 +807,9 @@ class TurtleStrategy(bt.Strategy):
                 return "none"
             else:
                 # A 入场 (breakout)：利润保护 + 10日低点
-                stop_low = si["stop_low_10"].iloc[idx]
+                # 减半仓后退出线仍用 10日低点（V6.2 实验确认收紧会损伤收益）
+                stop_low_period = "stop_low_10"
+                stop_low = si[stop_low_period].iloc[idx]
 
                 # ── 最终清仓：low < 10日低点（严格小于） ──
                 if not pd.isna(stop_low) and low < stop_low:
@@ -905,7 +909,7 @@ class TurtleStrategy(bt.Strategy):
                     code, half_shares, price, pnl)
 
         # 记录半仓事件（不更新 SignalFilter，不算完整交易）
-        self._my_trades.append({
+        self._half_exit_events.append({
             "symbol": code,
             "direction": pos.direction,
             "entry_date": pos.entry_date.isoformat() if pos.entry_date else "",
@@ -927,6 +931,7 @@ class TurtleStrategy(bt.Strategy):
 
     def _check_pyramid(self, code: str, data: bt.feeds.PandasData, pos: Position):
         """检查并执行加仓。"""
+        # V6.2 实验确认：减半后禁止加仓会关闭头部交易的利润放大器，故回退
         if pos.units >= self._positions._max_units:
             return
 
@@ -1048,6 +1053,22 @@ class TurtleStrategy(bt.Strategy):
                             code, dir_label, cnt, profit, loss, total, dir_win_rate)
         logger.info("-" * 70)
 
+        # ── 利润保护半仓事件汇总 ──
+        if self._half_exit_events:
+            logger.info("")
+            logger.info("利润保护减半事件 (%d 次)", len(self._half_exit_events))
+            logger.info("%16s %12s %12s %10s %10s",
+                         "品种", "入场价", "减半价", "已实现PnL", "剩余股数")
+            logger.info("-" * 70)
+            half_total_pnl = 0.0
+            for ev in self._half_exit_events:
+                logger.info("%16s %12.4f %12.4f %10.0f %10d",
+                            ev["symbol"], ev["entry_price"], ev["exit_price"],
+                            ev["pnl"], ev.get("shares_remaining", 0))
+                half_total_pnl += ev["pnl"]
+            logger.info("%16s %12s %12s %10.0f", "", "", "合计", half_total_pnl)
+            logger.info("-" * 70)
+
         # ── 调试计数器输出 ──
         logger.info("")
         logger.info("=" * 50)
@@ -1083,4 +1104,5 @@ class TurtleStrategy(bt.Strategy):
             "total_pnl": total_pnl,
             "final_value": self._equity(),
             "trades": pd.DataFrame(self._my_trades) if self._my_trades else pd.DataFrame(),
+            "half_exits": self._half_exit_events,
         }

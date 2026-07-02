@@ -272,7 +272,9 @@ class TestTurtleSignals:
             "n", "entry_high_20", "entry_low_20",
             "entry_high_55", "entry_low_55",
             "stop_high_10", "stop_low_10", "trail_high_10",
-            "trail_low_10", "sma_50", "sma_20", "ma5", "ma10",
+            "trail_low_10", "stop_high_5", "stop_low_5",
+            "stop_high_7", "stop_low_7", "stop_high_8", "stop_low_8",
+            "sma_50", "sma_20", "ma5", "ma10",
             "hurst_252", "trend_duration_median", "sma_60",
             "rsi_14", "bb_upper_20", "bb_lower_20",
         }

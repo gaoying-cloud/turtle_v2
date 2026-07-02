@@ -1,19 +1,24 @@
 #!/usr/bin/env python
 """
-海龟 V5.16 每日信号生成器。
+海龟 V6.2 每日信号生成器。
 每天 16:30 后运行（Tushare 日线数据约 16:00-17:00 更新），
 输出次日操作清单。
 
 用法:
-    py scripts/daily_signal.py               # T日16:30 出信号
-    py scripts/daily_signal.py --settle ...   # 记录成交价
-    py scripts/daily_signal.py --status       # 查看持仓
+    py scripts/daily_signal.py                     # T日16:30 出信号
+    py scripts/daily_signal.py --settle ...         # 记录成交价（入场/全平）
+    py scripts/daily_signal.py --settle-half ...    # 记录利润保护减半成交价
+    py scripts/daily_signal.py --settle-add ...     # 记录加仓成交价
+    py scripts/daily_signal.py --status             # 查看持仓
 
 节奏:
-    T日 16:30  py scripts/daily_signal.py    → 看明天要做什么
+    T日 16:30  py scripts/daily_signal.py                  → 看明天要做什么
     T+1日 9:30 按表手动下单，记下实际成交价
-    T+1日 16:30 py scripts/daily_signal.py --settle 510500=9.05  → 结算+出后天表
+    T+1日 16:30 py scripts/daily_signal.py --settle ...    → 结算+出后天表
+    (减半日)   py scripts/daily_signal.py --settle-half ...→ 减半结算（不关闭持仓）
+    (加仓日)   py scripts/daily_signal.py --settle-add ... → 加仓结算
 """
+
 from __future__ import annotations
 import sys, json, logging, warnings
 from pathlib import Path
@@ -62,6 +67,7 @@ def _default_state() -> dict:
         "consecutive_losses": {},
         "buy_today": {},
         "last_signal_date": "",          # V5.16: 用于跨日清空 buy_today
+        "half_exit_events": [],
     }
 
 
@@ -69,8 +75,9 @@ def load_state() -> dict:
     if STATE_PATH.exists():
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             s = json.load(f)
-        # V5.16: 向后兼容旧 state（无 last_signal_date / shares_per_unit）
+        # V5.16: 向后兼容旧 state（无 last_signal_date / shares_per_unit / half_exit_events）
         s.setdefault("last_signal_date", "")
+        s.setdefault("half_exit_events", [])
         for pos in s.get("positions", []):
             if "shares_per_unit" not in pos:
                 pos["shares_per_unit"] = pos.get("shares", 0)
@@ -208,11 +215,13 @@ def check_exit(symbol: str, low: float, close: float, signals: dict, state: dict
     if state.get("buy_today", {}).get(symbol, False):
         return "none"
 
-    stop_low = signals.get("stop_low_10")
+    half_closed = pos.get("half_closed", False)
+    # 退出线始终用 10 日低点
+    stop_period = "stop_low_10"
+    stop_low = signals.get(stop_period)
     n_at_entry = pos.get("n_at_entry")
     entry_price = pos.get("entry_price", 0)
     high_since_entry = pos.get("high_since_entry", entry_price or 0)
-    half_closed = pos.get("half_closed", False)
 
     # ── 最终清仓：low < 10日低点 ──
     if stop_low is not None and low < stop_low:
@@ -328,7 +337,7 @@ def run():
 
     # 拉取最新数据
     print(f"\n{'=' * 58}")
-    print(f"  海龟 V5.16 每日信号   {today_str} ({today.strftime('%A')})")
+    print(f"  海龟 V6.2 每日信号   {today_str} ({today.strftime('%A')})")
     print(f"{'=' * 58}")
 
     # 数据新鲜度检查
@@ -410,6 +419,18 @@ def run():
                 "shares": half_shares,
                 "entry_price": pos["entry_price"],
                 "exit_price": float(close),
+            })
+            # ★★★ 减半闭环：更新持仓状态，标记 half_closed，记录事件 ★★★
+            pos["half_closed"] = True
+            pos["shares"] -= half_shares
+            pnl_half = (float(close) - pos["entry_price"]) * half_shares
+            state.setdefault("half_exit_events", []).append({
+                "symbol": sym, "direction": "long",
+                "entry_date": pos["entry_date"], "exit_date": today_str,
+                "entry_price": pos["entry_price"], "exit_price": float(close),
+                "shares_exited": half_shares, "shares_remaining": pos["shares"],
+                "pnl": round(pnl_half, 2), "was_win": pnl_half > 0,
+                "holding_days": (today - datetime.strptime(pos["entry_date"], "%Y-%m-%d").date()).days,
             })
 
     # ══════════════════════════════════════════════════════
@@ -566,6 +587,20 @@ def run():
         print(f"  {'(无信号)':^66}")
     print("  " + "-" * 66)
 
+    # ── 利润保护减半事件摘要 ──
+    today_halves = [ev for ev in state.get("half_exit_events", []) if ev.get("exit_date") == today_str]
+    if today_halves:
+        print()
+        print("  利润保护减半事件:")
+        print("  {:<12} {:>8} {:>8} {:>10} {:>8}".format(
+            "品种", "入场价", "减半价", "PnL", "剩余股数"))
+        print("  " + "-" * 54)
+        for ev in today_halves:
+            print("  {:<12} {:>8.3f} {:>8.3f} {:>+10.0f} {:>8}".format(
+                ev["symbol"], ev["entry_price"], ev["exit_price"],
+                ev["pnl"], ev["shares_remaining"]))
+        print("  " + "-" * 54)
+
     # 权益摘要
     n_pos = len(state["positions"])
     risk = n_pos * RISK_PER_UNIT * 100
@@ -689,17 +724,126 @@ def cmd_status(state: dict):
         print(f"  最近交易: {last['symbol']} {'赚' if last['was_win'] else '亏'} PnL={last['pnl']:+,.0f}")
 
 
+def cmd_settle_half(state: dict, settle_str: str):
+    """记录利润保护减半成交价（平掉一半仓位，不关闭持仓）。"""
+    today_str = date.today().isoformat()
+    for part in settle_str.split(","):
+        part = part.strip()
+        if "=" not in part:
+            print(f"  ⚠ 格式错误: {part}，应为 symbol=price")
+            continue
+        sym, price_str = part.split("=", 1)
+        sym = sym.strip().upper()
+        if not sym.endswith((".SH", ".SZ")):
+            matched = [c for c in ETFS if c.startswith(sym + ".")]
+            sym = matched[0] if matched else sym + ".SH"
+        try:
+            price = float(price_str)
+        except ValueError:
+            print(f"  ⚠ 价格格式错误: {price_str}")
+            continue
+
+        pos = next((p for p in state["positions"] if p["code"] == sym), None)
+        if pos is None:
+            print(f"  [WARN] {sym} 无持仓，无法减半")
+            continue
+        if pos.get("half_closed", False):
+            print(f"  [WARN] {sym} 已减半过，不能再次减半")
+            continue
+
+        half_shares = pos["shares"] // 2
+        if half_shares <= 0:
+            print(f"  [WARN] {sym} 持仓不足，无法减半")
+            continue
+
+        exit_price = price
+        pnl = (exit_price - pos["entry_price"]) * half_shares
+        fee = half_shares * exit_price * (COMMISSION * 2 + SLIPPAGE)
+        net_pnl = pnl - fee
+
+        state["cash"] += half_shares * exit_price * (1 - COMMISSION - SLIPPAGE)
+        pos["shares"] -= half_shares
+        pos["half_closed"] = True
+
+        state.setdefault("half_exit_events", []).append({
+            "symbol": sym, "direction": "long",
+            "entry_date": pos["entry_date"], "exit_date": today_str,
+            "entry_price": pos["entry_price"], "exit_price": exit_price,
+            "shares_exited": half_shares, "shares_remaining": pos["shares"],
+            "pnl": round(net_pnl, 2), "was_win": net_pnl > 0,
+            "holding_days": (date.today() - datetime.strptime(pos["entry_date"], "%Y-%m-%d").date()).days,
+        })
+
+        state["equity"] = market_equity(state)
+        print(f"  [OK] {sym} 减半: {half_shares}股 @ {exit_price:.3f} PnL={net_pnl:+,.0f} 剩余{pos['shares']}股")
+
+    save_state(state)
+
+
+def cmd_settle_add(state: dict, settle_str: str):
+    """记录加仓成交价（追加一个单位，不改变入场价）。"""
+    today_str = date.today().isoformat()
+    for part in settle_str.split(","):
+        part = part.strip()
+        if "=" not in part:
+            print(f"  ⚠ 格式错误: {part}，应为 symbol=price")
+            continue
+        sym, price_str = part.split("=", 1)
+        sym = sym.strip().upper()
+        if not sym.endswith((".SH", ".SZ")):
+            matched = [c for c in ETFS if c.startswith(sym + ".")]
+            sym = matched[0] if matched else sym + ".SH"
+        try:
+            price = float(price_str)
+        except ValueError:
+            print(f"  ⚠ 价格格式错误: {price_str}")
+            continue
+
+        pos = next((p for p in state["positions"] if p["code"] == sym), None)
+        if pos is None:
+            print(f"  [WARN] {sym} 无持仓，无法加仓")
+            continue
+        if pos["units"] >= MAX_UNITS:
+            print(f"  [WARN] {sym} 已达最大单位数 {MAX_UNITS}，无法加仓")
+            continue
+
+        add_shares = pos.get("shares_per_unit", pos["shares"])
+        if add_shares <= 0:
+            print(f"  [WARN] {sym} 单位股数异常，无法加仓")
+            continue
+
+        pos["shares"] += add_shares
+        pos["units"] += 1
+        state["cash"] -= add_shares * price
+        state["buy_today"][sym] = True
+
+        state["equity"] = market_equity(state)
+        print(f"  [OK] {sym} 加仓: +{add_shares}股 @ {price:.3f} (单位{pos['units']}/{MAX_UNITS})")
+
+    save_state(state)
+
+
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="海龟 V5.16 每日信号")
+    parser = argparse.ArgumentParser(description="海龟 V6.2 每日信号")
     parser.add_argument("--settle", type=str, default=None,
                         help="记录成交价: symbol=price[,symbol=price...]")
+    parser.add_argument("--settle-half", type=str, default=None,
+                        help="记录利润保护减半成交价: symbol=price[,symbol=price...]")
+    parser.add_argument("--settle-add", type=str, default=None,
+                        help="记录加仓成交价: symbol=price[,symbol=price...]")
     parser.add_argument("--status", action="store_true", help="查看持仓状态")
     args = parser.parse_args()
 
     if args.settle:
         state = load_state()
         cmd_settle(state, args.settle)
+    elif args.settle_half:
+        state = load_state()
+        cmd_settle_half(state, args.settle_half)
+    elif args.settle_add:
+        state = load_state()
+        cmd_settle_add(state, args.settle_add)
     elif args.status:
         state = load_state()
         cmd_status(state)
