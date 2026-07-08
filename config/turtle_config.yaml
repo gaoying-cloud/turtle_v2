@@ -2,10 +2,10 @@ initial_cash: 100000
 commission_pct: 0.00015
 slippage_pct: 0.001
 turtle:
-  breakout_period: 20
-  atr_period: 20
-  stop_period: 10
-  stop_atr_multiple: 2.0
+  breakout_period: 20          # [网格搜索最优] 突破周期
+  atr_period: 25               # [网格搜索最优] ATR周期 (旧: 20 → 25)
+  stop_period: 8               # [网格搜索最优] 退出周期 (旧: 10 → 8, 更紧)
+  stop_atr_multiple: 1.5       # [网格搜索最优] 止损倍数 (旧: 2.0 → 1.5)
   risk_per_unit: 0.01
   max_units: 4
   unit_step: 0.5
@@ -15,8 +15,9 @@ turtle:
   use_trend_duration_filter: false
   trend_duration_min_days: 5
   exit_period: 10
+  pyramid_step: 2.0
 weighting:
-  alpha: 0.05
+  alpha: 0.0               # [网格搜索最优] 风险平价偏移 (旧: 0.05 → 0, ATR等权最优)
   cov_lookback_days: 252
   rebalance_quarterly: true
   atr_change_threshold: 0.3
@@ -39,6 +40,16 @@ symbols:
 - code: 518880.SH
   name: 黄金ETF
   market: 商品
+  shortable: false
+  t_plus_one: false
+- code: 159985.SZ
+  name: 豆粕ETF
+  market: 商品
+  shortable: false
+  t_plus_one: false
+- code: 513520.SH
+  name: 日经ETF
+  market: 跨境
   shortable: false
   t_plus_one: false
 bond:
