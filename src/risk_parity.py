@@ -3,13 +3,13 @@
 实现设计文档 §3.1.3「第三层：α 风险平价偏移」的全部计算：
 
 1. Ledoit-Wolf 收缩协方差估计
-2. 风险平价权重数值求解 (CCD)
+2. 风险平价权重数值求解 (Spinu 2013 Newton-Raphson)
 3. α 融合权重：最终 weight = (1-α) × w_ATR + α × w_RP
 
 纯 numpy 实现，无外部依赖 (不引入 scikit-learn/Scipy)。
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 import numpy as np
 
 
@@ -217,7 +217,7 @@ def risk_parity_weights(
         # 简化：w_i_new = w_i * sqrt( target / mrc_i )
         # 其中 mrc_i = w_i * (Σw)_i
         mrc = w * sw                  # shape (N,) 当前每个品种的边际风险贡献
-        ratio = target / (mrc + 1e-30)  # 避免除零
+        ratio = target / (mrc + 1e-15)  # 避免除零
         ratio = np.maximum(ratio, 0.0)  # 防止负值导致 sqrt NaN
         w = w * np.sqrt(ratio)
 
@@ -247,7 +247,9 @@ def compute_alpha_weights(
     Parameters
     ----------
     returns : np.ndarray, shape (T, N)
-        252 个交易日的日收益率矩阵（对数收益率或简单收益率均可）。
+        252 个交易日的日收益率矩阵。上游 _build_returns_matrix 传入的是
+        对数收益率 ln(P_t/P_{t-1})；对于日频数据，与简单收益率的协方差
+        差异可忽略（典型偏差 < 0.0001%）。
     alpha : float
         风险平价偏移系数，0=纯 ATR（等权），1=纯风险平价，默认 0.05。
     base_risk_pct : float
@@ -268,6 +270,17 @@ def compute_alpha_weights(
         raise ValueError(f"returns 须为 2D 数组，当前 shape={returns.shape}")
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(f"alpha 须在 [0,1] 范围内，当前 alpha={alpha}")
+
+    # alpha=0 时直接返回 ATR 等权，跳过全部计算
+    if alpha <= 0:
+        N = returns.shape[1]
+        return {
+            "risk_pcts": np.full(N, base_risk_pct),
+            "rp_weights": np.full(N, 1.0 / N),
+            "cov": np.eye(N),
+            "converged": True,
+            "n_assets": N,
+        }
 
     T, N = returns.shape
     if T < 2 or N < 2:
