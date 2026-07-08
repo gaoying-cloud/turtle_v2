@@ -107,6 +107,8 @@ class TurtleStrategy(bt.Strategy):
         ("entry_mode", "breakout"),         # "breakout" | "dual"（突破+MA5金叉双模式）
         ("stop_buffer_n", 1.0),             # MA20入场模式下止损缓冲 N 值倍数
         ("degradation_config", None),       # 品种退化自动检测参数配置
+        ("pyramid_step", 2.0),              # 加仓间隔(N倍数): 0.5=原版, 1.0=优化, 2.0=最佳
+        ("pyramid_ratios", None),           # None=等额加仓 (2.0N默认), [1.0,0.75,0.5,0.25]=递减
         # ── 市场状态前置过滤（降回撤） ──
         ("use_regime_filter", False),       # 开启 MarketRegime 碎步市过滤
         ("choppy_threshold", 0.35),         # choppy 状态判定阈值
@@ -680,8 +682,14 @@ class TurtleStrategy(bt.Strategy):
             base_risk = self.params.risk_per_unit
 
         # ── P1: 渐进式集中度熔断 ──
+        n_total = len(self.params.symbols)
         pos_count = self._positions.count
-        fade_table = {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.8, 4: 0.6}
+        if n_total >= 7:
+            fade_table = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 0.8, 5: 0.6, 6: 0.5}
+        elif n_total >= 6:
+            fade_table = {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.85, 4: 0.7, 5: 0.6, 6: 0.5}
+        else:
+            fade_table = {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.8, 4: 0.6}
         fade = fade_table.get(pos_count, 0.5)
         risk = base_risk * fade
         if fade < 1.0:
@@ -785,9 +793,8 @@ class TurtleStrategy(bt.Strategy):
             return "none"
 
         if pos.direction == "short":
-            # 10日向上突破退出；若已减半仓，收紧至5日退出
-            stop_high_period = "stop_high_5" if pos.half_closed else "stop_high_10"
-            stop_high = si[stop_high_period].iloc[idx]
+            # 10日向上突破退出（唯一退出规则）
+            stop_high = si["stop_high_10"].iloc[idx]
             if not pd.isna(stop_high) and high >= stop_high:
                 return "full"
             return "none"
@@ -807,9 +814,7 @@ class TurtleStrategy(bt.Strategy):
                 return "none"
             else:
                 # A 入场 (breakout)：利润保护 + 10日低点
-                # 减半仓后退出线仍用 10日低点（V6.2 实验确认收紧会损伤收益）
-                stop_low_period = "stop_low_10"
-                stop_low = si[stop_low_period].iloc[idx]
+                stop_low = si["stop_low_10"].iloc[idx]
 
                 # ── 最终清仓：low < 10日低点（严格小于） ──
                 if not pd.isna(stop_low) and low < stop_low:
@@ -931,7 +936,6 @@ class TurtleStrategy(bt.Strategy):
 
     def _check_pyramid(self, code: str, data: bt.feeds.PandasData, pos: Position):
         """检查并执行加仓。"""
-        # V6.2 实验确认：减半后禁止加仓会关闭头部交易的利润放大器，故回退
         if pos.units >= self._positions._max_units:
             return
 
@@ -946,7 +950,7 @@ class TurtleStrategy(bt.Strategy):
 
         can_add, trigger = pyramid_add(
             pos.units, self._positions._max_units, pos.base_price, pos.n_at_entry,
-            direction=pos.direction,
+            step=self.params.pyramid_step, direction=pos.direction,
         )
         if not can_add:
             return
@@ -963,8 +967,13 @@ class TurtleStrategy(bt.Strategy):
         if code in self.params.t_plus_one_symbols:
             self._buy_today[code] = True
 
-        # 空头加仓用 sell，多头用 buy
+        # 金字塔递减：后续单位按比例缩小
         shares = pos.shares_per_unit
+        if self.params.pyramid_ratios is not None and pos.units < len(self.params.pyramid_ratios):
+            shares = int(pos.shares_per_unit * self.params.pyramid_ratios[pos.units])
+        # 确保最小交易单位
+        if shares < self.params.min_unit:
+            shares = self.params.min_unit
         if pos.direction == "short":
             self.sell(data=data, size=shares)
         else:
