@@ -129,20 +129,36 @@ def run_backtest(
         else:
             trading_symbols = T0_SYMBOLS if t0_only else SIX_SYMBOLS
         data_dir = DATA_DIR
-        all_symbols = trading_symbols + [BOND_SYMBOL]
-        use_bond = True
+        all_symbols = list(trading_symbols)
+        use_bond = False
         initial_cash = config["initial_cash"]
 
     # ── 加载所有品种的数据 ──
     feeds: dict[str, bt.feeds.PandasData] = {}
-    for symbol in all_symbols:
-        df = load_data(symbol, start_date, end_date, data_dir=data_dir)
-        if df is None:
-            logger.error("品种 %s 数据加载失败，终止回测", symbol)
-            return None
-        feed = df_to_feed(df, symbol)
-        feed._name = symbol  # 设置名称，供策略中识别
-        feeds[symbol] = feed
+    if not futures:
+        # ETF 模式：加载全部后再对齐到公共日期，避免多品种信号索引错位
+        df_dict: dict[str, pd.DataFrame] = {}
+        for symbol in all_symbols:
+            df = load_data(symbol, start_date, end_date, data_dir=data_dir)
+            if df is None:
+                logger.error("品种 %s 数据加载失败，终止回测", symbol)
+                return None
+            df_dict[symbol] = df
+        df_dict = align_to_common_dates(df_dict)
+        for symbol in all_symbols:
+            feed = df_to_feed(df_dict[symbol], symbol)
+            feed._name = symbol
+            feeds[symbol] = feed
+    else:
+        # 期货模式：品种少、区间短，无需对齐
+        for symbol in all_symbols:
+            df = load_data(symbol, start_date, end_date, data_dir=data_dir)
+            if df is None:
+                logger.error("品种 %s 数据加载失败，终止回测", symbol)
+                return None
+            feed = df_to_feed(df, symbol)
+            feed._name = symbol
+            feeds[symbol] = feed
 
     # ── 设置 Cerebro ──
     cerebro = bt.Cerebro()
