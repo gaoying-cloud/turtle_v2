@@ -9,7 +9,7 @@
 纯 numpy 实现，无外部依赖 (不引入 scikit-learn/Scipy)。
 """
 
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 import numpy as np
 
 
@@ -241,6 +241,7 @@ def compute_alpha_weights(
     returns: np.ndarray,
     alpha: float = 0.05,
     base_risk_pct: float = 0.01,
+    weight_multipliers: Optional[Dict[int, float]] = None,
 ) -> dict:
     """一步式：输入日收益率 → 输出 α 融合后的每品种 risk_pct。
 
@@ -254,6 +255,9 @@ def compute_alpha_weights(
         风险平价偏移系数，0=纯 ATR（等权），1=纯风险平价，默认 0.05。
     base_risk_pct : float
         基础单位风险比例，默认 0.01（1%）。
+    weight_multipliers : dict of {int: float}, optional
+        品种级权重乘数，key=returns 矩阵中的列索引，value=乘数。
+        例如 {2: 1.5} 表示第3列（第3个品种）的 risk_pct 乘以 1.5。
 
     Returns
     -------
@@ -274,8 +278,13 @@ def compute_alpha_weights(
     # alpha=0 时直接返回 ATR 等权，跳过全部计算
     if alpha <= 0:
         N = returns.shape[1]
+        risk_pcts = np.full(N, base_risk_pct)
+        if weight_multipliers:
+            for idx, mult in weight_multipliers.items():
+                if 0 <= idx < N:
+                    risk_pcts[idx] *= mult
         return {
-            "risk_pcts": np.full(N, base_risk_pct),
+            "risk_pcts": risk_pcts,
             "rp_weights": np.full(N, 1.0 / N),
             "cov": np.eye(N),
             "converged": True,
@@ -295,6 +304,10 @@ def compute_alpha_weights(
         # no valid columns, fall back to equal ATR
         risk_pcts = np.full(N, base_risk_pct)
         rp_weights = np.full(N, 1.0 / N)
+        if weight_multipliers:
+            for idx, mult in weight_multipliers.items():
+                if 0 <= idx < N:
+                    risk_pcts[idx] *= mult
         return {
             "risk_pcts": risk_pcts,
             "rp_weights": rp_weights,
@@ -324,6 +337,12 @@ def compute_alpha_weights(
         risk_pcts[idx] = risk_pcts_valid[j]
         full_rp_weights[idx] = rp_weights[j]
     rp_weights = full_rp_weights
+
+    # Step 6: apply weight multipliers
+    if weight_multipliers:
+        for idx, mult in weight_multipliers.items():
+            if 0 <= idx < N:
+                risk_pcts[idx] *= mult
 
     return {
         "risk_pcts": risk_pcts,

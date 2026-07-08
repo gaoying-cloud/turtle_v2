@@ -15,6 +15,7 @@
   py scripts/run_grid_search.py --stability # 参数稳定性面扫描
   py scripts/run_grid_search.py --plot      # 生成敏感性图
   py scripts/run_grid_search.py --two-stage # 两阶段搜索（粗筛+精搜，大幅缩短时间）
+  py scripts/run_grid_search.py --weight-search # 品种级权重参数搜索
 """
 from __future__ import annotations
 
@@ -42,7 +43,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from strategies.turtle_trading import TurtleStrategy
-from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
+from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols, get_trading_symbols
+
 from src.data_utils import align_to_common_dates
 
 logger = logging.getLogger(__name__)
@@ -56,10 +58,7 @@ OUTPUT_DIR = ROOT / "results" / "grid_search"
 with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
     _CONFIG_INIT = yaml.safe_load(_f)
 
-from src.config_loader import get_trading_symbols, get_bond_symbol, get_all_symbols
 SIX_SYMBOLS = get_trading_symbols(_CONFIG_INIT)
-BOND_SYMBOL = get_bond_symbol(_CONFIG_INIT)
-ALL_SYMBOLS = get_all_symbols(_CONFIG_INIT)
 
 # ── 参数空间 ──
 PARAM_GRID = {
@@ -73,6 +72,13 @@ PARAM_GRID = {
 }
 
 MODES = ["A", "B"]
+
+# ── 品种级权重倍率参数空间（用于 Stage-2 最优权重搜索）──
+# key = symbol_code, values = [multiplier candidates]
+WEIGHT_PARAM_GRID = {
+    "513100.SH": [1.0, 1.5, 2.0, 2.5],   # 纳指ETF 超配
+    "159985.SZ": [0.2, 0.3, 0.5, 1.0],   # 豆粕ETF 低配
+}
 
 # ════════════════════════════════════════════════════════════
 # 0. 缓存与初始化 (性能优化核心)
@@ -118,7 +124,7 @@ def _worker_init():
     logging.getLogger("src.risk_parity").setLevel(logging.WARNING)
 
     # 强制预加载所有数据到该子进程的内存
-    for symbol in ALL_SYMBOLS:
+    for symbol in SIX_SYMBOLS:
         _load_data_cached(symbol, "2014-01-01", "2026-12-31")
 
 # ════════════════════════════════════════════════════════════
@@ -183,7 +189,7 @@ def run_single_backtest(
 
     # 使用缓存加载数据
     df_dict: dict[str, pd.DataFrame] = {}
-    for symbol in ALL_SYMBOLS:
+    for symbol in SIX_SYMBOLS:
         df = _load_data_cached(symbol, start_date, end_date)
         if df is None:
             logger.error("[run_id=%d] 品种 %s 数据加载失败", run_id, symbol)
@@ -191,7 +197,7 @@ def run_single_backtest(
         df_dict[symbol] = df
     df_dict = align_to_common_dates(df_dict)
     feeds: dict[str, bt.feeds.PandasData] = {}
-    for symbol in ALL_SYMBOLS:
+    for symbol in SIX_SYMBOLS:
         feed = df_to_feed(df_dict[symbol], symbol)
         feed._name = symbol
         feeds[symbol] = feed
@@ -199,7 +205,6 @@ def run_single_backtest(
     cerebro = bt.Cerebro()
     for symbol in SIX_SYMBOLS:
         cerebro.adddata(feeds[symbol], name=symbol)
-    cerebro.adddata(feeds[BOND_SYMBOL], name=BOND_SYMBOL)
 
     cerebro.broker.setcash(config["initial_cash"])
     commission = config["commission_pct"]
@@ -218,6 +223,13 @@ def run_single_backtest(
         "exit_period": config["turtle"]["exit_period"],
     }
 
+    # 构建品种级权重倍率（从 params 中的 weight_* 键转换）
+    weight_multipliers = {}
+    for key, val in params.items():
+        if key.startswith("weight_") and isinstance(val, (int, float)):
+            symbol_code = key[len("weight_"):].replace("_", ".")
+            weight_multipliers[symbol_code] = float(val)
+
     cerebro.addstrategy(
         TurtleStrategy,
         turtle_params=turtle_params,
@@ -235,6 +247,7 @@ def run_single_backtest(
         atr_change_threshold=config["weighting"]["atr_change_threshold"],
         shortable_symbols=get_shortable_symbols(config),
         t_plus_one_symbols=get_t_plus_one_symbols(config),
+        weight_multipliers=weight_multipliers,
     )
 
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, annualize=True)
@@ -243,6 +256,7 @@ def run_single_backtest(
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
     cerebro.addanalyzer(bt.analyzers.VWR, _name="vwr")
+    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
 
     initial_cash = config["initial_cash"]
     try:
@@ -277,9 +291,12 @@ def run_single_backtest(
     avg_loss = abs(trades.get("lost", {}).get("pnl", {}).get("average", 0)) if trades else 0
     profit_factor = (avg_win / avg_loss) if avg_loss > 0 else 0.0
 
-    returns_analyzer = strat.analyzers.returns.get_analysis()
-    annual_vol = returns_analyzer.get("rvol100", None)
-    if annual_vol is None:
+    # 年化波动率：从 TimeReturn 日收益率计算（rvol100 在 backtrader 中不产出）
+    timeret = strat.analyzers.timereturn.get_analysis()
+    daily_rets = list(timeret.values())
+    if len(daily_rets) > 1:
+        annual_vol = float(np.std(daily_rets) * np.sqrt(252) * 100)
+    else:
         annual_vol = 0.0
 
     calmar = (cagr / abs(max_dd)) if max_dd > 0 else 0.0
@@ -287,7 +304,7 @@ def run_single_backtest(
     del cerebro, strat, results, feeds
     gc.collect()
 
-    return {
+    result = {
         "run_id": run_id, "mode": mode,
         "atr_period": params["atr_period"], "breakout_period": params["breakout_period"],
         "stop_period": params["stop_period"], "stop_atr_multiple": params["stop_atr_multiple"],
@@ -300,6 +317,11 @@ def run_single_backtest(
         "annual_vol": round(annual_vol, 4), "calmar": round(calmar, 4),
         "final_value": round(final_value, 2), "date_range": f"{start_date}~{end_date}",
     }
+    # 记录权重倍率参数（weight_*），使权重搜索结果可追溯
+    for key, val in params.items():
+        if key.startswith("weight_"):
+            result[key] = float(val) if isinstance(val, (int, float)) else val
+    return result
 
 # ════════════════════════════════════════════════════════════
 # 3. 多进程 Worker
@@ -473,14 +495,14 @@ def evaluate_results(df: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
         df_valid["_cagr_score"] = scaler(df_valid["cagr"].astype(float))
         df_valid["_trade_score"] = scaler(np.log1p(df_valid["total_trades"].astype(float)))
         df_valid["_dd_score"] = scaler(-df_valid["max_drawdown"].astype(float))
-        df_valid["robustness_score"] = 0.40 * df_valid["_cagr_score"] + 0.30 * df_valid["_trade_score"] + 0.30 * df_valid["_dd_score"]
+        df_valid["robustness_score"] = 0.55 * df_valid["_cagr_score"] + 0.15 * df_valid["_trade_score"] + 0.30 * df_valid["_dd_score"]
     else:
         df_valid["_sharpe_score"] = scaler(df_valid["sharpe"].astype(float))
         df_valid["_calmar_score"] = scaler(df_valid["calmar"].astype(float))
         df_valid["_cagr_score"] = scaler(df_valid["cagr"].astype(float))
         df_valid["_dd_score"] = scaler(-df_valid["max_drawdown"].astype(float))
         df_valid["_trade_score"] = scaler(np.log1p(df_valid["total_trades"].astype(float)))
-        df_valid["robustness_score"] = 0.25 * df_valid["_sharpe_score"] + 0.20 * df_valid["_calmar_score"] + 0.20 * df_valid["_cagr_score"] + 0.15 * df_valid["_dd_score"] + 0.20 * df_valid["_trade_score"]
+        df_valid["robustness_score"] = 0.35 * df_valid["_sharpe_score"] + 0.25 * df_valid["_calmar_score"] + 0.20 * df_valid["_cagr_score"] + 0.15 * df_valid["_dd_score"] + 0.05 * df_valid["_trade_score"]
 
     best_groups = []
     for mode_val, group in df_valid.groupby("mode"):
@@ -646,6 +668,106 @@ def run_stability_scan(df_best: pd.DataFrame, *, modes: List[str] = MODES, start
     return pd.DataFrame(all_rows)
 
 # ════════════════════════════════════════════════════════════
+# 9. 品种级权重倍率搜索（Stage-2）
+# ════════════════════════════════════════════════════════════
+def run_weight_search(
+    best_params: dict, modes: List[str] = MODES,
+    start_date: str = "2014-01-01", split_date: str = "2024-01-01",
+    end_date: str = "2026-06-10", workers: int = 1,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """在最优核心参数基础上，搜索品种级权重倍率。
+
+    固定核心参数（atr_period / breakout_period / stop_period 等），
+    仅搜索 WEIGHT_PARAM_GRID 中定义的品种倍率组合。
+
+    Returns
+    -------
+    (df_is, df_oos) — 样本内 + 样本外结果 DataFrame
+    """
+    base = {
+        "atr_period": int(best_params["atr_period"]),
+        "breakout_period": int(best_params["breakout_period"]),
+        "stop_period": int(best_params["stop_period"]),
+        "stop_atr_multiple": float(best_params["stop_atr_multiple"]),
+        "alpha": float(best_params["alpha"]),
+        "max_cumulative_loss_pct": float(best_params.get("max_cumulative_loss_pct", 0.15)),
+        "max_consecutive_losses": int(best_params.get("max_consecutive_losses", 8)),
+    }
+
+    # 构建权重倍率笛卡尔积
+    weight_keys = list(WEIGHT_PARAM_GRID.keys())
+    weight_values = list(WEIGHT_PARAM_GRID.values())
+    weight_combos = list(itertools.product(*weight_values))
+
+    logger.info("=" * 50)
+    logger.info("Stage-2 权重搜索: %d 种倍率组合 × %d 模式 = %d 次回测",
+                len(weight_combos), len(modes), len(weight_combos) * len(modes))
+    logger.info("  倍率参数: %s", WEIGHT_PARAM_GRID)
+    logger.info("  固定核心参数: atr=%d b=%d s=%d m=%.1f α=%.2f",
+                base["atr_period"], base["breakout_period"], base["stop_period"],
+                base["stop_atr_multiple"], base["alpha"])
+    logger.info("=" * 50)
+
+    # ── 样本内 ──
+    is_tasks = []
+    run_id = 50000
+    for combo in weight_combos:
+        params = dict(base)
+        for i, sym in enumerate(weight_keys):
+            key = f"weight_{sym.replace('.', '_')}"
+            params[key] = combo[i]
+        for mode in modes:
+            is_tasks.append((params, mode, start_date, split_date, run_id))
+            run_id += 1
+
+    is_results = _run_tasks(is_tasks, workers, verbose=False)
+    df_is = pd.DataFrame(is_results)
+
+    # 选择最优倍率组合
+    scorer = lambda r: r.get("sharpe", 0) or 0
+    is_results_sorted = sorted(is_results, key=scorer, reverse=True)
+    best_weight_result = is_results_sorted[0] if is_results_sorted else None
+
+    if best_weight_result is None:
+        logger.error("权重搜索未产生有效结果")
+        return pd.DataFrame(), pd.DataFrame()
+
+    # 输出最优倍率
+    best_combo = {}
+    for key, val in best_weight_result.items():
+        if key.startswith("weight_"):
+            best_combo[key] = val
+    logger.info("最优权重倍率: %s (Sharpe=%.4f, CAGR=%.2f%%, MDD=%.2f%%)",
+                best_combo, best_weight_result.get("sharpe", 0),
+                best_weight_result.get("cagr", 0), best_weight_result.get("max_drawdown", 0))
+
+    # ── 样本外验证 ──
+    oos_tasks = []
+    run_id = 60000
+    for combo in weight_combos:
+        params = dict(base)
+        for i, sym in enumerate(weight_keys):
+            key = f"weight_{sym.replace('.', '_')}"
+            params[key] = combo[i]
+        for mode in modes:
+            oos_tasks.append((params, mode, split_date, end_date, run_id))
+            run_id += 1
+
+    oos_results = _run_tasks(oos_tasks, workers, verbose=False)
+    df_oos = pd.DataFrame(oos_results)
+
+    # 保存
+    is_path = OUTPUT_DIR / "weight_search_is.csv"
+    oos_path = OUTPUT_DIR / "weight_search_oos.csv"
+    df_is.to_csv(is_path, index=False, encoding="utf-8")
+    df_oos.to_csv(oos_path, index=False, encoding="utf-8")
+    logger.info("权重搜索样本内结果: %s (%d 行)", is_path, len(df_is))
+    logger.info("权重搜索样本外结果: %s (%d 行)", oos_path, len(df_oos))
+
+    return df_is, df_oos
+
+
+# ════════════════════════════════════════════════════════════
 # CLI 入口
 # ════════════════════════════════════════════════════════════
 def main():
@@ -656,6 +778,8 @@ def main():
     parser.add_argument("--end", type=str, default="2026-06-10", help="样本外截止日期")
     parser.add_argument("--rolling", action="store_true", default=False, help="启用滚动窗口检验")
     parser.add_argument("--stability", action="store_true", default=False, help="启用参数稳定性面扫描")
+    parser.add_argument("--weight-search", action="store_true", default=False, help="启用 Stage-2 品种权重倍率搜索")
+    parser.add_argument("--weight-only", action="store_true", default=False, help="仅运行权重倍率搜索（读取已有 best_params.json）")
     parser.add_argument("--workers", "-w", type=int, default=4, help="并行进程数 (默认: 4)")
     parser.add_argument("--top", type=int, default=10, help="输出 Top-N 结果")
     parser.add_argument("--quick", action="store_true", default=False, help="快速验证模式")
@@ -678,6 +802,56 @@ def main():
     # 修正参数空间显示
     grid_size = len(build_param_grid(use_two_stage=args.two_stage))
     grid_desc = "3×3×3×3×5×3×3" if not args.two_stage else "3×3×3×3×5 (阶段一) + 3×3 (阶段二)"
+
+    # ── --weight-only：跳过主搜索，仅运行权重倍率搜索 ──
+    if args.weight_only:
+        logger.info("=" * 50)
+        logger.info("权重倍率搜索（独立模式）")
+        logger.info("  读取: %s", OUTPUT_DIR / "best_params.json")
+        logger.info("=" * 50)
+
+        best_path = OUTPUT_DIR / "best_params.json"
+        if not best_path.exists():
+            logger.error("不存在 best_params.json，请先运行网格搜索")
+            sys.exit(1)
+
+        with open(best_path, "r", encoding="utf-8") as f:
+            best_records = json.load(f)
+        if not best_records:
+            logger.error("best_params.json 为空")
+            sys.exit(1)
+
+        best_row = best_records[0]
+        logger.info("最优核心参数: atr=%d b=%d s=%d m=%.1f α=%.2f",
+                     best_row["atr_period"], best_row["breakout_period"],
+                     best_row["stop_period"], best_row["stop_atr_multiple"],
+                     best_row["alpha"])
+        logger.info("权重倍率搜索空间: %s", WEIGHT_PARAM_GRID)
+
+        df_w_is, df_w_oos = run_weight_search(
+            best_row, modes=modes,
+            start_date=args.start, split_date=args.split, end_date=args.end,
+            workers=args.workers,
+        )
+
+        if not df_w_is.empty:
+            top_w = df_w_is.loc[df_w_is["sharpe"].idxmax()] if "sharpe" in df_w_is.columns else df_w_is.iloc[0]
+            weight_summary = {k: v for k, v in top_w.to_dict().items() if k.startswith("weight_")}
+            # 更新 best_params.json
+            best_records[0].update(weight_summary)
+            with open(best_path, "w", encoding="utf-8") as f:
+                json.dump(best_records, f, ensure_ascii=False, indent=2)
+            logger.info("最优权重倍率已合并到 %s", best_path)
+            logger.info("最优权重: %s | Sharpe=%.4f CAGR=%.2f%% MDD=%.2f%%",
+                        weight_summary, top_w.get("sharpe", 0),
+                        top_w.get("cagr", 0), top_w.get("max_drawdown", 0))
+
+        print("\n" + "=" * 60)
+        print("权重搜索完成")
+        print(f" 样本内: {OUTPUT_DIR / 'weight_search_is.csv'}")
+        print(f" 样本外: {OUTPUT_DIR / 'weight_search_oos.csv'}")
+        print("=" * 60)
+        return
 
     logger.info("=" * 50)
     logger.info("S6 参数网格搜索")
@@ -713,6 +887,29 @@ def main():
         df_stab = run_stability_scan(df_best, modes=modes, start_date=args.start, end_date=args.end, workers=args.workers)
         if not df_stab.empty:
             df_stab.to_csv(OUTPUT_DIR / "stability_scan.csv", index=False, encoding="utf-8")
+
+    if args.weight_search and not df_best.empty:
+        logger.info("\n" + "=" * 60)
+        logger.info("运行 Stage-2 品种权重倍率搜索...")
+        best_row = df_best.iloc[0].to_dict()
+        df_w_is, df_w_oos = run_weight_search(
+            best_row, modes=modes,
+            start_date=args.start, split_date=args.split, end_date=args.end,
+            workers=args.workers,
+        )
+        if not df_w_is.empty:
+            # 将最优权重倍率写入 best_params.json
+            top_w = df_w_is.loc[df_w_is["sharpe"].idxmax()] if "sharpe" in df_w_is.columns else df_w_is.iloc[0]
+            weight_summary = {k: v for k, v in top_w.to_dict().items() if k.startswith("weight_")}
+            best_path = OUTPUT_DIR / "best_params.json"
+            if best_path.exists():
+                with open(best_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                if existing:
+                    existing[0].update(weight_summary)
+                    with open(best_path, "w", encoding="utf-8") as f:
+                        json.dump(existing, f, ensure_ascii=False, indent=2)
+                    logger.info("最优权重倍率已合并到 %s", best_path)
 
     print("\n" + "=" * 60)
     print("S6 网格搜索完成")

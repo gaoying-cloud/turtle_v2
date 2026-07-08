@@ -70,6 +70,9 @@ RISK = CONFIG.get("risk", {})
 SINGLE_MAX_RISK = float(RISK.get("single_max_risk", 0.04))       # 单品种风险上限 4%
 MAX_PORTFOLIO_RISK = float(RISK.get("max_portfolio_risk", 0.20)) # 全账户风险上限 20%
 
+# S14: 品种权重倍率，与 config.weighting.weight_multipliers 对齐
+WEIGHT_MULTIPLIERS = CONFIG.get("weighting", {}).get("weight_multipliers", {})
+
 
 # ════════════════════════════════════════════════════════════
 #  状态管理
@@ -306,7 +309,8 @@ def calc_fade() -> float:
     return tbl.get(n_pos, 0.5)
 
 
-def calc_shares(equity: float, n: float, price: float, max_cash: float | None = None, fade: float = 1.0) -> int:
+def calc_shares(equity: float, n: float, price: float, max_cash: float | None = None,
+                fade: float = 1.0, weight_mult: float = 1.0) -> int:
     """按 equity 计算 1% 风险预算股数。
 
     equity : 账户总权益（sizing 基数，多笔入场共享同一基数）。
@@ -315,6 +319,7 @@ def calc_shares(equity: float, n: float, price: float, max_cash: float | None = 
     max_cash : 可选，本笔最多占用的现金。用于 cash < equity 时按
                先到先得（配置顺序）兜底，避免现金不足时超买。None 表示不限制。
     fade   : 集中度衰减系数，默认 1.0（无衰减）。
+    weight_mult : 品种权重倍率，默认 1.0（无偏置）。从 config.weighting.weight_multipliers 读取。
     """
     if n is None or n <= 0 or price is None or price <= 0:
         return 0
@@ -322,7 +327,7 @@ def calc_shares(equity: float, n: float, price: float, max_cash: float | None = 
         equity=equity,
         n_value=n,
         price=price,
-        risk_pct=RISK_PER_UNIT * fade,      # V6.2: 集中度衰减
+        risk_pct=RISK_PER_UNIT * fade * weight_mult,  # V6.2: 集中度衰减; S14: 权重倍率
         stop_mult=STOP_MULT,
     )
     shares = max(MIN_UNIT, int(raw // MIN_UNIT) * MIN_UNIT)
@@ -561,7 +566,8 @@ def run():
             #        sim_cash 作为现金上限兜底（配置顺序先到先得）。
             # V6.2: 集中度衰减
             _fade = calc_fade()
-            shares = calc_shares(sizing_equity, n, close, max_cash=sim_cash, fade=_fade)
+            _weight_mult = WEIGHT_MULTIPLIERS.get(sym, 1.0)
+            shares = calc_shares(sizing_equity, n, close, max_cash=sim_cash, fade=_fade, weight_mult=_weight_mult)
             if shares <= 0:
                 continue
             # V6.2: 单品种 + 全账户风控校验
@@ -766,7 +772,8 @@ def cmd_settle(state: dict, settle_str: str):
             if n is None or n <= 0:
                 print(f"  [WARN] {sym} ATR 计算异常，无法入场")
                 continue
-            shares = calc_shares(sizing_equity, n, price, max_cash=state["cash"], fade=calc_fade())
+            _weight_mult = WEIGHT_MULTIPLIERS.get(sym, 1.0)
+            shares = calc_shares(sizing_equity, n, price, max_cash=state["cash"], fade=calc_fade(), weight_mult=_weight_mult)
             if shares <= 0:
                 print(f"  [WARN] {sym} 可买股数为 0，无法入场")
                 continue

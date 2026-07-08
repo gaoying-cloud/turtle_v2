@@ -122,6 +122,7 @@ def run_full_backtest(start: str, end: str):
         atr_change_threshold=config["weighting"]["atr_change_threshold"],
         shortable_symbols=get_shortable_symbols(config),
         t_plus_one_symbols=get_t_plus_one_symbols(config),
+        weight_multipliers=config.get("weighting", {}).get("weight_multipliers", {}),
     )
 
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")

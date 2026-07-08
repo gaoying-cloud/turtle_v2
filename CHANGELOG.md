@@ -1,5 +1,53 @@
 # Changelog
 
+## [V6.3-数据对齐修复+全量重跑] - 2026-07-08
+
+### 数据对齐 bug 修复
+- **`run_backtest.py`**: ETF 模式去掉债券品种 + 所有品种 `align_to_common_dates()` 后再建 feed
+- **同步修复**: `gen_report.py` / `run_comparison.py` / `run_stress_test.py` 移除债券(BOND_SYMBOL)引用，与 `run_backtest.py` 保持一致
+
+### 全量重跑结果（最优参数 ATR=25 B=20 S=8 M=1.5 α=0.0）
+
+| 指标 | 旧版 (06-30) | **新版 (07-08)** | 目标 |
+|:--|:--:|:--:|:--:|
+| CAGR | 12.97% | **13.75%** | 15.0% |
+| 夏普 | 0.76 | **0.81 ✅** | 0.8 |
+| 最大回撤 | 24.20% | **18.45%** ✅ | 25.0% |
+| 最终净值 | ¥455,876 | **¥496,553** (+8.9%) | — |
+| 目标达成 | 3/5 ⚠️ | **4/5 ✅** | — |
+
+- **基准对比 B4 全面胜出**: 夏普 0.81 > B1 0.71 / B2 0.66 / B3 0.41
+- **压力测试**: 14/15 通过 ✅（俄乌冲突 ⚠️ daily_var_99）
+- **交易诊断**: Beta=0.707, Alpha=+2.50%, 滑点鲁棒 ~12%+ CAGR at 15bp
+
+### 项目清理
+- 归档旧文档 `docs/` → `docs/_archive/`（含 strategy_design_v3.0 等 6 份）
+- 归档临时脚本 `scripts/_ad_hoc/` → `scripts/_archive/`（13 个诊断脚本）
+- 归档旧结果 `results/archive/`（旧 report/comparison/stress/grid/diagnostics）
+- README 更新：状态从 3/5 → 4/5
+
+### 网格搜索修复 + 权重搜索 Stage-2
+- **Bug 修复**:
+  - 去掉 `ALL_SYMBOLS`/`BOND_SYMBOL` 债券污染，与 `run_backtest.py` 一致
+  - 年化波动率改用 `TimeReturn` 日收益率计算（修复全部为 0.0 的问题）
+  - `robustness_score` 权重调整：Sharpe 0.25→0.35, Trades 0.20→0.05
+- **新增功能**:
+  - `compute_alpha_weights` 支持 `weight_multipliers` 品种级权重倍率
+  - `TurtleStrategy` 新增 `weight_multipliers` 参数
+  - `run_grid_search.py` 新增 `--weight-search` Stage-2 搜索（固定核心参数，搜索纳指/豆粕倍率）
+  - 用法: `py scripts/run_grid_search.py --workers 4 --weight-search`
+- README 更新网格搜索用法说明
+
+### 实验框架启用
+- 建立 `docs/experiments/` 实验目录 + `TEMPLATE.md` 模板
+- 现有实验归档：S11 波动率门槛 / S12 做空不对称 / S13 自适应退出 / S14 权重倍率
+- 规范：`exp/S??_<name>` 分支 + `git merge --squash` 吸收
+- 当前 main 已打标签 `S10_params_final`
+
+### 待办
+- 夜间运行 `run_grid_search.py --weight-search` 网格搜索 + 权重优化
+- 网格搜索完成后重跑 `gen_report.py` 补全报告『最优参数组合』章节
+
 ## [V6.2-半仓事件统计隔离] - 2026-07-01
 
 ### 半仓事件统计隔离

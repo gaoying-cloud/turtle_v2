@@ -124,6 +124,7 @@ def strat():
         "rsi_overbought": 70,
         "pyramid_step": 2.0,
         "pyramid_ratios": None,
+        "weight_multipliers": {},
     })()
     s.datas = [MockData(), MockData()]
     s.broker = MagicMock()

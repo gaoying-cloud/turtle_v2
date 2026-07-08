@@ -238,6 +238,7 @@ def run_backtest(
         degradation_config=config["risk"].get("degradation", {}),
         pyramid_step=pyramid_step,
         pyramid_ratios=pyramid_ratios,
+        weight_multipliers=config.get("weighting", {}).get("weight_multipliers", {}),
     )
 
     # ── 添加分析器 ──

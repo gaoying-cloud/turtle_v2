@@ -21,6 +21,9 @@ weighting:
   cov_lookback_days: 252
   rebalance_quarterly: true
   atr_change_threshold: 0.3
+  weight_multipliers:       # [S14] 品种级权重倍率，ATR等权后乘以此值
+    513100.SH: 1.0          #   纳指ETF — 1.0x (不变)
+    159985.SZ: 0.5          #   豆粕ETF — 0.5x (减半，降低ATR权重虚高)
 symbols:
 - code: 510500.SH
   name: 中证500

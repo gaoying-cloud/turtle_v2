@@ -1,0 +1,80 @@
+{
+  "generated_at": "2026-07-01T16:39:00.924176",
+  "mode": "A",
+  "params": {
+    "mode": "A",
+    "max_cumulative_loss_pct": 0.15,
+    "max_consecutive_losses": 8,
+    "atr_period": 25,
+    "breakout_period": 20,
+    "stop_period": 8,
+    "stop_atr_multiple": 1.5,
+    "alpha": 0.1,
+    "sharpe": 0.6187,
+    "cagr": 11.9893,
+    "max_drawdown": 13.7312,
+    "total_trades": 108,
+    "robustness_score": 1.6295296664771106
+  },
+  "scenarios": [
+    {
+      "scenario": "A1_covid",
+      "scenario_name": "COVID 熔断",
+      "passed": true,
+      "checks": {
+        "max_drawdown": true,
+        "max_dd_duration": true,
+        "daily_var_99": true,
+        "monthly_max_loss": true,
+        "consecutive_stop_pause": true
+      },
+      "metrics_summary": {
+        "total_return": 2.3855,
+        "cagr": 10.4037,
+        "sharpe": null,
+        "max_drawdown": 1.1849
+      }
+    },
+    {
+      "scenario": "A2_russia_ukraine",
+      "scenario_name": "俄乌冲突",
+      "passed": false,
+      "checks": {
+        "max_drawdown": true,
+        "max_dd_duration": true,
+        "daily_var_99": false,
+        "monthly_max_loss": true,
+        "consecutive_stop_pause": true
+      },
+      "metrics_summary": {
+        "total_return": -5.0083,
+        "cagr": -22.4,
+        "sharpe": null,
+        "max_drawdown": 6.0443
+      }
+    },
+    {
+      "scenario": "A3_double_bottom",
+      "scenario_name": "A 股二次探底",
+      "passed": true,
+      "checks": {
+        "max_drawdown": true,
+        "max_dd_duration": true,
+        "daily_var_99": true,
+        "monthly_max_loss": true,
+        "consecutive_stop_pause": true
+      },
+      "metrics_summary": {
+        "total_return": -1.3875,
+        "cagr": -5.5126,
+        "sharpe": null,
+        "max_drawdown": 1.4195
+      }
+    }
+  ],
+  "overall": {
+    "status": "conditional_pass",
+    "passed": 14,
+    "total": 15
+  }
+}

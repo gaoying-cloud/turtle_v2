@@ -1,0 +1,2 @@
+scenario,scenario_name,date_range,initial_cash,final_value,total_return,cagr,sharpe,max_drawdown,max_dd_duration,daily_var_95,daily_var_99,total_trades,win_rate,profit_factor,annual_vol,calmar,t1_stop_delay_hits,correlation_avg
+A4_full_2022,完整 2022 年熊市,2022-01-01~2022-12-31,100000,107002.34,7.0023,7.0272,,5.9737,123,-0.024893,-0.050204,6,50.0,2.8482,0.0,1.1764,0,0.0057

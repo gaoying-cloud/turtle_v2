@@ -1,0 +1,2 @@
+scenario,scenario_name,date_range,initial_cash,final_value,total_return,cagr,sharpe,max_drawdown,max_dd_duration,daily_var_95,daily_var_99,total_trades,win_rate,profit_factor,annual_vol,calmar,t1_stop_delay_hits,correlation_avg
+A2_russia_ukraine,俄乌冲突,2022-02-14~2022-04-29,100000,94991.74,-5.0083,-22.4,,6.0443,20,-0.034172,-0.062084,2,0.0,0.0,0.0,-3.706,0,-0.0511

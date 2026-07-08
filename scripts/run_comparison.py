@@ -39,7 +39,6 @@ from src.config_loader import (
     get_shortable_symbols,
     get_t_plus_one_symbols,
     get_trading_symbols,
-    get_bond_symbol,
     get_all_symbols,
 )
 
@@ -57,7 +56,6 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
     _CONFIG = yaml.safe_load(_f)
 
 SIX_SYMBOLS = get_trading_symbols(_CONFIG)
-BOND_SYMBOL = get_bond_symbol(_CONFIG)
 ALL_SYMBOLS = get_all_symbols(_CONFIG)
 
 # ── 策略配置函数 ──
@@ -342,6 +340,7 @@ def run_comparison(
                 atr_change_threshold=config["weighting"]["atr_change_threshold"],
                 shortable_symbols=get_shortable_symbols(config),
                 t_plus_one_symbols=get_t_plus_one_symbols(config),
+                weight_multipliers=config.get("weighting", {}).get("weight_multipliers", {}),
             )
 
             _cerebro4.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)

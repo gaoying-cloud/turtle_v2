@@ -95,6 +95,7 @@ class TurtleStrategy(bt.Strategy):
         ("atr_change_threshold", 0.30),   # ATR 变动 30% 强制再平衡
         ("futures_mode", False),          # 期货模式特殊处理
         ("multipliers", {}),              # 品种→合约乘数（期货用）
+        ("weight_multipliers", {}),       # {symbol_code: float} 品种级权重倍率，用于超配/低配
         ("min_unit", 100),                # 最小交易单位（ETF=100，期货=1）
         ("min_confirmations", 0),          # 确认规则投票：至少 N 个通过 (0=关闭)
         ("vol_threshold", 1.5),            # 成交量放量倍数阈值
@@ -281,10 +282,19 @@ class TurtleStrategy(bt.Strategy):
             self._alpha_risk_pcts = None
             return
 
+        # 构建品种级权重倍率（symbol→index 映射）
+        wm: dict[int, float] = {}
+        if self.params.weight_multipliers:
+            for i, sym in enumerate(self.params.symbols):
+                mult = self.params.weight_multipliers.get(sym, 1.0)
+                if mult != 1.0:
+                    wm[i] = mult
+
         result = compute_alpha_weights(
             returns=returns,
             alpha=self.params.alpha,
             base_risk_pct=self.params.risk_per_unit,
+            weight_multipliers=wm if wm else None,
         )
         self._alpha_risk_pcts = result["risk_pcts"]
 

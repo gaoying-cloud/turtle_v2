@@ -1,0 +1,2 @@
+scenario,scenario_name,date_range,initial_cash,final_value,total_return,cagr,sharpe,max_drawdown,max_dd_duration,daily_var_95,daily_var_99,total_trades,win_rate,profit_factor,annual_vol,calmar,t1_stop_delay_hits,correlation_avg
+A1_covid,COVID 熔断,2020-02-03~2020-04-30,100000,102385.49,2.3855,10.4037,,1.1849,6,-0.036365,-0.048966,4,0.0,0.0,0.0,8.7805,0,0.4876

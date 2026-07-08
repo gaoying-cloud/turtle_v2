@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.gen_report import (
     load_best_params,
+    load_config_params,
     generate_summary_table,
     generate_performance_table,
     generate_params_section,
@@ -50,8 +51,13 @@ class TestLoadBestParams:
             assert result["alpha"] == 0.05
 
     def test_fallback_to_config_defaults(self):
-        """JSON 不存在时使用 config 默认值。"""
+        """JSON 不存在时返回 None。"""
         result = load_best_params(Path("/nonexistent/path.json"))
+        assert result is None
+
+    def test_config_params(self):
+        """load_config_params 从 YAML 读取参数。"""
+        result = load_config_params()
         assert "atr_period" in result
         assert "alpha" in result
         assert result["mode"] == "A"

@@ -1,0 +1,4 @@
+scenario,scenario_name,date_range,initial_cash,final_value,total_return,cagr,sharpe,max_drawdown,max_dd_duration,daily_var_95,daily_var_99,total_trades,win_rate,profit_factor,annual_vol,calmar,t1_stop_delay_hits,correlation_avg
+A1_covid,COVID 熔断,2020-02-03~2020-04-30,100000,102385.49,2.3855,10.4037,,1.1849,6,-0.036365,-0.048966,4,0.0,0.0,0.0,8.7805,0,0.4876
+A2_russia_ukraine,俄乌冲突,2022-02-14~2022-04-29,100000,94991.74,-5.0083,-22.4,,6.0443,20,-0.034172,-0.062084,2,0.0,0.0,0.0,-3.706,0,-0.0511
+A3_double_bottom,A 股二次探底,2022-09-01~2022-11-30,100000,98612.5,-1.3875,-5.5126,,1.4195,21,-0.022976,-0.027873,2,0.0,0.0,0.0,-3.8834,0,0.3536

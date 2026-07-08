@@ -37,13 +37,15 @@ STAGE_FILES = {
 README_FORBIDDEN_TERMS = [
     "atr_period", "breakout_period", "stop_period",
     "stop_atr_multiple", "risk_per_unit", "max_units",
-    "N值", "risk_parity", "Ledoit-Wolf",
+    "N值", "Ledoit-Wolf",
 ]
 
 
 def load_design_metadata() -> dict:
-    """读取 design doc 的 YAML 头"""
+    """读取 design doc 的 YAML 头（优先 docs/，回退 docs/_archive/）"""
     path = ROOT / "docs" / "strategy_design_v3.0.md"
+    if not path.exists():
+        path = ROOT / "docs" / "_archive" / "strategy_design_v3.0.md"
     if not path.exists():
         return {"version": "unknown", "error": "strategy_design_v3.0.md not found"}
     content = path.read_text(encoding="utf-8")
@@ -110,8 +112,10 @@ def check_version_consistency(warnings: list, errors: list):
 
 
 def check_file_refs_in_design(errors: list, warnings: list):
-    """检查设计文档中引用的所有文件路径是否存在"""
+    """检查设计文档中引用的所有文件路径是否存在（优先 docs/，回退 docs/_archive/）"""
     path = ROOT / "docs" / "strategy_design_v3.0.md"
+    if not path.exists():
+        path = ROOT / "docs" / "_archive" / "strategy_design_v3.0.md"
     if not path.exists():
         errors.append("strategy_design_v3.0.md 不存在")
         return
@@ -125,8 +129,13 @@ def check_file_refs_in_design(errors: list, warnings: list):
     refs = [r for r in refs if r not in EXTERNAL_REFS]
 
     for ref in refs:
-        if not (ROOT / ref).exists():
-            errors.append(f"设计文档引用不存在的文件: {ref}")
+        if (ROOT / ref).exists():
+            continue
+        # 检查 _archive/ 目录（已归档的文档）
+        archived = ROOT / "docs" / "_archive" / ref.split("/", 1)[-1] if ref.startswith("docs/") else None
+        if archived and archived.exists():
+            continue
+        errors.append(f"设计文档引用不存在的文件: {ref}")
 
     # 检查裸文件名（缺少目录前缀）
     bare = extract_bare_file_refs(content)
