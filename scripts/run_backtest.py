@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.turtle_core import TurtleSignals
+from src.data_utils import load_data, df_to_feed, align_to_common_dates
 from strategies.turtle_trading import TurtleStrategy
 from src.config_loader import (
     get_shortable_symbols, get_t_plus_one_symbols, get_trading_symbols,
@@ -58,127 +59,6 @@ FUTURES_DATA_DIR = ROOT / "data" / "futures_daily"
 
 
 # ════════════════════════════════════════════════════════════
-#  数据加载
-# ════════════════════════════════════════════════════════════
-
-def load_data(
-    symbol: str,
-    start_date: str,
-    end_date: str,
-    data_dir: Path = DATA_DIR,
-) -> Optional[pd.DataFrame]:
-    """从 Parquet 缓存加载单个品种的数据。
-
-    Parameters
-    ----------
-    symbol : str
-        品种代码。
-    start_date : str
-        起始日期 "YYYY-MM-DD"。
-    end_date : str
-        截止日期 "YYYY-MM-DD"。
-    data_dir : Path
-        数据目录，默认 ETF 数据。
-
-    Returns
-    -------
-    pd.DataFrame or None
-        数据帧，包含 date, open, high, low, close, volume, amount。
-        缓存不存在或未覆盖请求区间时返回 None。
-    """
-    is_futures = data_dir == FUTURES_DATA_DIR
-    pull_script = "py scripts/pull_futures.py" if is_futures else "py scripts/pull_data.py"
-    path = data_dir / f"{symbol}.parquet"
-    if not path.exists():
-        logger.error("缓存文件不存在: %s\n请先运行 %s", path, pull_script)
-        return None
-
-    df = pd.read_parquet(path)
-    if df.empty:
-        logger.warning("[%s] 缓存为空", symbol)
-        return None
-
-    # 裁剪日期区间
-    mask = (df["date"] >= start_date) & (df["date"] <= end_date)
-    df = df[mask].copy()
-    if df.empty:
-        logger.warning("[%s] 在 %s~%s 区间无数据", symbol, start_date, end_date)
-        return None
-
-    # 确保按日期升序
-    df.sort_values("date", inplace=True)
-    df.reset_index(drop=True, inplace=True)
-
-    logger.info("[%s] 加载 %d 行: %s ~ %s",
-                symbol, len(df), df["date"].iloc[0].date(), df["date"].iloc[-1].date())
-    return df
-
-
-def align_to_common_dates(
-    dataframes: dict[str, pd.DataFrame],
-) -> dict[str, pd.DataFrame]:
-    """将所有品种对齐到公共日期索引（并集），消除多品种数组长度差异。
-
-    OHLC 前向填充（非交易日沿用上一个交易日价格），volume 填 0。
-    """
-    all_dates = sorted(
-        set.union(*(set(df["date"].dropna()) for df in dataframes.values()))
-    )
-    all_dates = pd.DatetimeIndex(all_dates)
-    aligned = {}
-    for sym, df in dataframes.items():
-        df = df.set_index("date").reindex(all_dates)
-        for col in ["open", "high", "low", "close", "pre_close"]:
-            if col in df.columns:
-                df[col] = df[col].ffill()
-        df["volume"] = df["volume"].fillna(0).astype(float)
-        if "amount" in df.columns:
-            df["amount"] = df["amount"].fillna(0).astype(float)
-        if "adj_factor" in df.columns:
-            df["adj_factor"] = df["adj_factor"].ffill()
-        df = df.reset_index().rename(columns={"index": "date"})
-        aligned[sym] = df
-    logger.info("公共交易日: %d 天", len(all_dates))
-    return aligned
-
-
-def df_to_feed(df: pd.DataFrame, symbol: str,
-               common_dates: pd.DatetimeIndex | None = None) -> bt.feeds.PandasData:
-    """将 pandas DataFrame 转换为 Backtrader PandasData feed。
-
-    字段映射：
-        date      → datetime（索引）
-        open      → open
-        high      → high
-        low       → low
-        close     → close
-        volume    → volume
-
-    若提供 common_dates，会将 DataFrame 对其到该日期索引
-    （用于多品种回测时避免 Backtrader 对齐导致的索索引错位）。
-    """
-    feed_df = df[["date", "open", "high", "low", "close", "volume"]].copy()
-    feed_df["date"] = pd.to_datetime(feed_df["date"])
-
-    if common_dates is not None:
-        feed_df = feed_df.set_index("date").reindex(common_dates)
-        feed_df = feed_df.ffill().bfill()
-        # keep DatetimeIndex for Backtrader
-    else:
-        feed_df.set_index("date", inplace=True)
-
-    return bt.feeds.PandasData(
-        dataname=feed_df,
-        open="open",
-        high="high",
-        low="low",
-        close="close",
-        volume="volume",
-        plot=False,
-    )
-
-
-# ════════════════════════════════════════════════════════════
 #  回测运行
 # ════════════════════════════════════════════════════════════
 
@@ -202,6 +82,9 @@ def run_backtest(
     p2_mode: str = "none",
     p2_batting_window: int = 4,
     symbols_override: Optional[list[str]] = None,
+    strategy: str = "turtle",
+    pyramid_step: float = 2.0,
+    pyramid_ratios: Optional[list[float]] = None,
 ) -> Optional[dict]:
     """运行海龟策略回测。
 
@@ -337,6 +220,8 @@ def run_backtest(
         p2_mode=p2_mode,
         p2_batting_window=p2_batting_window,
         degradation_config=config["risk"].get("degradation", {}),
+        pyramid_step=pyramid_step,
+        pyramid_ratios=pyramid_ratios,
     )
 
     # ── 添加分析器 ──

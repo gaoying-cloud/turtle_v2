@@ -182,13 +182,26 @@ def compute_atr(tr: pd.Series, period: int = 20) -> pd.Series:
     vals = tr.values.astype(float)
 
     out = np.full(n, np.nan)
-    # 初始值：前 period 个 TR 的简单平均
-    seed = np.nanmean(vals[:period])
-    out[period - 1] = seed
+
+    # ── 扫描跳过前导 NaN，定位首个可用窗口 ──
+    first_valid = 0
+    while first_valid < n and np.isnan(vals[first_valid]):
+        first_valid += 1
+    if first_valid == n:
+        # 全部是 NaN
+        return pd.Series(out, index=tr.index).round(4)
+
+    seed_end = first_valid + period
+    if seed_end > n:
+        # 有效 TR 不足以支撑一个完整 period
+        return pd.Series(out, index=tr.index).round(4)
+
+    seed = np.nanmean(vals[first_valid:seed_end])
+    out[seed_end - 1] = seed
 
     # EMA 递推（纯 numpy 数组索引，无 pandas iloc 开销）
     prev = seed
-    for i in range(period, n):
+    for i in range(seed_end, n):
         cur = vals[i]
         if np.isnan(cur):
             out[i] = prev

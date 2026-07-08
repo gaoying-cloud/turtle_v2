@@ -33,7 +33,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts.run_backtest import load_data, df_to_feed, align_to_common_dates
+from src.data_utils import load_data, align_to_common_dates, df_to_feed
 from strategies.turtle_trading import TurtleStrategy
 from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
 
@@ -49,7 +49,7 @@ DEFAULT_OUTPUT = ROOT / "results" / "report.md"
 
 # ── 品种 ──
 import yaml
-from src.config_loader import get_trading_symbols, get_bond_symbol, get_all_symbols
+from src.config_loader import get_trading_symbols, get_bond_symbol, get_all_symbols, get_symbol_names
 
 with open(ROOT / "config" / "turtle_config.yaml", "r", encoding="utf-8") as _f:
     _CONFIG = yaml.safe_load(_f)
@@ -58,15 +58,8 @@ SIX_SYMBOLS = get_trading_symbols(_CONFIG)
 BOND_SYMBOL = get_bond_symbol(_CONFIG)
 ALL_SYMBOLS = get_all_symbols(_CONFIG)
 
-# 品种名称映射
-SYMBOL_NAMES = {
-    "510500.SH": "中证500",
-    "159845.SZ": "中证1000",
-    "159915.SZ": "创业板",
-    "588000.SH": "科创50",
-    "513100.SH": "纳指ETF",
-    "518880.SH": "黄金ETF",
-}
+# 品种名称映射 —— 从 config 动态读取，消除硬编码
+SYMBOL_NAMES = get_symbol_names(_CONFIG)
 
 # ════════════════════════════════════════════════════════════
 # 1. 数据加载
@@ -129,19 +122,6 @@ def load_comparison_results() -> Optional[pd.DataFrame]:
 # 2. 回测运行
 # ════════════════════════════════════════════════════════════
 
-def load_data(symbol: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-    path = DATA_DIR / f"{symbol}.parquet"
-    if not path.exists():
-        return None
-    df = pd.read_parquet(path)
-    mask = (df["date"] >= start_date) & (df["date"] <= end_date)
-    df = df[mask].copy()
-    if df.empty:
-        return None
-    df.sort_values("date", inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    return df
-
 def run_backtest_with_best(params: dict, start_date: str = "2014-01-01", end_date: str = "2026-06-10", mode: str = "A") -> dict:
     """用给定参数运行一次全区间回测，返回完整指标集。"""
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -149,8 +129,8 @@ def run_backtest_with_best(params: dict, start_date: str = "2014-01-01", end_dat
 
     # 加载全部数据并计算公共日期
     all_dfs = {}
-    for symbol in ALL_SYMBOLS:
-        df = load_data(symbol, start_date, end_date)
+    for symbol in SIX_SYMBOLS:
+        df = load_data(symbol, start_date, end_date, DATA_DIR)
         if df is not None:
             all_dfs[symbol] = df
 
@@ -159,7 +139,7 @@ def run_backtest_with_best(params: dict, start_date: str = "2014-01-01", end_dat
 
     # 创建对齐的 feeds
     feeds = {}
-    for symbol in ALL_SYMBOLS:
+    for symbol in SIX_SYMBOLS:
         if symbol not in all_dfs:
             logger.warning("[%s] 数据不可用，跳过", symbol)
             continue
@@ -218,6 +198,7 @@ def run_backtest_with_best(params: dict, start_date: str = "2014-01-01", end_dat
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
+    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn", timeframe=bt.TimeFrame.Days)
 
     initial_cash = config["initial_cash"]
 
@@ -255,8 +236,13 @@ def run_backtest_with_best(params: dict, start_date: str = "2014-01-01", end_dat
     total_gross_loss = abs(lost_stats.get("total", 0))
     profit_factor = (total_gross_profit / total_gross_loss) if total_gross_loss > 0 else 0.0
 
-    ret = strat.analyzers.returns.get_analysis()
-    av = ret.get("rvol100", 0.0) or 0.0
+    # 改用 TimeReturn 日收益率计算年化波动率（Returns.rvol100 在 backtrader 中不产出）
+    timeret = strat.analyzers.timereturn.get_analysis()
+    daily_rets = list(timeret.values())
+    if len(daily_rets) > 1:
+        av = float(np.std(daily_rets) * np.sqrt(252) * 100)
+    else:
+        av = 0.0
 
     calmar = (cagr / abs(max_dd)) if max_dd > 0 else 0.0
 

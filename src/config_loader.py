@@ -23,6 +23,11 @@ def get_trading_symbols(config: Dict[str, Any]) -> List[str]:
     return [s["code"] for s in config.get("symbols", [])]
 
 
+def get_symbol_names(config: Dict[str, Any]) -> Dict[str, str]:
+    """获取品种 code → 中文名称映射（消除硬编码）。"""
+    return {s["code"]: s["name"] for s in config.get("symbols", [])}
+
+
 def get_bond_symbol(config: Dict[str, Any]) -> str:
     """获取国债 code。"""
     return config.get("bond", {}).get("code", "")

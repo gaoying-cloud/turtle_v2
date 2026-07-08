@@ -122,6 +122,8 @@ def strat():
         "hurst_min": 0.50,
         "use_rsi_filter": False,
         "rsi_overbought": 70,
+        "pyramid_step": 2.0,
+        "pyramid_ratios": None,
     })()
     s.datas = [MockData(), MockData()]
     s.broker = MagicMock()
@@ -320,6 +322,7 @@ class TestTPlusOne:
 class TestPyramid:
     def test_triggers(self, strat):
         """达触发价 → 加仓。"""
+        strat.params.pyramid_step = 0.5  # 测试使用0.5N间距
         strat._signals["510500.SH"] = sig(high=11, low=10, close=10.8, n=0.5)
         pos = strat._positions.open("510500.SH", entry_price=10.0, shares=800,
                                      n_at_entry=0.5)
@@ -332,6 +335,7 @@ class TestPyramid:
 
     def test_not_triggered(self, strat):
         """未达触发价 → 不加仓。"""
+        strat.params.pyramid_step = 0.5  # 测试使用0.5N间距
         strat._signals["510500.SH"] = sig(high=11, low=10, close=10.8, n=0.5)
         pos = strat._positions.open("510500.SH", entry_price=10.0, shares=800,
                                      n_at_entry=0.5)

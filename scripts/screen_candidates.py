@@ -217,7 +217,7 @@ _KNOWN_LISTING_DATES = {
 }
 
 
-def check_listing_age(symbol: str, min_first_date: str = "2018-01-01") -> SingleCheck:
+def check_listing_age(symbol: str, min_first_date: str = "2023-01-01") -> SingleCheck:
     """检查品种上市时间是否足够覆盖至少一轮牛熊。
 
     优先使用已知上市日期字典，其次从 Parquet 缓存数据推断。
@@ -245,7 +245,7 @@ def check_listing_age(symbol: str, min_first_date: str = "2018-01-01") -> Single
             stage="listing_age", verdict="reject",
             metric_name="first_date", metric_value=first_str,
             threshold=f"first_date <= {min_first_date}",
-            detail=f"首日 {first_str}，晚于要求 {min_first_date}（不足7年，未覆盖完整牛熊）",
+            detail=f"首日 {first_str}，晚于要求 {min_first_date}（不足3年，不满足上市年限）",
             elapsed_sec=round(time.time() - t0, 1),
         )
     return SingleCheck(
@@ -261,7 +261,7 @@ def check_listing_age(symbol: str, min_first_date: str = "2018-01-01") -> Single
 #  [3] 流动性检查
 # ════════════════════════════════════════════════════════════
 
-def check_liquidity(symbol: str, min_avg_vol: float = 2e8) -> SingleCheck:
+def check_liquidity(symbol: str, min_avg_vol: float = 5e7) -> SingleCheck:
     """检查近252日日均成交额。"""
     t0 = time.time()
     df = _load_parquet(symbol)
@@ -269,7 +269,7 @@ def check_liquidity(symbol: str, min_avg_vol: float = 2e8) -> SingleCheck:
         return SingleCheck(
             stage="liquidity", verdict="warn",
             metric_name="avg_vol_252d", metric_value="N/A",
-            threshold=f"avg_vol > {min_avg_vol / 1e8:.0f}亿",
+            threshold=f"avg_vol > {min_avg_vol / 1e8:.1f}亿",
             detail="无法加载数据",
             elapsed_sec=round(time.time() - t0, 1),
         )
@@ -277,7 +277,7 @@ def check_liquidity(symbol: str, min_avg_vol: float = 2e8) -> SingleCheck:
         return SingleCheck(
             stage="liquidity", verdict="warn",
             metric_name="avg_vol_252d", metric_value="N/A",
-            threshold=f"avg_vol > {min_avg_vol / 1e8:.0f}亿",
+            threshold=f"avg_vol > {min_avg_vol / 1e8:.1f}亿",
             detail="数据缺少 amount/volume 列",
             elapsed_sec=round(time.time() - t0, 1),
         )
@@ -294,14 +294,14 @@ def check_liquidity(symbol: str, min_avg_vol: float = 2e8) -> SingleCheck:
         return SingleCheck(
             stage="liquidity", verdict="warn",
             metric_name="avg_vol_252d", metric_value=f"{avg_vol / 1e8:.2f}亿",
-            threshold=f"avg_vol > {min_avg_vol / 1e8:.0f}亿",
-            detail=f"近252日均成交额 {avg_vol / 1e8:.2f}亿 < {min_avg_vol / 1e8:.0f}亿",
+            threshold=f"avg_vol > {min_avg_vol / 1e8:.1f}亿",
+            detail=f"近252日均成交额 {avg_vol / 1e8:.2f}亿 < {min_avg_vol / 1e8:.1f}亿",
             elapsed_sec=round(time.time() - t0, 1),
         )
     return SingleCheck(
         stage="liquidity", verdict="pass",
         metric_name="avg_vol_252d", metric_value=f"{avg_vol / 1e8:.2f}亿",
-        threshold=f"avg_vol > {min_avg_vol / 1e8:.0f}亿",
+        threshold=f"avg_vol > {min_avg_vol / 1e8:.1f}亿",
         detail=f"近252日均成交额 {avg_vol / 1e8:.2f}亿",
         elapsed_sec=round(time.time() - t0, 1),
     )
@@ -429,10 +429,23 @@ def check_standalone_backtest(
 ) -> SingleCheck:
     """对单个品种独立运行海龟回测，检查盈亏比和 CAGR。"""
     t0 = time.time()
+
+    # 动态推断品种实际数据起始日，避免 align_to_common_dates 取并集
+    # 导致 NaN 前缀污染信号计算（国债ETF 2013年起，候选品种可能更晚上市）
+    df = _load_parquet(symbol)
+    if df is not None and not df.empty:
+        first_date = str(df["date"].iloc[0].date())
+        effective_start = max(start_date, first_date)
+        if effective_start != start_date:
+            log.info("[%s] 实际数据起始 %s > 请求起始 %s，后移 start_date → %s",
+                     symbol, first_date, start_date, effective_start)
+    else:
+        effective_start = start_date
+
     try:
         from scripts.run_backtest import run_backtest
         result = run_backtest(
-            start_date=start_date,
+            start_date=effective_start,
             end_date=end_date,
             mode=mode,
             quiet=True,
@@ -470,7 +483,7 @@ def check_standalone_backtest(
     win_rate = result.get("win_rate", 0)
 
     # 计算 CAGR（简单近似）
-    years = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days / 365.25
+    years = (pd.Timestamp(end_date) - pd.Timestamp(effective_start)).days / 365.25
     if years > 0 and total_ret > -100:
         cagr = ((1 + total_ret / 100) ** (1 / years) - 1) * 100
     else:
@@ -578,6 +591,39 @@ def check_correlation(
     # 从 avg_corr 序列取均值作为整体度量
     avg_corr = float(corr_df["avg_corr"].mean()) if "avg_corr" in corr_df.columns else 0.5
 
+    # 新增：最大pairwise相关性检查（防止mean被低相关品种稀释的问题）
+    max_pairwise = 0.0
+    worst_pair = ""
+    if price_df is not None and len(price_df.columns) >= 2:
+        # 使用对数收益率计算相关性（与 compute_rolling_correlation 保持一致），
+        # 避免价格水平的 spurious correlation
+        full_corr = np.log(price_df).diff().dropna().corr()
+        if symbol in full_corr.columns:
+            for other in existing_symbols:
+                if other in full_corr.columns:
+                    r = abs(full_corr.loc[other, symbol])
+                    if r > max_pairwise:
+                        max_pairwise = r
+                        worst_pair = other
+
+    if max_pairwise > 0.85:
+        return SingleCheck(
+            stage="correlation", verdict="reject",
+            metric_name="max_pairwise_rho", metric_value=round(max_pairwise, 3),
+            threshold="max ρ <= 0.85",
+            detail=f"与[{worst_pair}]的相关系数 {max_pairwise:.3f} > 0.85，同质化严重，淘汰",
+            elapsed_sec=round(time.time() - t0, 1),
+        )
+
+    if max_pairwise > 0.70:
+        return SingleCheck(
+            stage="correlation", verdict="warn",
+            metric_name="max_pairwise_rho", metric_value=round(max_pairwise, 3),
+            threshold="max ρ <= 0.70",
+            detail=f"与[{worst_pair}]的相关系数 {max_pairwise:.3f} > 0.70，高度相关，建议实盘确认",
+            elapsed_sec=round(time.time() - t0, 1),
+        )
+
     if avg_corr > 0.5:
         return SingleCheck(
             stage="correlation", verdict="warn",
@@ -590,7 +636,7 @@ def check_correlation(
         stage="correlation", verdict="pass",
         metric_name="avg_correlation_60d", metric_value=round(avg_corr, 3),
         threshold="avg ρ <= 0.5 vs each existing",
-        detail=f"60日平均相关系数 {avg_corr:.3f}，低相关，合格",
+        detail=f"平均ρ={avg_corr:.3f}, 最大pairwise={max_pairwise:.3f}(与{worst_pair}), 合格",
         elapsed_sec=round(time.time() - t0, 1),
     )
 
@@ -683,10 +729,15 @@ def screen_candidate(
             detail="--skip-backtest 已跳过",
         ))
 
-    # [6] 相关性 → WARN 不阻断
+    # [6] 相关性 → REJECT 阻断, WARN 降级
     c = check_correlation(symbol, existing_symbols, start_date, end_date)
     checks.append(c)
     log.info("[%s] ⑥相关性: %s — %s", symbol, c.verdict.upper(), c.detail[:80])
+    if c.verdict == "reject":
+        result.final_verdict = "reject"
+        result.stopped_at_stage = "correlation"
+        result.checks = checks
+        return result
     if c.verdict == "warn" and result.final_verdict == "pass":
         result.final_verdict = "warn"
 

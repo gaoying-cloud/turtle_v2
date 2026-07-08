@@ -17,6 +17,18 @@
     T+1日 16:30 py scripts/daily_signal.py --settle ...    → 结算+出后天表
     (减半日)   py scripts/daily_signal.py --settle-half ...→ 减半结算（不关闭持仓）
     (加仓日)   py scripts/daily_signal.py --settle-add ... → 加仓结算
+
+注意 ── 可选过滤未实现（与回测的差异）:
+    以下回测中的可选过滤在 daily_signal.py 中未实现，当前配置均为关闭状态，
+    不影响现有行为。若未来在 config 中开启，需同步实现：
+      - use_55_filter       （55日过滤）
+      - regime_filter       （MarketRegime 碎步市过滤）
+      - use_hurst_filter    （Hurst 指数过滤）
+      - use_rsi_filter      （RSI/布林带过滤）
+      - use_trend_duration_filter  （趋势持续时间过滤）
+      - min_confirmations   （投票式信号确认：成交量/K线/近期胜率）
+      - entry_mode="dual"   （MA10金叉入场模式 → 对应 MA20 退出模式）
+      - shortable_symbols   （空头信号）
 """
 
 from __future__ import annotations
@@ -48,9 +60,15 @@ TURTLE = CONFIG["turtle"]
 MAX_UNITS = TURTLE["max_units"]
 RISK_PER_UNIT = TURTLE["risk_per_unit"]
 STOP_MULT = float(TURTLE.get("stop_atr_multiple", 2.0))  # V5.16: 从配置读取，对齐策略核心
+PYRAMID_STEP = float(TURTLE.get("pyramid_step", 2.0))    # V6.2: 加仓步长(N倍数)，对齐策略默认2.0
 COMMISSION = CONFIG["commission_pct"]
 SLIPPAGE = CONFIG["slippage_pct"]
 ETFS = get_trading_symbols(CONFIG)
+
+# V6.2: 风控阈值，与 config.risk 对齐
+RISK = CONFIG.get("risk", {})
+SINGLE_MAX_RISK = float(RISK.get("single_max_risk", 0.04))       # 单品种风险上限 4%
+MAX_PORTFOLIO_RISK = float(RISK.get("max_portfolio_risk", 0.20)) # 全账户风险上限 20%
 
 
 # ════════════════════════════════════════════════════════════
@@ -248,10 +266,10 @@ def check_exit(symbol: str, low: float, close: float, signals: dict, state: dict
 
 
 def should_add(symbol: str, close: float, n: float, pos: dict) -> bool:
-    """加仓条件：价格 >= entry_price + units * 0.5 * n_at_entry（n_at_entry 保持不变，对齐策略核心）。"""
+    """加仓条件：价格 >= entry_price + units * PYRAMID_STEP * n_at_entry（对齐策略核心）。"""
     if pos["units"] >= MAX_UNITS:
         return False
-    threshold = pos["entry_price"] + pos["units"] * 0.5 * pos["n_at_entry"]
+    threshold = pos["entry_price"] + pos["units"] * PYRAMID_STEP * pos["n_at_entry"]
     return close >= threshold
 
 
@@ -275,7 +293,20 @@ def market_equity(state: dict, data_cache: dict | None = None) -> float:
     return state["cash"] + pos_value
 
 
-def calc_shares(equity: float, n: float, price: float, max_cash: float | None = None) -> int:
+def calc_fade() -> float:
+    """集中度衰减系数，与 turtle_trading.py 的 fade_table 对齐。"""
+    n_pos = len([p for p in load_state().get("positions", [])])
+    n_total = len(ETFS)
+    if n_total >= 7:
+        tbl = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 0.8, 5: 0.6, 6: 0.5}
+    elif n_total >= 6:
+        tbl = {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.85, 4: 0.7, 5: 0.6, 6: 0.5}
+    else:
+        tbl = {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.8, 4: 0.6}
+    return tbl.get(n_pos, 0.5)
+
+
+def calc_shares(equity: float, n: float, price: float, max_cash: float | None = None, fade: float = 1.0) -> int:
     """按 equity 计算 1% 风险预算股数。
 
     equity : 账户总权益（sizing 基数，多笔入场共享同一基数）。
@@ -283,6 +314,7 @@ def calc_shares(equity: float, n: float, price: float, max_cash: float | None = 
     price  : 入场价（仅用于现金上限判断，不影响 sizing 公式）。
     max_cash : 可选，本笔最多占用的现金。用于 cash < equity 时按
                先到先得（配置顺序）兜底，避免现金不足时超买。None 表示不限制。
+    fade   : 集中度衰减系数，默认 1.0（无衰减）。
     """
     if n is None or n <= 0 or price is None or price <= 0:
         return 0
@@ -290,14 +322,62 @@ def calc_shares(equity: float, n: float, price: float, max_cash: float | None = 
         equity=equity,
         n_value=n,
         price=price,
-        risk_pct=RISK_PER_UNIT,
-        stop_mult=STOP_MULT,            # V5.16: 从配置读取，对齐策略核心
+        risk_pct=RISK_PER_UNIT * fade,      # V6.2: 集中度衰减
+        stop_mult=STOP_MULT,
     )
     shares = max(MIN_UNIT, int(raw // MIN_UNIT) * MIN_UNIT)
     # 现金上限兜底：cash 不足时按比例缩到可用现金买得起的整手数
     if max_cash is not None and max_cash < shares * price:
         lots = int(max_cash // (price * MIN_UNIT))
         shares = max(0, lots * MIN_UNIT)
+    return shares
+
+
+def _check_risk_limits(
+    shares: int, n: float, price: float, equity: float,
+    state: dict, sym: str,
+) -> int:
+    """校验单品种 + 全账户风险上限，超限时缩仓。
+
+    对齐 turtle_trading.py 的 P0 校验（single_max_risk / max_portfolio_risk）。
+    返回缩仓后的股数，0 表示完全拒绝。
+    """
+    if shares <= 0 or n is None or n <= 0:
+        return 0
+    per_share_risk = STOP_MULT * n
+    requested_risk = shares * per_share_risk
+
+    # 已有该品种的风险敞口
+    existing_sym_risk = 0.0
+    for p in state.get("positions", []):
+        if p["code"] == sym:
+            existing_sym_risk += p["shares"] * STOP_MULT * p["n_at_entry"]
+
+    # 全账户已有风险敞口
+    total_existing_risk = sum(
+        p["shares"] * STOP_MULT * p["n_at_entry"]
+        for p in state.get("positions", [])
+    )
+
+    # ① 单品种风险 ≤ SINGLE_MAX_RISK
+    new_sym_risk_pct = (existing_sym_risk + requested_risk) / equity if equity > 0 else 0
+    if new_sym_risk_pct > SINGLE_MAX_RISK:
+        max_new = equity * SINGLE_MAX_RISK - existing_sym_risk
+        adjusted = int(max_new / per_share_risk / MIN_UNIT) * MIN_UNIT
+        if adjusted <= 0:
+            return 0
+        shares = adjusted
+        requested_risk = shares * per_share_risk
+
+    # ② 全账户风险 ≤ MAX_PORTFOLIO_RISK
+    new_total_risk_pct = (total_existing_risk + requested_risk) / equity if equity > 0 else 0
+    if new_total_risk_pct > MAX_PORTFOLIO_RISK:
+        max_new = equity * MAX_PORTFOLIO_RISK - total_existing_risk
+        adjusted = int(max_new / per_share_risk / MIN_UNIT) * MIN_UNIT
+        if adjusted <= 0:
+            return 0
+        shares = adjusted
+
     return shares
 
 
@@ -479,7 +559,13 @@ def run():
                 continue
             # V5.17: sizing 基于 equity（多笔入场共享同一基数），
             #        sim_cash 作为现金上限兜底（配置顺序先到先得）。
-            shares = calc_shares(sizing_equity, n, close, max_cash=sim_cash)
+            # V6.2: 集中度衰减
+            _fade = calc_fade()
+            shares = calc_shares(sizing_equity, n, close, max_cash=sim_cash, fade=_fade)
+            if shares <= 0:
+                continue
+            # V6.2: 单品种 + 全账户风控校验
+            shares = _check_risk_limits(shares, n, close, sizing_equity, state, sym)
             if shares <= 0:
                 continue
             sim_cash -= shares * close          # 模拟本笔占用，供后续入场兜底
@@ -680,9 +766,14 @@ def cmd_settle(state: dict, settle_str: str):
             if n is None or n <= 0:
                 print(f"  [WARN] {sym} ATR 计算异常，无法入场")
                 continue
-            shares = calc_shares(sizing_equity, n, price, max_cash=state["cash"])
+            shares = calc_shares(sizing_equity, n, price, max_cash=state["cash"], fade=calc_fade())
             if shares <= 0:
                 print(f"  [WARN] {sym} 可买股数为 0，无法入场")
+                continue
+            # V6.2: 单品种 + 全账户风控校验
+            shares = _check_risk_limits(shares, n, price, sizing_equity, state, sym)
+            if shares <= 0:
+                print(f"  [WARN] {sym} 风控校验未通过，无法入场")
                 continue
             pos = {
                 "code": sym,
