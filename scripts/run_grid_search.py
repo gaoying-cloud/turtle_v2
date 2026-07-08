@@ -41,15 +41,9 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.turtle_core import (
-    TurtleSignals, TurtlePositions, SignalFilter,
-    calc_position_size, calc_fixed_stop, calc_trailing_stop,
-    calc_pyramid_trigger, pyramid_add, Position,
-)
-from src.risk_parity import compute_alpha_weights
 from strategies.turtle_trading import TurtleStrategy
 from src.config_loader import get_shortable_symbols, get_t_plus_one_symbols
-from scripts.run_backtest import align_to_common_dates
+from src.data_utils import align_to_common_dates
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +237,7 @@ def run_single_backtest(
         t_plus_one_symbols=get_t_plus_one_symbols(config),
     )
 
-    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Years)
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, annualize=True)
     cerebro.addanalyzer(bt.analyzers.AnnualReturn, _name="annual_return")
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
