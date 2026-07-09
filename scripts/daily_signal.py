@@ -29,6 +29,7 @@
       - min_confirmations   （投票式信号确认：成交量/K线/近期胜率）
       - entry_mode="dual"   （MA10金叉入场模式 → 对应 MA20 退出模式）
       - shortable_symbols   （空头信号）
+    ✅ atr_pct_filter      （ATR百分位入口过滤 — 已实现，从配置读取）
 """
 
 from __future__ import annotations
@@ -181,6 +182,23 @@ def compute_signals(df: pd.DataFrame) -> dict:
             last[k] = None if pd.isna(v) else float(v)
         else:
             last[k] = s
+
+    # ── S17：ATR 百分位（取最新 n 值在近 252 日的分位数）──
+    n_series = si.get("n_series")
+    if n_series is not None and len(n_series) >= 252:
+        n_window = n_series.iloc[-252:].values
+        n_min, n_max = np.nanmin(n_window), np.nanmax(n_window)
+        if n_max > n_min:
+            n_current = last.get("n")
+            if n_current is not None:
+                last["atr_pct_252"] = round((n_current - n_min) / (n_max - n_min), 4)
+            else:
+                last["atr_pct_252"] = None
+        else:
+            last["atr_pct_252"] = None
+    else:
+        last["atr_pct_252"] = None
+
     return last
 
 
@@ -203,6 +221,14 @@ def should_enter(symbol: str, close: float, signals: dict, state: dict, today: d
 
     # T+1 约束：当日已买入同品种，不可再入场
     if state.get("buy_today", {}).get(symbol, False):
+        return False
+
+    # ── S17：ATR 百分位过滤（高波动期不进场，对齐 strategy._check_entry） ──
+    atr_pct = signals.get("atr_pct_252")
+    threshold = TURTLE.get("atr_pct_threshold", 0.75)
+    if TURTLE.get("atr_pct_filter", False) and atr_pct is not None and atr_pct > threshold:
+        logging.getLogger("signal").debug(
+            "[入场] %s ATR百分位=%.3f > %.2f，高波动跳过", symbol, atr_pct, threshold)
         return False
 
     # ── SignalFilter ──
@@ -668,10 +694,18 @@ def run():
                     close = data_cache[sym]["close"].iloc[-1] if sym in data_cache else 0
                     if entry_high and close <= entry_high:
                         reason = f"未突破({close:.2f}<{entry_high:.2f})"
+                    else:
+                        # 突破条件满足但被ATR百分位过滤
+                        atr_pct = sig.get("atr_pct_252")
+                        thr = TURTLE.get("atr_pct_threshold", 0.75)
+                        if TURTLE.get("atr_pct_filter", False) and atr_pct is not None and atr_pct > thr:
+                            reason = f"ATR过滤(百分位{atr_pct:.2f}>{thr})"
                     sf = _get_sf(state, sym)
                     if sf.get("rejections", 0) > 0 and sf.get("last_was_win") is False:
-                        reason += f"  SignalFilter拒绝({sf['rejections']}/3)"
+                        reason += f"  SignalFilter拒绝({sf[chr(39)]}rejections{chr(39)}]/3)"
                 if not any(True for _ in state["positions"]) and not entry_actions:
+                    showing_any = True
+                    print(line_fmt.format(sym, "空仓", "—", "—", "—", "—", "—", reason))
                     showing_any = True
                     print(line_fmt.format(sym, "空仓", "—", "—", "—", "—", "—", reason))
 
