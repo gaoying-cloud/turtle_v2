@@ -1,6 +1,6 @@
 # 项目架构手册
 
-> 版本: S10 基线 | 更新: 2026-07-09
+> 版本: S17 基线 | 更新: 2026-07-09
 
 ---
 
@@ -161,15 +161,20 @@ df_to_feed(df, symbol)                         # → bt.feeds.PandasData
 ```python
 {
     "n": pd.Series,              # ATR 序列
+    "n_series": pd.Series,       # 同上，完整序列（ATR百分位计算用）
     "entry_high_20": pd.Series,  # 20 日最高价（入场参考）
     "entry_low_20": pd.Series,   # 20 日最低价（入场参考）
     "entry_high_55": pd.Series,  # 55 日最高价（55日过滤用）
     "entry_low_55": pd.Series,   # 55 日最低价（55日过滤用）
-    "exit_low_10": pd.Series,    # 10 日最低价（退出参考）
-    "sma20": pd.Series,          # 20日均线（退化检测用）
-    "sma60": pd.Series,          # 60日均线
-    "hurst": pd.Series,          # Hurst 指数
-    "rsi": pd.Series,            # RSI
+    "stop_low_10": pd.Series,    # 10 日最低价（标准退出参考）
+    "stop_low_6": pd.Series,    # 6 日最低价（S13，持仓≤10天收紧用）
+    "stop_low_12": pd.Series,   # 12 日最低价（S13，持仓≥21天放宽用）
+    "sma_20": pd.Series,         # 20日均线
+    "sma_60": pd.Series,         # 60日均线
+    "hurst_252": pd.Series,      # Hurst 指数
+    "rsi_14": pd.Series,         # RSI
+    "bb_upper_20": pd.Series,   # 布林带上轨
+    "bb_lower_20": pd.Series,   # 布林带下轨
 }
 ```
 
@@ -283,13 +288,14 @@ next() 每根 K 线
   ├── 检查再平衡 _should_rebalance()  → 首次/每季度/ATR变动30%
   │     └── _recalc_alpha_weights()   → 计算权重倍率
   │
-  ├── 遍历各品种
-  │     │
-  │     ├── 无持仓 → _check_entry()
-  │     │     ├── 突破判断: close > entry_high_20
-  │     │     ├── SignalFilter.check_entry()  ← 6 条拒绝规则
-  │     │     ├── calc_position_size()        ← 含权重倍率
-  │     │     └── 风控校验: 单品种风险 ≤ 4%, 全账户 ≤ 20%
+	  ├── 遍历各品种
+	  │     │
+	  │     ├── 无持仓 → _check_entry()
+	  │     │     ├── 突破判断: close > entry_high_20
+	  │     │     ├── ATR百分位过滤: atr_pct_252 > 0.75 → 跳过（S17定型）
+	  │     │     ├── SignalFilter.check_entry()  ← 6 条拒绝规则
+	  │     │     ├── calc_position_size()        ← 含权重倍率
+	  │     │     └── 风控校验: 单品种风险 ≤ 4%, 全账户 ≤ 20%
   │     │
   │     ├── 有持仓 → _should_exit()
   │     │     ├── 利润保护: 浮盈≥19N 且回撤2N → 减半
@@ -445,7 +451,7 @@ results/grid_search/
 | daily_signal.py | TurtleStrategy 等价逻辑 | 注意事项 |
 |:--|:--|:--|
 | `compute_signals()` | `TurtleSignals` 预计算 | 同用 `TurtleSignals` 类 |
-| `should_enter()` | `_check_entry()` 中的突破判断 | 逻辑需一致 |
+| `should_enter()` | `_check_entry()` 中的突破判断 | 逻辑需一致（含ATR百分位过滤） |
 | `check_exit()` | `_should_exit()` | 利润保护 + 10日低点 |
 | `should_add()` | `_check_pyramid()` | 加仓步进逻辑 |
 | `calc_shares()` | `calc_position_size()` × 权重倍率 | 同用 `turtle_core.calc_position_size()` |
@@ -469,6 +475,8 @@ results/grid_search/
 | `max_units` | 4 | 最大加仓单位数 | 固定 |
 | `pyramid_step` | 2.0 | 加仓步长(N) | 固定 |
 | `use_55_filter` | false | 55日过滤 | 未启用 |
+| `atr_pct_filter` | **true** | **ATR百分位入口过滤（S17定型）** | [已启用] |
+| `atr_pct_threshold` | **0.75** | **ATR百分位阈值 > 此值不入场** | [搜索范围 0.5~0.9] |
 
 ### 权重参数（`config.weighting`）
 
