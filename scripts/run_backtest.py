@@ -89,6 +89,8 @@ def run_backtest(
     use_adaptive_exit: bool = False,
     use_atr_pct_filter: bool = False,
     atr_pct_threshold: float = 0.75,  # [S17] 最优阈值
+    # ── S19 实验参数 ──
+    force_short: bool = False,        # 强制开启做空（T0品种）
 ) -> Optional[dict]:
     """运行海龟策略回测。
 
@@ -196,6 +198,11 @@ def run_backtest(
     else:
         shortable = get_shortable_symbols(config)
         t_plus_one = get_t_plus_one_symbols(config)
+        # ── S19：强制开启做空（将 T0 品种加入 shortable） ──
+        if force_short:
+            t0_syms = get_t0_symbols(config)
+            shortable = shortable | set(t0_syms)
+            logger.info("[S19] 强制开启做空: %s", t0_syms)
 
     # ── 期货合约乘数（统一从 config 读取） ──
     FUTURES_MULTIPLIERS = get_futures_multipliers(config) if futures else {}
@@ -316,6 +323,20 @@ def run_backtest(
             print(f"平均亏损: -{avg_loss:>13.2f}")
             _hold = trades.get("len", {}).get("average", 0)
             print(f"平均持仓: {_hold:>13.1f} 天")
+
+        # ── 多空方向细分 ──
+        _my_trades = getattr(strat, "_my_trades", [])
+        if _my_trades:
+            _longs = [t for t in _my_trades if t.get("direction") == "long"]
+            _shorts = [t for t in _my_trades if t.get("direction") == "short"]
+            if _shorts:
+                _long_pnl = sum(t["pnl"] for t in _longs)
+                _short_pnl = sum(t["pnl"] for t in _shorts)
+                _short_wr = sum(1 for t in _shorts if t["pnl"] > 0) / len(_shorts) * 100
+                _short_hold = sum(t.get("holding_days", 0) for t in _shorts) / len(_shorts)
+                _long_hold = sum(t.get("holding_days", 0) for t in _longs) / len(_longs) if _longs else 0
+                print(f"  方向: 多头={len(_longs)}笔 PnL={_long_pnl:+,.0f} 均持{_long_hold:.1f}d  |  "
+                      f"空头={len(_shorts)}笔 胜率{_short_wr:.1f}% PnL={_short_pnl:+,.0f} 均持{_short_hold:.1f}d")
 
         print("=" * 60)
         print()
@@ -564,7 +585,13 @@ def main():
         "--atr-pct-filter",
         type=float,
         default=0,
-        help="[S13] ATR百分位过滤阈值 (0=关闭, 0.7=高波动期不入场)",
+        help="[S17] ATR百分位过滤阈值 (0=关闭, 0.75=高波动期不入场)",
+    )
+    parser.add_argument(
+        "--force-short",
+        action="store_true",
+        default=False,
+        help="[S19] 强制开启做空（将T0品种加入shortable_symbols）",
     )
     parser.add_argument(
         "--symbols", "-s",
@@ -618,6 +645,7 @@ def main():
         use_adaptive_exit=args.adaptive_exit,
         use_atr_pct_filter=_atr_pct_enabled,
         atr_pct_threshold=_atr_pct_threshold,
+        force_short=args.force_short,
     )
 
     if result is None:
