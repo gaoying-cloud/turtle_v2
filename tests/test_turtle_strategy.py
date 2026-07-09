@@ -126,8 +126,8 @@ def strat():
 	        "pyramid_ratios": None,
 	        "weight_multipliers": {},
 	        "use_adaptive_exit": False,
-	        "use_atr_pct_filter": False,
-	        "atr_pct_threshold": 0.7,
+	        "use_atr_pct_filter": True,
+	        "atr_pct_threshold": 0.75,
 	    })()
     s.datas = [MockData(), MockData()]
     s.broker = MagicMock()

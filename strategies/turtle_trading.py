@@ -122,8 +122,8 @@ class TurtleStrategy(bt.Strategy):
 	        ("max_units", 4),                   # 最多加仓单位数（期货小资金建议2）
 	        # ── S13 实验参数 ──
 	        ("use_adaptive_exit", False),       # 开启持仓天数自适应退出
-	        ("use_atr_pct_filter", False),      # 开启 ATR 百分位入口过滤
-	        ("atr_pct_threshold", 0.7),         # ATR 百分位 > 此值不入场（高波动过滤）
+	        ("use_atr_pct_filter", True),       # [S17] 开启 ATR 百分位入口过滤（默认启用）
+	        ("atr_pct_threshold", 0.75),        # [S17] ATR 百分位 > 此值不入场
 	    )
 
     def __init__(self):

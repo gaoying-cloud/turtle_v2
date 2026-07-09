@@ -719,7 +719,8 @@ def generate_report(yearly_df: pd.DataFrame, features_df: pd.DataFrame, mw_df: p
     lines.append(f"**Period**: {CONFIG['backtest']['start_date']} ~ {END_DATE}\n")
     lines.append(f"**Params**: ATR={BEST_PARAMS['atr_period']}, Breakout={BEST_PARAMS['breakout_period']}, "
                  f"Stop={BEST_PARAMS['stop_period']}, {BEST_PARAMS['stop_atr_multiple']}xATR, "
-                 f"alpha={BEST_PARAMS['alpha']}, Mode A\n")
+                 f"alpha={BEST_PARAMS['alpha']}, Mode A"
+                 f"{' | ATR_filter=ON(0.75)' if CONFIG['turtle'].get('atr_pct_filter', False) else ''}\n")
     lines.append(f"**Total trades**: {len(features_df)}\n")
     if not features_df.empty:
         lines.append(f"**Wins**: {features_df['was_win'].sum()} / **Losses**: {(~features_df['was_win']).sum()}\n")
