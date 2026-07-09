@@ -848,7 +848,7 @@ def cmd_status(state: dict):
         print("  空仓")
     for pos in state["positions"]:
         print(f"  {pos['code']}: {pos['shares']}股 @ {pos['entry_price']:.3f} ({pos['units']}/{MAX_UNITS}单位)")
-	    print(f"  权益: {state['equity']:,.0f} | 持仓: {len(state['positions'])}/{len(ETFS)}")
+    print(f"  权益: {state["equity"]:,.0f} | 持仓: {len(state["positions"])}/{len(ETFS)}")
     if state["trade_history"]:
         last = state["trade_history"][-1]
         print(f"  最近交易: {last['symbol']} {'赚' if last['was_win'] else '亏'} PnL={last['pnl']:+,.0f}")
