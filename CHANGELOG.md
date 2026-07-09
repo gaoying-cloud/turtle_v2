@@ -1,5 +1,30 @@
 # Changelog
 
+## [V6.4-ATR百分位入口过滤定型] - 2026-07-09
+
+### 新功能：ATR 百分位入口过滤（S17）
+- **`config/turtle_config.yaml`**: 新增 `atr_pct_filter: true`, `atr_pct_threshold: 0.75`
+- **`strategies/turtle_trading.py`**: 新增 `use_atr_pct_filter` + `atr_pct_threshold` 参数，在 `_check_entry()` 中过滤高波动期突破
+- **`scripts/run_backtest.py`**: 新增 `--atr-pct-filter` CLI，默认从配置读取
+- **`src/turtle_core.py`**: 新增 6 日/12 日唐奇安通道 + `n_series` 序列
+
+### 网格搜索最优参数
+ATR 百分位阈值遍历 0.0~0.9，最优 0.75：
+
+| 指标 | 基线 | **threshold=0.75** | 变化 |
+|:--|:--:|:--:|:--:|
+| 最终净值 | ¥568,489 | **¥863,129** | +51.8% 🚀 |
+| 夏普 | 0.88 | **1.07** | +0.19 |
+| 最大回撤 | 18.24% | **8.32%** | -9.92pp 🎯 |
+| 胜率 | 46.3% | 49.7% | +3.4pp |
+| 盈亏比 | 3.44 | **5.37** | +1.93 |
+
+### 实验状态
+- ✅ **S17_atr_percentile** — ATR 百分位网格搜索，通过
+- ⏸️ **S16_S13_adaptive_exit** — 持仓时长自适应退出，搁置（stop=6 过紧）
+- ❌ **S15_upper_band_ratio** — 10 日上轨占比，不成立
+- ❌ **S13_adaptive_exit** — MarketRegime 路径，已失败
+
 ## [V6.3-数据对齐修复+全量重跑] - 2026-07-08
 
 ### 数据对齐 bug 修复

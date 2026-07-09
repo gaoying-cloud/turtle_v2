@@ -88,7 +88,7 @@ def run_backtest(
     # ── S13 实验参数 ──
     use_adaptive_exit: bool = False,
     use_atr_pct_filter: bool = False,
-    atr_pct_threshold: float = 0.7,
+    atr_pct_threshold: float = 0.75,  # [S17] 最优阈值
 ) -> Optional[dict]:
     """运行海龟策略回测。
 
@@ -596,6 +596,12 @@ def main():
         return
 
     # 运行回测
+    # ── S17：ATR 百分位过滤（从配置读取，CLI 可覆盖） ──
+    _atr_pct_enabled = _CONFIG["turtle"].get("atr_pct_filter", False)
+    _atr_pct_threshold = _CONFIG["turtle"].get("atr_pct_threshold", 0.75)
+    if args.atr_pct_filter > 0:
+        _atr_pct_enabled = True
+        _atr_pct_threshold = args.atr_pct_filter
     result = run_backtest(
         start_date=args.start,
         end_date=args.end,
@@ -610,8 +616,8 @@ def main():
             if args.symbols else None
         ),
         use_adaptive_exit=args.adaptive_exit,
-        use_atr_pct_filter=(args.atr_pct_filter > 0),
-        atr_pct_threshold=args.atr_pct_filter if args.atr_pct_filter > 0 else 0.7,
+        use_atr_pct_filter=_atr_pct_enabled,
+        atr_pct_threshold=_atr_pct_threshold,
     )
 
     if result is None:

@@ -16,6 +16,8 @@ turtle:
   trend_duration_min_days: 5
   exit_period: 10
   pyramid_step: 2.0
+  atr_pct_filter: true          # [S17] 启用 ATR 百分位入口过滤
+  atr_pct_threshold: 0.75       # [S17] 最优阈值: ATR百分位 > 0.75 不入场（高波动过滤）
 weighting:
   alpha: 0.0               # [网格搜索最优] 风险平价偏移 (旧: 0.05 → 0, ATR等权最优)
   cov_lookback_days: 252
