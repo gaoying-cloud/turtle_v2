@@ -16,5 +16,11 @@
   "concentration_cut": 0,
   "dd_warning": 0,
   "loss_pause": 0,
-  "t1_stop_delay": 0
+  "t1_stop_delay": 0,
+  "oos_sharpe": 1.42,
+  "oos_total_return_pct": 62.44,
+  "oos_mdd_pct": 16.74,
+  "oos_trades": 41,
+  "oos_win_rate": 53.66,
+  "oos_profit_ratio": 3.2
 }
