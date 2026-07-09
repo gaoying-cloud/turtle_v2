@@ -621,6 +621,7 @@ class TurtleSignals:
 
         return {
             "n": atr,
+            "n_series": atr,     # 【S13】完整 ATR 序列，用于入场前百分位计算
             "entry_high_20": donchian_high(high, self.breakout_period),
             "entry_low_20": donchian_low(low, self.breakout_period),
             "entry_high_55": donchian_high(high, self.filter_period),
@@ -633,6 +634,10 @@ class TurtleSignals:
             "stop_low_7": donchian_low(low, 7),      # 【实验】7日低点
             "stop_high_8": donchian_high(high, 8),   # 【实验】8日高点
             "stop_low_8": donchian_low(low, 8),      # 【实验】8日低点
+            "stop_high_6": donchian_high(high, 6),   # 【S13】6日高点——持仓≤10天收紧用
+            "stop_low_6": donchian_low(low, 6),      # 【S13】6日低点——持仓≤10天收紧用
+            "stop_high_12": donchian_high(high, 12), # 【S13】12日高点——持仓≥21天放宽用
+            "stop_low_12": donchian_low(low, 12),    # 【S13】12日低点——持仓≥21天放宽用
             "trail_high_10": trail_high_close(close, self.stop_period),
             "trail_low_10": trail_low_close(close, self.stop_period),
             "sma_50": close.rolling(50).mean(),  # 50日均线（趋势判断用）

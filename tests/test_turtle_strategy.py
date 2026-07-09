@@ -122,10 +122,13 @@ def strat():
         "hurst_min": 0.50,
         "use_rsi_filter": False,
         "rsi_overbought": 70,
-        "pyramid_step": 2.0,
-        "pyramid_ratios": None,
-        "weight_multipliers": {},
-    })()
+	        "pyramid_step": 2.0,
+	        "pyramid_ratios": None,
+	        "weight_multipliers": {},
+	        "use_adaptive_exit": False,
+	        "use_atr_pct_filter": False,
+	        "atr_pct_threshold": 0.7,
+	    })()
     s.datas = [MockData(), MockData()]
     s.broker = MagicMock()
     s.broker.getvalue.return_value = 200000.0

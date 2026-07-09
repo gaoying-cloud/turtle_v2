@@ -85,6 +85,10 @@ def run_backtest(
     strategy: str = "turtle",
     pyramid_step: float = 2.0,
     pyramid_ratios: Optional[list[float]] = None,
+    # ── S13 实验参数 ──
+    use_adaptive_exit: bool = False,
+    use_atr_pct_filter: bool = False,
+    atr_pct_threshold: float = 0.7,
 ) -> Optional[dict]:
     """运行海龟策略回测。
 
@@ -239,6 +243,9 @@ def run_backtest(
         pyramid_step=pyramid_step,
         pyramid_ratios=pyramid_ratios,
         weight_multipliers=config.get("weighting", {}).get("weight_multipliers", {}),
+        use_adaptive_exit=use_adaptive_exit,
+        use_atr_pct_filter=use_atr_pct_filter,
+        atr_pct_threshold=atr_pct_threshold,
     )
 
     # ── 添加分析器 ──
@@ -548,6 +555,18 @@ def main():
         help="入场模式: breakout=20日高点突破(默认), dual=突破+MA5金叉双模式",
     )
     parser.add_argument(
+        "--adaptive-exit",
+        action="store_true",
+        default=False,
+        help="[S13] 启用持仓天数自适应退出 (holding_days→动态stop_period)",
+    )
+    parser.add_argument(
+        "--atr-pct-filter",
+        type=float,
+        default=0,
+        help="[S13] ATR百分位过滤阈值 (0=关闭, 0.7=高波动期不入场)",
+    )
+    parser.add_argument(
         "--symbols", "-s",
         type=str,
         default="",
@@ -590,6 +609,9 @@ def main():
             [s.strip() for s in args.symbols.split(",") if s.strip()]
             if args.symbols else None
         ),
+        use_adaptive_exit=args.adaptive_exit,
+        use_atr_pct_filter=(args.atr_pct_filter > 0),
+        atr_pct_threshold=args.atr_pct_filter if args.atr_pct_filter > 0 else 0.7,
     )
 
     if result is None:

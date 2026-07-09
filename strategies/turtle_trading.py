@@ -119,8 +119,12 @@ class TurtleStrategy(bt.Strategy):
         ("hurst_min", 0.50),                # H < 此值拒绝入场（均值回归）
         ("use_rsi_filter", False),          # 开启 RSI/布林带过度延伸过滤
         ("rsi_overbought", 70),             # RSI 超买阈值（>此值且触及布林带上轨→过滤）
-        ("max_units", 4),                   # 最多加仓单位数（期货小资金建议2）
-    )
+	        ("max_units", 4),                   # 最多加仓单位数（期货小资金建议2）
+	        # ── S13 实验参数 ──
+	        ("use_adaptive_exit", False),       # 开启持仓天数自适应退出
+	        ("use_atr_pct_filter", False),      # 开启 ATR 百分位入口过滤
+	        ("atr_pct_threshold", 0.7),         # ATR 百分位 > 此值不入场（高波动过滤）
+	    )
 
     def __init__(self):
         # ── 初始化 S2 组件 ──
@@ -614,6 +618,19 @@ class TurtleStrategy(bt.Strategy):
                                  code, rsi_val, self.params.rsi_overbought, bb_upper)
                     return
 
+        # ── S13：ATR 百分位过滤（高波动期不进场） ──
+        if self.params.use_atr_pct_filter:
+            n_series = si.get("n_series")
+            if n_series is not None and idx >= 252:
+                n_window = n_series.iloc[max(0, idx-252):idx+1].values
+                n_min, n_max = np.nanmin(n_window), np.nanmax(n_window)
+                if n_max > n_min:
+                    n_pct = (n - n_min) / (n_max - n_min)
+                    if n_pct > self.params.atr_pct_threshold:
+                        logger.debug("[入场] %s ATR百分位=%.3f > %.2f，高波动跳过",
+                                     code, n_pct, self.params.atr_pct_threshold)
+                        return
+
         # ── 盈利过滤器（期货模式禁用） ──
         if self.params.use_signal_filter and not self.params.futures_mode:
             ok, reason = self._filter.check_entry(code, self._positions.has_position(code))
@@ -823,8 +840,19 @@ class TurtleStrategy(bt.Strategy):
                             return "full"
                 return "none"
             else:
-                # A 入场 (breakout)：利润保护 + 10日低点
-                stop_low = si["stop_low_10"].iloc[idx]
+                # A 入场 (breakout)：利润保护 + 动态停损
+
+                # ── S13：按持仓天数动态切换 stop_period ──
+                if self.params.use_adaptive_exit:
+                    hold = pos.holding_days
+                    if hold < 10:
+                        stop_low = si["stop_low_6"].iloc[idx] if "stop_low_6" in si else si["stop_low_10"].iloc[idx]
+                    elif hold < 20:
+                        stop_low = si["stop_low_8"].iloc[idx] if "stop_low_8" in si else si["stop_low_10"].iloc[idx]
+                    else:
+                        stop_low = si["stop_low_12"].iloc[idx] if "stop_low_12" in si else si["stop_low_10"].iloc[idx]
+                else:
+                    stop_low = si["stop_low_10"].iloc[idx]
 
                 # ── 最终清仓：low < 10日低点（严格小于） ──
                 if not pd.isna(stop_low) and low < stop_low:
