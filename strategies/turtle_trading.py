@@ -121,8 +121,8 @@ class TurtleStrategy(bt.Strategy):
         ("rsi_overbought", 70),             # RSI 超买阈值（>此值且触及布林带上轨→过滤）
 	        ("max_units", 4),                   # 最多加仓单位数（期货小资金建议2）
 	        # ── S13 实验参数 ──
-	        ("use_adaptive_exit", False),       # 开启持仓天数自适应退出
-	        ("use_atr_pct_filter", True),       # [S17] 开启 ATR 百分位入口过滤（默认启用）
+		        ("use_adaptive_exit", False),       # 未启用（S13实验已归档）
+		        ("use_atr_pct_filter", True),       # [S17] 开启 ATR 百分位入口过滤（默认启用）
 	        ("atr_pct_threshold", 0.75),        # [S17] ATR 百分位 > 此值不入场
 	    )
 
@@ -840,19 +840,10 @@ class TurtleStrategy(bt.Strategy):
                             return "full"
                 return "none"
             else:
-                # A 入场 (breakout)：利润保护 + 动态停损
+                # A 入场 (breakout)：利润保护
 
-                # ── S13：按持仓天数动态切换 stop_period ──
-                if self.params.use_adaptive_exit:
-                    hold = pos.holding_days
-                    if hold < 10:
-                        stop_low = si["stop_low_6"].iloc[idx] if "stop_low_6" in si else si["stop_low_10"].iloc[idx]
-                    elif hold < 20:
-                        stop_low = si["stop_low_8"].iloc[idx] if "stop_low_8" in si else si["stop_low_10"].iloc[idx]
-                    else:
-                        stop_low = si["stop_low_12"].iloc[idx] if "stop_low_12" in si else si["stop_low_10"].iloc[idx]
-                else:
-                    stop_low = si["stop_low_10"].iloc[idx]
+                # ── 固定退出：10日低点突破 ──
+                stop_low = si["stop_low_10"].iloc[idx]
 
                 # ── 最终清仓：low < 10日低点（严格小于） ──
                 if not pd.isna(stop_low) and low < stop_low:

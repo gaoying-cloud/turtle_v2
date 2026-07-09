@@ -552,6 +552,7 @@ class Position:
     holding_days: int = 0
     entry_mode: str = "breakout"      # "breakout" | "ma20_cross"（决定止损方式）
     high_since_entry: float = 0.0     # 持仓以来最高价（用于利润保护跟踪）
+    trailing_stop: float = 0.0        # ATR 移动止损当前价位（棘轮用，只上移不下移）
     half_closed: bool = False         # 是否已执行过半仓锁定利润
     protection_activated: bool = False  # 利润保护是否已激活（状态机，一旦激活永久保持）
 

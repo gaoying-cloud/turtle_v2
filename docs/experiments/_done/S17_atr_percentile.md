@@ -2,8 +2,8 @@
 
 ## 元数据
 - 提出: 2026-07-09
-- 分支: exp/S17_atr_percentile
-- 状态: 🔄 运行中
+- 分支: exp/S17_atr_percentile（已合并）
+- 状态: ✅ 已定型启用（atr_pct_filter=true, atr_pct_threshold=0.75）
 
 ## 假设
 低波动期（ATR 处在 252 日历史低位）的突破信号更可靠，假突破更少。

@@ -221,7 +221,8 @@ def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataF
     price_cols = ["open", "high", "low", "close"]
     for col in price_cols:
         if col in df.columns:
-            df[col] = (df[col] * ratio_series).round(4)
+            # 使用 .values 避免 RangeIndex vs DatetimeIndex 索引错位导致全部 NaN
+            df[col] = (df[col].values * ratio_series.values).round(4)
             df[col] = df[col].clip(lower=0.01)
 
     df["pre_close"] = df["close"].shift(1)
