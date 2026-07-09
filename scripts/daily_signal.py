@@ -129,7 +129,7 @@ def get_data_for(symbol: str) -> pd.DataFrame | None:
 
 
 def check_data_freshness() -> date | None:
-    """检查 4 只 ETF 的缓存最新日期，打印新鲜度警告。返回最早的最新日期，或 None 表示无数据。"""
+    """检查 ETF 缓存最新日期，打印新鲜度警告。返回最早的最新日期，或 None 表示无数据。"""
     today = date.today()
     latest_dates = []
     missing_any = False
@@ -706,8 +706,6 @@ def run():
                 if not any(True for _ in state["positions"]) and not entry_actions:
                     showing_any = True
                     print(line_fmt.format(sym, "空仓", "—", "—", "—", "—", "—", reason))
-                    showing_any = True
-                    print(line_fmt.format(sym, "空仓", "—", "—", "—", "—", "—", reason))
 
     if not showing_any:
         print(f"  {'(无信号)':^66}")
@@ -737,7 +735,7 @@ def run():
         cl = state["consecutive_losses"].get(sym, 0)
         if cl >= 5:
             warn += f" ⚠️{sym}连亏{cl}次"
-    print(f"\n  权益: {state['equity']:,.0f} | 持仓: {n_pos}/4 | 风险: {risk:.1f}%{warn}")
+    print(f"\n  权益: {state['equity']:,.0f} | 持仓: {n_pos}/{len(ETFS)} | 风险: {risk:.1f}%{warn}")
     print(f"  下次操作: 明日 9:30 按上表执行")
     print()
 
@@ -850,7 +848,7 @@ def cmd_status(state: dict):
         print("  空仓")
     for pos in state["positions"]:
         print(f"  {pos['code']}: {pos['shares']}股 @ {pos['entry_price']:.3f} ({pos['units']}/{MAX_UNITS}单位)")
-    print(f"  权益: {state['equity']:,.0f} | 持仓: {len(state['positions'])}/4")
+	    print(f"  权益: {state['equity']:,.0f} | 持仓: {len(state['positions'])}/{len(ETFS)}")
     if state["trade_history"]:
         last = state["trade_history"][-1]
         print(f"  最近交易: {last['symbol']} {'赚' if last['was_win'] else '亏'} PnL={last['pnl']:+,.0f}")
