@@ -34,9 +34,12 @@ DATA_DIR = ROOT / "data" / "etf_daily"
 OUT_DIR = ROOT / "results" / "diagnostics"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-BEST_PARAMS = {"atr_period": 15, "breakout_period": 20, "stop_period": 12,
+BEST_PARAMS = {"atr_period": 25, "breakout_period": 20, "stop_period": 8,
                "stop_atr_multiple": 1.5, "alpha": 0.0,
-               "max_cumulative_loss_pct": 0.1, "max_consecutive_losses": 5}
+               "max_cumulative_loss_pct": 0.15, "max_consecutive_losses": 8}
+
+END_DATE = "2026-06-10"
+UBR_WINDOWS = [5, 10, 20, 30, 40, 60]
 
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     CONFIG = yaml.safe_load(f)
@@ -47,7 +50,7 @@ if BOND_SYMBOL:
     SYMBOLS.append(BOND_SYMBOL[0])
 
 SIX_SYMBOLS = [s for s in SYMBOLS if s != (BOND_SYMBOL[0] if BOND_SYMBOL else None)]
-ACTIVE_SYMBOLS = ["510500.SH", "159915.SZ", "513100.SH", "518880.SH"]
+ACTIVE_SYMBOLS = ["510500.SH", "159915.SZ", "513100.SH", "518880.SH", "159985.SZ", "513520.SH"]
 
 
 def load_data(symbol: str, start: str, end: str) -> pd.DataFrame | None:
@@ -137,10 +140,15 @@ def run_full_backtest(start: str, end: str):
 
 def compute_entry_features(trades_df: pd.DataFrame) -> pd.DataFrame:
     """For each trade, annotate entry features by looking up the entry date in pre-computed signal data."""
+    def compute_ubr(close: pd.Series, donchian_upper: pd.Series, lookback: int) -> pd.Series:
+        """过去 lookback 天中 close >= donchian_upper 的天数占比 (0~1)。"""
+        above = (close >= donchian_upper).astype(float)
+        return above.rolling(lookback, min_periods=max(1, lookback // 2)).mean()
+
     # Pre-compute signals for each symbol
     signal_cache = {}
     for sym in ACTIVE_SYMBOLS:
-        df = load_data(sym, "2014-01-01", "2026-06-22")
+        df = load_data(sym, "2014-01-01", END_DATE)
         if df is None or df.empty:
             continue
         close = df["close"]
@@ -150,8 +158,11 @@ def compute_entry_features(trades_df: pd.DataFrame) -> pd.DataFrame:
         volume = df["volume"]
         dates_idx = pd.DatetimeIndex(df["date"])
 
-        calcs = TurtleSignals({"atr_period": 15, "breakout_period": 20, "stop_period": 12,
-                                "exit_period": 10, "risk_per_unit": 0.01, "max_units": 5,
+        calcs = TurtleSignals({"atr_period": BEST_PARAMS["atr_period"],
+                                "breakout_period": BEST_PARAMS["breakout_period"],
+                                "stop_period": BEST_PARAMS["stop_period"],
+                                "exit_period": CONFIG["turtle"]["exit_period"],
+                                "risk_per_unit": 0.01, "max_units": 5,
                                 "unit_step": 1})
         si = calcs.precompute_all(high, low, close)
 
@@ -162,11 +173,27 @@ def compute_entry_features(trades_df: pd.DataFrame) -> pd.DataFrame:
         entry_high = si["entry_high_20"]
         sma20 = si["sma_20"]
 
+        # ── 10 日唐奇安通道（用于 UBR，独立于 stop_period 参数）──
+        donchian_10_upper = high.rolling(10).max()
+        donchian_10_low = low.rolling(10).min()
+
+        # ── 预计算各 N 的 UBR ──
+        ubr_cache = {}
+        for N in UBR_WINDOWS:
+            ubr_cache[f"ubr_{N}"] = compute_ubr(close, donchian_10_upper, N)
+
+        # ── 通道位置序列（用于"上轨占比+下轨距离"组合验证）──
+        channel_width = (donchian_10_upper - donchian_10_low).replace(0, np.nan)
+        ch_pos = (close - donchian_10_low) / channel_width  # 0=下轨, 1=上轨
+
         signal_cache[sym] = {
             "dates": dates_idx,
             "close": close, "high": high, "low": low, "open": open_, "volume": volume,
             "n": n_series, "hurst": hurst_series, "sma60": sma60,
             "rsi14": rsi14, "entry_high": entry_high, "sma20": sma20,
+            "donchian_10_upper": donchian_10_upper,
+            "ch_pos": ch_pos,
+            **ubr_cache,
         }
 
     features_list = []
@@ -229,6 +256,38 @@ def compute_entry_features(trades_df: pd.DataFrame) -> pd.DataFrame:
         # Season (quarter)
         season = f"{entry_dt.year}Q{(entry_dt.month-1)//3+1}"
 
+        # ── UBR: 10 日唐奇安上轨占比 (入场前 N 天) ──
+        close_arr = cache["close"].values
+        dc10_arr = cache["donchian_10_upper"].values
+        ubr_vals = {}
+        for N in UBR_WINDOWS:
+            if idx >= N:
+                cnt = int(np.sum(close_arr[idx - N + 1:idx + 1] >= dc10_arr[idx - N + 1:idx + 1]))
+                ubr_vals[f"ubr_{N}"] = round(cnt / N, 4)
+            else:
+                ubr_vals[f"ubr_{N}"] = None
+
+        # ── 通道位置组合特征 (上轨占比 + 下轨距离) ──
+        ch_pos_arr = cache["ch_pos"].values
+        lookback_cp = 20  # 固定 20 天回溯窗口
+        cp_vals = {}
+        if idx >= lookback_cp:
+            cp_window = ch_pos_arr[idx - lookback_cp + 1:idx + 1]
+            cp_valid = cp_window[~np.isnan(cp_window)]
+            if len(cp_valid) >= 5:
+                cp_vals["ch_pos_mean_20"] = round(float(np.mean(cp_valid)), 4)
+                cp_vals["ch_pos_std_20"] = round(float(np.std(cp_valid)), 4)
+                # 下轨触碰频率: 通道位置 < 0.2 的占比
+                cp_vals["low_touch_ratio_20"] = round(float(np.mean(cp_valid < 0.2)), 4)
+                # 上轨附近频率: 通道位置 > 0.8 的占比
+                cp_vals["high_touch_ratio_20"] = round(float(np.mean(cp_valid > 0.8)), 4)
+            else:
+                cp_vals.update({"ch_pos_mean_20": None, "ch_pos_std_20": None,
+                                "low_touch_ratio_20": None, "high_touch_ratio_20": None})
+        else:
+            cp_vals.update({"ch_pos_mean_20": None, "ch_pos_std_20": None,
+                            "low_touch_ratio_20": None, "high_touch_ratio_20": None})
+
         features_list.append({
             "symbol": sym,
             "entry_date": entry_dt.isoformat(),
@@ -251,6 +310,8 @@ def compute_entry_features(trades_df: pd.DataFrame) -> pd.DataFrame:
             "sma60_slope_20d": round(sma_slope, 4) if not np.isnan(sma_slope) else None,
             "sma20": round(sma20_val, 4) if not np.isnan(sma20_val) else None,
             "season": season,
+            **ubr_vals,
+            **cp_vals,
         })
     return pd.DataFrame(features_list)
 
@@ -338,6 +399,12 @@ def run_mann_whitney(features_df: pd.DataFrame) -> pd.DataFrame:
     numeric_cols = ["n_atr", "hurst_252", "rsi_14", "vol_ratio", "breakout_amplitude_n",
                     "body_ratio", "close_position", "atr_percentile_252", "sma60_slope_20d",
                     "holding_days"]
+    # UBR 特征动态追加
+    for ub in UBR_WINDOWS:
+        numeric_cols.append(f"ubr_{ub}")
+    # 通道位置组合特征
+    numeric_cols += ["ch_pos_mean_20", "ch_pos_std_20",
+                     "low_touch_ratio_20", "high_touch_ratio_20"]
 
     results = []
     for col in numeric_cols:
@@ -527,6 +594,60 @@ def holding_analysis(features_df: pd.DataFrame) -> dict:
 
 
 # ════════════════════════════════════════════════════════════
+#  7b. UBR Predictivity Analysis
+# ════════════════════════════════════════════════════════════
+
+def predictivity_analysis(features_df: pd.DataFrame, ubr_col: str = "ubr_20") -> dict | None:
+    """评估 UBR 作为胜率预测指标的预测力。
+
+    Returns
+    -------
+    dict with keys:
+        bucket_stats: 按阈值分桶的 DataFrame（交易数/胜率/平均盈亏）
+        roc_auc: ROC-AUC 分数（如 sklearn 不可用则返回 None）
+        confusion_at_best_threshold: 最优阈值下的混淆矩阵
+    """
+    if features_df.empty or ubr_col not in features_df.columns:
+        return None
+
+    df = features_df.dropna(subset=[ubr_col, "was_win"]).copy()
+    if len(df) < 10:
+        return None
+
+    # ── 分桶统计 ──
+    bins = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    labels = ["0-20%", "20-40%", "40-60%", "60-80%", "80-100%"]
+    df["bucket"] = pd.cut(df[ubr_col], bins=bins, labels=labels, include_lowest=True)
+    bucket_stats = df.groupby("bucket", observed=False).agg(
+        trades=("was_win", "count"),
+        win_rate=("was_win", "mean"),
+        avg_pnl=("pnl", "mean"),
+    ).round(2)
+    bucket_stats["win_rate"] = (bucket_stats["win_rate"] * 100).round(1)
+    bucket_stats["avg_pnl"] = bucket_stats["avg_pnl"].round(0)
+
+    # ── ROC-AUC ──
+    auc = None
+    try:
+        from sklearn.metrics import roc_auc_score
+        auc = round(roc_auc_score(df["was_win"], df[ubr_col]), 4)
+    except ImportError:
+        pass
+
+    # ── 极端阈值条件概率 ──
+    extreme_low = df[df[ubr_col] == 0.0]["was_win"].mean() if (df[ubr_col] == 0.0).any() else None
+    extreme_high = df[df[ubr_col] == 1.0]["was_win"].mean() if (df[ubr_col] == 1.0).any() else None
+
+    return {
+        "bucket_stats": bucket_stats,
+        "roc_auc": auc,
+        "extreme_low_win_rate": round(extreme_low * 100, 1) if extreme_low is not None else None,
+        "extreme_high_win_rate": round(extreme_high * 100, 1) if extreme_high is not None else None,
+        "n_valid": len(df),
+    }
+
+
+# ════════════════════════════════════════════════════════════
 #  8. Slippage Sensitivity Stress Test
 # ════════════════════════════════════════════════════════════
 
@@ -589,13 +710,16 @@ def slippage_stress(features_df: pd.DataFrame, baseline_final_value: float,
 
 def generate_report(yearly_df: pd.DataFrame, features_df: pd.DataFrame, mw_df: pd.DataFrame,
                     timing: dict = None, cross_attr: dict = None,
-                    holding: dict = None, slippage: dict = None):
+                    holding: dict = None, slippage: dict = None,
+                    predictivity: dict = None):
     """Generate Markdown diagnostic report."""
     lines = []
     lines.append("# Trade Diagnostics Report\n")
     lines.append(f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
-    lines.append(f"**Period**: 2014-01-02 ~ 2026-06-22\n")
-    lines.append(f"**Params**: ATR=15, Breakout=20, Stop=12, 1.5xATR, alpha=0, Mode A\n")
+    lines.append(f"**Period**: {CONFIG['backtest']['start_date']} ~ {END_DATE}\n")
+    lines.append(f"**Params**: ATR={BEST_PARAMS['atr_period']}, Breakout={BEST_PARAMS['breakout_period']}, "
+                 f"Stop={BEST_PARAMS['stop_period']}, {BEST_PARAMS['stop_atr_multiple']}xATR, "
+                 f"alpha={BEST_PARAMS['alpha']}, Mode A\n")
     lines.append(f"**Total trades**: {len(features_df)}\n")
     if not features_df.empty:
         lines.append(f"**Wins**: {features_df['was_win'].sum()} / **Losses**: {(~features_df['was_win']).sum()}\n")
@@ -733,6 +857,30 @@ def generate_report(yearly_df: pd.DataFrame, features_df: pd.DataFrame, mw_df: p
             for s in sc:
                 lines.append(f"| {s['label']} | {s['cost']:,.0f} | {s['net_pnl']:+,.0f} | {s['erosion_pct']:.2f}% |")
 
+    # UBR predictivity analysis
+    if predictivity:
+        lines.append("\n---\n## 7b. UBR (10 日上轨占比) 预测力分析\n")
+        lines.append(f"基于 **{predictivity['n_valid']}** 笔有效交易（{predictivity.get('ubr_col', 'ubr_20')} 字段）。\n")
+        bs = predictivity["bucket_stats"]
+        if bs is not None and not bs.empty:
+            lines.append("\n| UBR 区间 | 交易数 | 胜率 | 平均盈亏 |")
+            lines.append("|:--:|:--:|:--:|:--:|")
+            for idx, r in bs.iterrows():
+                lines.append(f"| {idx} | {int(r['trades'])} | {r['win_rate']:.1f}% | {r['avg_pnl']:+,.0f} |")
+        if predictivity.get("roc_auc") is not None:
+            lines.append(f"\n**ROC-AUC**: {predictivity['roc_auc']:.4f}\n")
+        if predictivity.get("extreme_low_win_rate") is not None:
+            lines.append(f"- UBR = 0（从未站上 10 日上轨）→ 入场胜率: **{predictivity['extreme_low_win_rate']:.1f}%**\n")
+        if predictivity.get("extreme_high_win_rate") is not None:
+            lines.append(f"- UBR = 1（天天站上 10 日上轨）→ 入场胜率: **{predictivity['extreme_high_win_rate']:.1f}%**\n")
+        if predictivity.get("roc_auc") is not None:
+            if predictivity["roc_auc"] >= 0.65:
+                lines.append("> **结论**: UBR 具有一定的预测力，可用于入场过滤或退出参数预设。\n")
+            elif predictivity["roc_auc"] >= 0.50:
+                lines.append("> **结论**: UBR 预测力弱于预期，可能与其他特征冗余或噪音较大。\n")
+            else:
+                lines.append("> **结论**: UBR 不具有预测力，不建议用作策略信号。\n")
+
     # Slippage stress
     if slippage:
         lines.append("\n---\n## 8. Slippage Sensitivity Stress Test\n")
@@ -769,8 +917,8 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # ── 一次全周期回测，复用 strat 派生年度/交易/终值 ──
-    print("\n[1/8] Running full-period backtest (2014-2026)...")
-    strat, _ = run_full_backtest("2014-01-02", "2026-06-22")
+    print("\n[1/8] Running full-period backtest ({} ~ {})...".format(CONFIG['backtest']['start_date'], END_DATE))
+    strat, _ = run_full_backtest(CONFIG["backtest"]["start_date"], END_DATE)
     if strat is None:
         print("  ERROR: Backtest failed!")
         sys.exit(1)
@@ -830,6 +978,18 @@ if __name__ == "__main__":
     if holding:
         print(f"  Avg holding: win={holding['avg_holding_win']}d / loss={holding['avg_holding_loss']}d")
 
+    # Phase 7b: UBR predictivity (run for each window)
+    print("\n[7b/8] UBR (10d upper band ratio) predictivity analysis...")
+    predictivity_results = {}
+    for N in UBR_WINDOWS:
+        col = f"ubr_{N}"
+        pa = predictivity_analysis(features_df, ubr_col=col)
+        if pa:
+            predictivity_results[col] = pa
+            auc_str = f" AUC={pa['roc_auc']:.4f}" if pa['roc_auc'] is not None else ""
+            print(f"  {col}: n={pa['n_valid']}, extreme_low_win={pa['extreme_low_win_rate']}%, "
+                  f"extreme_high_win={pa['extreme_high_win_rate']}%{auc_str}")
+
     # Phase 8: Slippage stress test (CAGR 从真实终值算)
     print("\n[8/8] Slippage sensitivity stress test...")
     slippage = slippage_stress(features_df, baseline_final_value=baseline_final_value,
@@ -839,9 +999,18 @@ if __name__ == "__main__":
             d_flag = " [DOWN]" if s["cagr_delta_pct"] < -2 else ""
             print(f"  {s['scenario']}: CAGR={s['cagr']:.2f}%{d_flag}")
 
-    # Generate report
+    # Generate report (include best UBR window predictivity)
+    # Use the best UBR window (the one with the highest AUC) for the report
+    best_ubr = None
+    if predictivity_results:
+        valid = {k: v for k, v in predictivity_results.items() if v["roc_auc"] is not None}
+        if valid:
+            best_ubr = max(valid.items(), key=lambda x: x[1]["roc_auc"])[1]
+            best_ubr["ubr_col"] = max(valid.items(), key=lambda x: x[1]["roc_auc"])[0]
+
     generate_report(yearly, features_df, mw_df, timing=timing,
-                    cross_attr=cross_attr, holding=holding, slippage=slippage)
+                    cross_attr=cross_attr, holding=holding, slippage=slippage,
+                    predictivity=best_ubr)
 
     print("\n" + "=" * 60)
     print("Done. Output in results/diagnostics/")
