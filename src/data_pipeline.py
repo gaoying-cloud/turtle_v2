@@ -221,14 +221,15 @@ def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataF
     price_cols = ["open", "high", "low", "close"]
     for col in price_cols:
         if col in df.columns:
-            df[col] = (df[col] * ratio_series).round(4)
+            # 使用 .values 避免 RangeIndex vs DatetimeIndex 索引错位导致全部 NaN
+            df[col] = (df[col].values * ratio_series.values).round(4)
             df[col] = df[col].clip(lower=0.01)
 
     df["pre_close"] = df["close"].shift(1)
     df.loc[df.index[0], "pre_close"] = None
 
     # 显式强制类型转换为 float64，防止 int 推断
-    df["adj_factor"] = adj_series.fillna(1.0).astype("float64")
+    df["adj_factor"] = adj_series.fillna(1.0).astype("float64").values
     return df
 
 def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
@@ -238,10 +239,11 @@ def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
 
     for i in range(1, len(df)):
         prev_close = df.loc[i - 1, "close"]
-        curr_pre = df.loc[i, "pre_close"]
-        if prev_close <= 0:
+        curr_close = df.loc[i, "close"]
+        if prev_close <= 0 or curr_close <= 0:
             continue
-        ratio = curr_pre / prev_close
+        # 实际涨跌幅 = close[t] / close[t-1]，跨跳空日也能检测
+        ratio = curr_close / prev_close
         if abs(ratio - 1) > SPLIT_DETECTION_THRESHOLD:
             events.append((i, ratio))
 
