@@ -1,0 +1,619 @@
+"""
+N字结构策略 — 纯 pandas/numpy 实现
+
+核心逻辑：
+  1. 滑动窗口扫描 N 字结构（A 低点 → D 中间高点 → B 更高低点）
+  2. 价格突破 B 点 + MA250 过滤 → C 点进场
+  3. D 点突破确认/止损/加仓管理
+
+策略参数（可在实例化时覆盖）：
+    window_size   : int   = 100   — 滑动窗口大小
+    atr_period    : int   = 25    — ATR 周期
+    stop_mult     : float = 2.0   — 初始止损 ATR 倍数
+    trail_mult    : float = 5.0   — 跟踪止损 ATR 倍数
+    add_step      : float = 2.0   — 加仓间隔（ATR 倍数）
+    max_units     : int   = 4     — 最大单位数
+    ma_trend      : int   = 250   — 趋势过滤均线周期
+    ma_confirm    : int   = 5     — 形态确认均线周期
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+# ════════════════════════════════════════════════════════════
+#  辅助计算
+# ════════════════════════════════════════════════════════════
+
+def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series,
+                period: int = 25) -> pd.Series:
+    """ATR — 指数平滑，与 turtle_core 一致。"""
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    n = len(tr)
+    if n < period:
+        return pd.Series(np.nan, index=tr.index, dtype=float)
+
+    alpha = 1.0 / period
+    vals = tr.values.astype(float)
+    out = np.full(n, np.nan)
+
+    first = 0
+    while first < n and np.isnan(vals[first]):
+        first += 1
+    if first == n:
+        return pd.Series(out, index=tr.index)
+
+    seed_end = first + period
+    if seed_end > n:
+        return pd.Series(out, index=tr.index)
+
+    seed = np.nanmean(vals[first:seed_end])
+    out[seed_end - 1] = seed
+
+    prev = seed
+    for i in range(seed_end, n):
+        cur = vals[i]
+        if np.isnan(cur):
+            out[i] = prev
+        else:
+            prev = (1 - alpha) * prev + alpha * cur
+            out[i] = prev
+
+    return pd.Series(out, index=tr.index)
+
+
+def compute_ma(close: pd.Series, period: int) -> pd.Series:
+    """简单移动平均。"""
+    return close.rolling(window=period, min_periods=period).mean()
+
+
+# ════════════════════════════════════════════════════════════
+#  N 字结构识别
+# ════════════════════════════════════════════════════════════
+
+@dataclass
+class NStructure:
+    """一个完整的 N 字结构。"""
+    a_idx: int         # A 点（第一个低点）在 df 中的索引
+    d_idx: int         # D 点（中间高点）索引
+    b_idx: int         # B 点（第二个低点）索引
+    a_price: float
+    d_price: float
+    b_price: float
+
+    def is_valid(self) -> bool:
+        """结构有效性：B > A（更高低点）。"""
+        return self.b_price > self.a_price
+
+
+def find_n_structure_in_window(df: pd.DataFrame, end_idx: int,
+                                window_size: int = 100) -> Optional[NStructure]:
+    """在 [end_idx - window_size, end_idx] 窗口内寻找 N 字结构。
+
+    关键防偷价规则：
+      - B 点必须在 end_idx 之前（至少 1 根 K 线的确认）
+      - 窗口不含 end_idx 的完整信息（只用已闭合的 K 线）
+
+    Returns
+    -------
+    NStructure or None
+        找到的有效结构；None 表示未找到。
+    """
+    # 窗口只包含已闭合的 K 线，不含当前 bar
+    start = max(0, end_idx - window_size)
+    window = df.iloc[start:end_idx]  # 不含 end_idx
+
+    if len(window) < 30:  # 最少需要 30 根 K 线
+        return None
+
+    # ── A：窗口内最低价 ──
+    a_local_idx = window['low'].idxmin()
+    a_idx = a_local_idx
+    a_price = window.loc[a_local_idx, 'low']
+
+    # ── D：A 之后的最高价 ──
+    after_a = window.loc[a_local_idx:]
+    d_local_idx = after_a['high'].idxmax()
+    d_idx = d_local_idx
+    d_price = after_a.loc[d_local_idx, 'high']
+
+    # D 必须在 A 之后至少 5 根 K 线
+    if d_idx - a_idx < 5:
+        return None
+
+    # ── B：D 之后的最低价 ──
+    after_d = after_a.loc[d_local_idx:]
+    b_local_idx = after_d['low'].idxmin()
+    b_idx = b_local_idx
+    b_price = after_d.loc[b_local_idx, 'low']
+
+    # B 必须在 D 之后至少 3 根 K 线
+    if b_idx - d_idx < 3:
+        return None
+
+    # B 必须在 end_idx 之前（至少 1 根 K 线的确认）
+    if b_idx >= end_idx - 1:
+        return None
+
+    ns = NStructure(
+        a_idx=a_idx, d_idx=d_idx, b_idx=b_idx,
+        a_price=a_price, d_price=d_price, b_price=b_price,
+    )
+
+    return ns if ns.is_valid() else None
+
+
+def ma5_confirm(df: pd.DataFrame, ns: NStructure,
+                current_idx: int) -> bool:
+    """MA5 辅助确认：B 点附近 MA5 已拐头向上（仅用已闭合 K 线）。
+
+    判断标准：
+      - B 点到当前 K 线之前，MA5 出现过拐头向上（MA5[t] > MA5[t-1]）
+
+    Parameters
+    ----------
+    current_idx : int
+        当前 K 线索引，用于限制不访问未来数据。
+    """
+    if 'ma5' not in df.columns:
+        return True  # 无 MA5 时不拦截
+
+    # 只检查 B 点到当前 K 线之前（最多 5 根），不访问未来
+    end = min(ns.b_idx + 5, current_idx - 1)  # 不含当前 K 线
+    for i in range(ns.b_idx, end + 1):
+        if i < 1:
+            continue
+        if df.loc[i, 'ma5'] > df.loc[i - 1, 'ma5']:
+            return True  # MA5 拐头向上
+
+    return False
+
+
+# ════════════════════════════════════════════════════════════
+#  交易记录
+# ════════════════════════════════════════════════════════════
+
+@dataclass
+class Trade:
+    """一笔完整交易的记录。"""
+    symbol: str
+    entry_idx: int
+    entry_price: float
+    exit_idx: int = -1
+    exit_price: float = 0.0
+    exit_reason: str = ""
+    units: int = 1
+    pnl: float = 0.0
+    a_price: float = 0.0
+    b_price: float = 0.0
+    d_price: float = 0.0
+
+
+# ════════════════════════════════════════════════════════════
+#  主策略
+# ════════════════════════════════════════════════════════════
+
+@dataclass
+class PositionState:
+    """单品种当前持仓状态。"""
+    active: bool = False
+    entry_idx: int = -1
+    entry_price: float = 0.0
+    stop_loss: float = 0.0
+    d_price: float = 0.0       # 本结构的 D 点
+    b_price: float = 0.0
+    a_price: float = 0.0
+    units: int = 1              # 当前加仓单位数
+    shares_per_unit: int = 0    # 每个单位的股数
+    highest_since_entry: float = 0.0
+    next_add_level: float = 0.0
+    d_broken: bool = False      # 是否已突破 D 点
+
+    # 再进场
+    reentry_eligible: bool = False   # 是否允许再进场
+    reentry_b_price: float = 0.0     # 再进场的 B 点参考价
+    reentry_d_price: float = 0.0     # 再进场的 D 点参考价
+    reentry_a_price: float = 0.0     # 再进场的 A 点参考价
+    reentry_count: int = 0           # 已再进场次数
+    trade: Optional[Trade] = None
+
+
+class NStructureStrategy:
+    """N 字结构交易策略。
+
+    对单个品种的 DataFrame 执行回测，返回交易记录和净值曲线。
+    """
+
+    def __init__(
+        self,
+    window_size: int = 100,
+    atr_period: int = 25,
+    stop_mult: float = 2.0,
+    trail_mult: float = 5.0,    # 跟踪止损 ATR 倍数
+    add_step: float = 2.0,      # 加仓间隔（ATR 倍数），每 2N 加仓一次
+    max_units: int = 4,         # 最大单位数：1 初始 + 3 次加仓
+    ma_trend: int = 250,
+    ma_confirm: int = 5,
+    use_ma5_confirm: bool = True,
+    initial_capital: float = 100000.0,
+    risk_per_trade: float = 0.01,
+    max_reentries: int = 0,     # 0=关闭, N=最多再进场N次
+    ):
+        self.window_size = window_size
+        self.atr_period = atr_period
+        self.stop_mult = stop_mult
+        self.trail_mult = trail_mult
+        self.add_step = add_step
+        self.max_units = max_units
+        self.ma_trend = ma_trend
+        self.ma_confirm = ma_confirm
+        self.use_ma5_confirm = use_ma5_confirm
+        self.initial_capital = initial_capital
+        self.risk_per_trade = risk_per_trade
+        self.max_reentries = max_reentries
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """预计算策略所需的全部指标。"""
+        result = df.copy()
+        result['atr'] = compute_atr(result['high'], result['low'],
+                                     result['close'], self.atr_period)
+        result['ma250'] = compute_ma(result['close'], self.ma_trend)
+        result['ma5'] = compute_ma(result['close'], self.ma_confirm)
+        return result
+
+    def _calc_shares(self, equity: float, price: float, atr: float) -> int:
+        """海龟风格仓位计算。
+
+        risk_amount = equity × risk_per_trade
+        per_share_risk = stop_mult × ATR
+        shares = risk_amount / per_share_risk，舍入到 100 的倍数
+        """
+        risk_amount = equity * self.risk_per_trade
+        per_share_risk = self.stop_mult * atr
+        if per_share_risk <= 0:
+            return 0
+        theoretical = risk_amount / per_share_risk
+        shares = int(theoretical / 100) * 100
+        return max(100, shares)
+
+    def run(self, df: pd.DataFrame, symbol: str = "",
+            verbose: bool = True) -> Tuple[pd.DataFrame, list[Trade]]:
+        """对单品种执行 N 字结构策略回测。
+
+        进场规则（防偷价）：
+          - 用 bar i-1 的收盘价判断信号是否触发
+          - 在 bar i 的开盘价执行进场（次日开盘进场）
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            含 date, open, high, low, close, volume 列，按日期升序。
+        symbol : str
+            品种代码（仅用于日志）。
+        verbose : bool
+            是否打印交易明细。
+
+        Returns
+        -------
+        (df_result, trades)
+            df_result 带了信号列；trades 为 Trade 列表。
+        """
+        df = self.compute_indicators(df)
+        trades: list[Trade] = []
+        pos = PositionState()
+
+        n = len(df)
+
+        for i in range(self.window_size, n):
+            # ── 持仓管理 ──
+            if pos.active:
+                self._manage_position(df, i, pos, trades, verbose)
+                # 平仓后不立即再进场，等下一 bar
+                continue
+
+            # ── 再进场检查（仅限刚平仓后的第一个 bar） ──
+            if pos.reentry_eligible:
+                self._execute_reentry(df, i, pos, trades, symbol, verbose)
+                if pos.active:
+                    pos.reentry_eligible = False
+                    continue
+                # 再进场失败，清除标记
+                pos.reentry_eligible = False
+
+            # ── 正常进场扫描 ──
+            self._check_entry_from_prev(df, i, pos, trades, symbol, verbose)
+
+        return df, trades
+
+    def _check_entry_from_prev(self, df: pd.DataFrame, i: int,
+                                pos: PositionState, trades: list[Trade],
+                                symbol: str, verbose: bool):
+        """用 bar i-1 的数据检查信号，在 bar i 的开盘进场。
+
+        设计原因：实盘中无法在收盘价成交，信号触发后最早在下个开盘进场。
+        """
+        if i < 1:
+            return
+
+        # 用昨日收盘数据检测信号
+        prev = i - 1
+
+        # 1. 扫描 N 字结构（数据截止到 prev，不含当前 bar）
+        ns = find_n_structure_in_window(df, prev, self.window_size)
+        if ns is None:
+            return
+
+        # 2. MA5 辅助确认（只用已闭合 K 线）
+        if self.use_ma5_confirm:
+            if not ma5_confirm(df, ns, prev):
+                return
+
+        # 3. 进场条件：昨日收盘 > B 且 昨日收盘 > MA250
+        prev_close = df.loc[prev, 'close']
+        prev_ma250 = df.loc[prev, 'ma250']
+
+        if pd.isna(prev_ma250):
+            return
+
+        if prev_close <= ns.b_price or prev_close <= prev_ma250:
+            return
+
+        # ── 信号触发 → 今日开盘进场 ──
+        entry_price = df.loc[i, 'open']
+        atr = df.loc[prev, 'atr']
+        if pd.isna(atr) or atr <= 0:
+            return
+
+        # 初始止损
+        stop = min(ns.b_price - self.stop_mult * atr, ns.b_price * 0.95)
+
+        # 仓位计算
+        shares_per_unit = self._calc_shares(self.initial_capital, entry_price, atr)
+        if shares_per_unit <= 0:
+            return
+
+        pos.active = True
+        pos.entry_idx = i
+        pos.entry_price = entry_price
+        pos.stop_loss = stop
+        pos.d_price = ns.d_price
+        pos.b_price = ns.b_price
+        pos.a_price = ns.a_price
+        pos.units = 1
+        pos.shares_per_unit = shares_per_unit
+        pos.highest_since_entry = entry_price
+        pos.next_add_level = entry_price + self.add_step * atr
+        pos.d_broken = entry_price > ns.d_price
+        pos.trade = Trade(
+            symbol=symbol,
+            entry_idx=i,
+            entry_price=entry_price,
+            units=1,
+            a_price=ns.a_price,
+            b_price=ns.b_price,
+            d_price=ns.d_price,
+        )
+
+        if verbose:
+            print(f"  🟢 进场 [{symbol}]  idx={i}  "
+                  f"价格={entry_price:.3f}  B={ns.b_price:.3f}  "
+                  f"D={ns.d_price:.3f}  A={ns.a_price:.3f}  "
+                  f"MA250={prev_ma250:.3f}  止损={stop:.3f}  "
+                  f"股数={shares_per_unit}")
+
+    def _manage_position(self, df: pd.DataFrame, i: int,
+                         pos: PositionState, trades: list[Trade],
+                         verbose: bool):
+        """管理已有持仓：止损 / D 点突破 / 加仓 / 跟踪止损。"""
+        low = df.loc[i, 'low']
+        high = df.loc[i, 'high']
+        close = df.loc[i, 'close']
+
+        # 更新最高价
+        if close > pos.highest_since_entry:
+            pos.highest_since_entry = close
+
+        total_shares = pos.units * pos.shares_per_unit
+
+        # ── 1. 止损检查（区分 初始止损 / 跟踪止损） ──
+        if low <= pos.stop_loss:
+            exit_price = min(close, pos.stop_loss)
+            pos.trade.exit_idx = i
+            pos.trade.exit_price = exit_price
+            pos.trade.exit_reason = "跟踪止损" if pos.d_broken else "初始止损"
+            pos.trade.pnl = (exit_price - pos.entry_price) * total_shares
+            pos.trade.units = pos.units
+            trades.append(pos.trade)
+            if verbose:
+                print(f"  🔴 {pos.trade.exit_reason} [{i}]  价格={exit_price:.3f}  止损={pos.stop_loss:.3f}  "
+                      f"盈亏={pos.trade.pnl:.0f}")
+            pos.active = False
+            self._setup_reentry(pos)
+            return
+
+        # ── 2. D 点突破判断 ──
+        if not pos.d_broken:
+            if close > pos.d_price:
+                pos.d_broken = True
+                atr_val = df.loc[i, 'atr']
+                # 止损移到 D 点附近
+                if not pd.isna(atr_val) and atr_val > 0:
+                    pos.stop_loss = min(
+                        pos.d_price - self.stop_mult * atr_val,
+                        pos.b_price * 0.95
+                    )
+                    # 突破 D 点 → 立即加仓 1 个单位
+                    if pos.units < self.max_units:
+                        pos.units += 1
+                        pos.next_add_level = (pos.entry_price
+                                              + pos.units * self.add_step * atr_val)
+                        if verbose:
+                            print(f"  ➕ D点突破加仓 [{i}]  价格={close:.3f}  "
+                                  f"单位={pos.units}/{self.max_units}")
+                if verbose:
+                    print(f"  🟡 突破 D [{i}]  价格={close:.3f}  D={pos.d_price:.3f}  "
+                          f"止损调整至 {pos.stop_loss:.3f}")
+            else:
+                # ① 收盘价跌破 B 点 → N字结构失效，立即平仓
+                if close < pos.b_price:
+                    pos.trade.exit_idx = i
+                    pos.trade.exit_price = close
+                    pos.trade.exit_reason = "B点结构失效"
+                    pos.trade.pnl = (close - pos.entry_price) * total_shares
+                    pos.trade.units = pos.units
+                    trades.append(pos.trade)
+                    if verbose:
+                        print(f"  🔴 B 点结构失效 [{i}]  价格={close:.3f}  "
+                              f"B={pos.b_price:.3f}  盈亏={pos.trade.pnl:.0f}")
+                    pos.active = False
+                    self._setup_reentry(pos)
+                    return
+                # ② 超过 5 根 K 线未突破 D 点 → 超时平仓
+                bars_since_entry = i - pos.entry_idx
+                if bars_since_entry > 5:
+                    pos.trade.exit_idx = i
+                    pos.trade.exit_price = close
+                    pos.trade.exit_reason = "D点突破失败"
+                    pos.trade.pnl = (close - pos.entry_price) * total_shares
+                    pos.trade.units = pos.units
+                    trades.append(pos.trade)
+                    if verbose:
+                        print(f"  🔴 D 突破失败 [{i}]  价格={close:.3f}  "
+                              f"D={pos.d_price:.3f}  盈亏={pos.trade.pnl:.0f}")
+                    pos.active = False
+                    self._setup_reentry(pos)
+                    return
+            return
+
+        # ── 3. 已突破 D：跟踪止损 + 加仓 ──
+        atr = df.loc[i, 'atr']
+        if pd.isna(atr) or atr <= 0:
+            return
+
+        new_stop = high - self.trail_mult * atr
+        pos.stop_loss = max(pos.stop_loss, new_stop)
+
+        # 加仓：每 2N 加一个单位
+        if pos.units < self.max_units and close >= pos.next_add_level:
+            pos.units += 1
+            pos.next_add_level = pos.entry_price + pos.units * self.add_step * atr
+            if verbose:
+                print(f"  ➕ 加仓 [{i}]  价格={close:.3f}  "
+                      f"单位={pos.units}/{self.max_units}  "
+                      f"股数={pos.units * pos.shares_per_unit}")
+
+    def _setup_reentry(self, pos: PositionState):
+        """在平仓时保存 N 字结构信息，允许再进场。"""
+        if self.max_reentries <= 0:
+            return
+        if pos.reentry_count >= self.max_reentries:
+            return
+        pos.reentry_eligible = True
+        pos.reentry_b_price = pos.b_price
+        pos.reentry_d_price = pos.d_price
+        pos.reentry_a_price = pos.a_price
+        pos.reentry_count += 1
+
+    def _execute_reentry(self, df: pd.DataFrame, i: int,
+                          pos: PositionState, trades: list[Trade],
+                          symbol: str, verbose: bool):
+        """在平仓后的下一 bar 执行再进场（如果条件满足）。"""
+        if i < 1:
+            pos.reentry_eligible = False
+            return
+
+        prev = i - 1
+        prev_close = df.loc[prev, 'close']
+        prev_ma250 = df.loc[prev, 'ma250']
+
+        if pd.isna(prev_ma250):
+            pos.reentry_eligible = False
+            return
+
+        # 条件：价格仍在 B 点之上 且 仍在 MA250 之上
+        if prev_close <= pos.reentry_b_price or prev_close <= prev_ma250:
+            pos.reentry_eligible = False
+            return
+
+        # 进场
+        entry_price = df.loc[i, 'open']
+        atr = df.loc[prev, 'atr']
+        if pd.isna(atr) or atr <= 0:
+            pos.reentry_eligible = False
+            return
+
+        stop = min(pos.reentry_b_price - self.stop_mult * atr,
+                   pos.reentry_b_price * 0.95)
+
+        shares_per_unit = self._calc_shares(self.initial_capital, entry_price, atr)
+        if shares_per_unit <= 0:
+            pos.reentry_eligible = False
+            return
+
+        # 重置持仓状态（保留再进场计数器）
+        pos.active = True
+        pos.entry_idx = i
+        pos.entry_price = entry_price
+        pos.stop_loss = stop
+        pos.d_price = pos.reentry_d_price
+        pos.b_price = pos.reentry_b_price
+        pos.a_price = pos.reentry_a_price
+        pos.units = 1
+        pos.shares_per_unit = shares_per_unit
+        pos.highest_since_entry = entry_price
+        pos.next_add_level = entry_price + self.add_step * atr
+        pos.d_broken = entry_price > pos.reentry_d_price
+        pos.trade = Trade(
+            symbol=symbol,
+            entry_idx=i,
+            entry_price=entry_price,
+            units=1,
+            a_price=pos.reentry_a_price,
+            b_price=pos.reentry_b_price,
+            d_price=pos.reentry_d_price,
+        )
+
+        if verbose:
+            print(f"  🔄 再进场 [{symbol}]  idx={i}  "
+                  f"价格={entry_price:.3f}  B={pos.reentry_b_price:.3f}  "
+                  f"D={pos.reentry_d_price:.3f}  "
+                  f"MA250={prev_ma250:.3f}  止损={stop:.3f}  "
+                  f"第{pos.reentry_count}次")
+
+    def run_on_multi(self, dfs: dict[str, pd.DataFrame],
+                     verbose: bool = True) -> dict[str, list[Trade]]:
+        """对多个品种执行回测。
+
+        Parameters
+        ----------
+        dfs : dict[str, pd.DataFrame]
+            品种代码 → DataFrame 的映射。
+
+        Returns
+        -------
+        dict[str, list[Trade]]
+            品种代码 → 交易记录列表。
+        """
+        results = {}
+        for symbol, df in dfs.items():
+            if verbose:
+                print(f"\n{'='*60}")
+                print(f"📊 {symbol}")
+                print(f"{'='*60}")
+            _, trades = self.run(df, symbol=symbol, verbose=verbose)
+            results[symbol] = trades
+        return results
