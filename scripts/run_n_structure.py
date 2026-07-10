@@ -134,12 +134,13 @@ def compute_metrics(trades: list, initial_capital: float = 100000.0,
 
 
 def print_summary(all_trades: dict[str, list], date_ranges: dict[str, float],
-                  verbose: bool = False):
+                  verbose: bool = False, capital_per_symbol: float = 100000.0):
     """打印汇总表格。"""
     rows = []
     for symbol, trades in all_trades.items():
         total_years = date_ranges.get(symbol, 12.5)
-        m = compute_metrics(trades, total_years=total_years)
+        m = compute_metrics(trades, initial_capital=capital_per_symbol,
+                            total_years=total_years)
         rows.append({
             "品种": symbol,
             "交易": m["总交易"],
@@ -167,16 +168,17 @@ def print_summary(all_trades: dict[str, list], date_ranges: dict[str, float],
         print(f"{r['品种']:<12} {r['交易']:>5} {r['胜率']:>6} {r['总盈亏']:>10} {r['最大回撤']:>8} {r['盈亏比']:>6} {r['夏普']:>6} {r['CAGR']:>8}")
     print(sep)
 
-    # 汇总（每个品种独立本金，合计仅展示平均值）
+    # 汇总（每品种用独立本金）
     avg_cagr = np.mean([
-        compute_metrics(trades, total_years=date_ranges.get(sym, 12.5))["CAGR"]
+        compute_metrics(trades, initial_capital=capital_per_symbol,
+                        total_years=date_ranges.get(sym, 12.5))["CAGR"]
         for sym, trades in all_trades.items() if trades
     ])
     total_trades = sum(len(t) for t in all_trades.values())
     print(f"\n📊  合计: {total_trades} 笔交易  |  "
           f"品种数: {len(all_trades)}  |  "
           f"平均 CAGR: {avg_cagr:.1%}  |  "
-          f"全部盈利: {'✅' if all(compute_metrics(t, total_years=date_ranges.get(sym, 12.5))['总盈亏'] > 0 for sym, t in all_trades.items() if t) else '❌'}")
+          f"全部盈利: {'✅' if all(compute_metrics(t, initial_capital=capital_per_symbol, total_years=date_ranges.get(sym, 12.5))['总盈亏'] > 0 for sym, t in all_trades.items() if t) else '❌'}")
     print()
 
     if verbose:
@@ -244,6 +246,7 @@ def main():
         max_reentries=args.reentries,
         use_ma5_confirm=not args.no_ma5,
         ma_trend=0 if args.no_ma_trend else 250,
+        num_symbols=len(args.symbols),
     )
 
     # 逐个品种跑
@@ -266,7 +269,9 @@ def main():
         print(f"    → {len(trades)} 笔交易")
 
     # 输出汇总
-    print_summary(all_trades, date_ranges, verbose=args.verbose)
+    cap_per_sym = strategy.capital_per_symbol
+    print_summary(all_trades, date_ranges, verbose=args.verbose,
+                  capital_per_symbol=cap_per_sym)
 
     # ── 与成功标准对比 ──
     print("=" * 60)
@@ -279,7 +284,8 @@ def main():
         trades = all_trades[symbol]
         if not trades:
             continue
-        m = compute_metrics(trades, total_years=date_ranges.get(symbol, 12.5))
+        m = compute_metrics(trades, initial_capital=cap_per_sym,
+                            total_years=date_ranges.get(symbol, 12.5))
         if m["总盈亏"] <= 0:
             all_ok = False
             print(f"  ❌ {symbol}: 总收益 {m['总盈亏']:+.0f} ≤ 0")
@@ -288,12 +294,14 @@ def main():
         ("总收益 > 0（全部品种）", all_ok, "全部盈利" if all_ok else "有亏损品种"),
         ("总交易笔数 ≥ 20", sum(len(t) for t in all_trades.values()) >= 20,
          f"{sum(len(t) for t in all_trades.values())}"),
-        ("平均胜率 > 25%", np.mean([compute_metrics(t, total_years=date_ranges.get(sym, 12.5))["胜率"]
+        ("平均胜率 > 25%", np.mean([compute_metrics(t, initial_capital=cap_per_sym,
+         total_years=date_ranges.get(sym, 12.5))["胜率"]
          for sym, t in all_trades.items() if t]) > 0.25,
-         f"{np.mean([compute_metrics(t)['胜率'] for t in all_trades.values() if t]):.1%}"),
-        ("平均最大回撤 < 30%", np.mean([compute_metrics(t, total_years=date_ranges.get(sym, 12.5))["最大回撤"]
+         f"{np.mean([compute_metrics(t, initial_capital=cap_per_sym)['胜率'] for t in all_trades.values() if t]):.1%}"),
+        ("平均最大回撤 < 30%", np.mean([compute_metrics(t, initial_capital=cap_per_sym,
+         total_years=date_ranges.get(sym, 12.5))["最大回撤"]
          for sym, t in all_trades.items() if t]) < 0.30,
-         f"{np.mean([compute_metrics(t)['最大回撤'] for t in all_trades.values() if t]):.1%}"),
+         f"{np.mean([compute_metrics(t, initial_capital=cap_per_sym)['最大回撤'] for t in all_trades.values() if t]):.1%}"),
     ]
 
     passed = 0
@@ -311,10 +319,11 @@ def main():
         print("=" * 60)
         print("  🔬 诊断分析：为什么抓不住趋势？")
         print("=" * 60)
-        diagnose_trades(all_trades, date_ranges)
+        diagnose_trades(all_trades, date_ranges, capital_per_symbol=cap_per_sym)
 
 
-def diagnose_trades(all_trades: dict[str, list], date_ranges: dict[str, float]):
+def diagnose_trades(all_trades: dict[str, list], date_ranges: dict[str, float],
+                    capital_per_symbol: float = 100000.0):
     """诊断退出原因分布和持仓特征。"""
     # 按退出原因分类
     by_reason: dict[str, list] = {}
@@ -338,7 +347,8 @@ def diagnose_trades(all_trades: dict[str, list], date_ranges: dict[str, float]):
         pnls = np.array([t.pnl for t in trades])
         wins = pnls[pnls > 0]
         total_years = np.mean([getattr(t, '_years', 12.5) for t in trades])
-        m = compute_metrics(trades, total_years=total_years)
+        m = compute_metrics(trades, initial_capital=capital_per_symbol,
+                            total_years=total_years)
 
         avg_hold = np.mean([max(0, t.exit_idx - t.entry_idx) for t in trades])
         print(f"{reason:<18} {len(trades):>5} {m['胜率']:>7.1%} "

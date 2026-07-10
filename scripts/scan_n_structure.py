@@ -112,6 +112,8 @@ BASELINE = dict(
     add_step=2.0,
     max_units=4,
     use_ma5_confirm=True,
+    num_symbols=6,
+)
 )
 
 # ── 各参数扫描范围 ──

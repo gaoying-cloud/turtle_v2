@@ -252,6 +252,7 @@ class NStructureStrategy:
     initial_capital: float = 100000.0,
     risk_per_trade: float = 0.01,
     max_reentries: int = 0,     # 0=关闭, N=最多再进场N次
+    num_symbols: int = 6,       # 品种数，用于资金分配
     ):
         self.window_size = window_size
         self.atr_period = atr_period
@@ -265,6 +266,7 @@ class NStructureStrategy:
         self.initial_capital = initial_capital
         self.risk_per_trade = risk_per_trade
         self.max_reentries = max_reentries
+        self.capital_per_symbol = initial_capital / max(1, num_symbols)
 
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """预计算策略所需的全部指标。"""
@@ -385,7 +387,7 @@ class NStructureStrategy:
         stop = min(ns.b_price - self.stop_mult * atr, ns.b_price * 0.95)
 
         # 仓位计算
-        shares_per_unit = self._calc_shares(self.initial_capital, entry_price, atr)
+        shares_per_unit = self._calc_shares(self.capital_per_symbol, entry_price, atr)
         if shares_per_unit <= 0:
             return
 
@@ -412,10 +414,11 @@ class NStructureStrategy:
         )
 
         if verbose:
+            ma_label = f"MA{self.ma_trend}={prev_ma:.3f}" if self.ma_trend > 0 else "无趋势过滤"
             print(f"  🟢 进场 [{symbol}]  idx={i}  "
                   f"价格={entry_price:.3f}  B={ns.b_price:.3f}  "
                   f"D={ns.d_price:.3f}  A={ns.a_price:.3f}  "
-                  f"MA250={prev_ma250:.3f}  止损={stop:.3f}  "
+                  f"{ma_label}  止损={stop:.3f}  "
                   f"股数={shares_per_unit}")
 
     def _manage_position(self, df: pd.DataFrame, i: int,
@@ -564,7 +567,7 @@ class NStructureStrategy:
         stop = min(pos.reentry_b_price - self.stop_mult * atr,
                    pos.reentry_b_price * 0.95)
 
-        shares_per_unit = self._calc_shares(self.initial_capital, entry_price, atr)
+        shares_per_unit = self._calc_shares(self.capital_per_symbol, entry_price, atr)
         if shares_per_unit <= 0:
             pos.reentry_eligible = False
             return
@@ -593,10 +596,11 @@ class NStructureStrategy:
         )
 
         if verbose:
+            ma_label = f"MA{self.ma_trend}={prev_ma:.3f}" if self.ma_trend > 0 else "无趋势过滤"
             print(f"  🔄 再进场 [{symbol}]  idx={i}  "
                   f"价格={entry_price:.3f}  B={pos.reentry_b_price:.3f}  "
                   f"D={pos.reentry_d_price:.3f}  "
-                  f"MA250={prev_ma250:.3f}  止损={stop:.3f}  "
+                  f"{ma_label}  止损={stop:.3f}  "
                   f"第{pos.reentry_count}次")
 
     def run_on_multi(self, dfs: dict[str, pd.DataFrame],
