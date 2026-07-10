@@ -23,10 +23,13 @@ import numpy as np
 import pandas as pd
 
 import warnings
-# Windows GBK 编码兼容：处理第三方库中的 emoji 字符
-import io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+# Windows GBK 编码兼容：忽略 Unicode 警告（emoji 字符等）
 warnings.filterwarnings("ignore", category=UnicodeWarning)
+
+# stdout 重编码仅在直接运行脚本时执行，避免 import 时劫持 pytest 的 capture 流
+if __name__.startswith("__main__"):
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -37,6 +40,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("cross_validate")
+
+
+class DataError(Exception):
+    """本地缓存数据损坏（空/NaN 价格），交叉校验前拦截。"""
 
 # ── 品种列表（从配置动态读取） ──
 import yaml
@@ -73,6 +80,7 @@ class Config:
     critical_multiplier: float = 3.0     # 单日差异 > N×阈值 → 直接 CRITICAL
     tickflow_max_count: int = 2000       # TickFlow 一次拉取最大条数
     lookback_days: int = 60              # 默认校验最近 N 个交易日
+    close_nan_fail_ratio: float = 0.10   # close NaN 占比 > 10% → DataError
 
     # tickflow 时区参数
     tf_utc_hour: int = 16
@@ -155,6 +163,17 @@ def load_tushare_parquet(symbol: str) -> pd.DataFrame:
             raise FileNotFoundError(f"Parquet 缓存不存在: 已尝试 {symbol}.*.parquet")
 
     df = pd.read_parquet(path)
+    if df.empty:
+        raise DataError(f"{path.name} 缓存为空")
+
+    # 数据有效性校验：close 全 NaN 或大面积 NaN 说明前复权流程损坏
+    close_nan_ratio = float(df["close"].isna().mean()) if "close" in df.columns else 1.0
+    if close_nan_ratio > cfg.close_nan_fail_ratio:
+        raise DataError(
+            f"{path.name} close 列 NaN 占比 {close_nan_ratio*100:.1f}% "
+            f"> 阈值 {cfg.close_nan_fail_ratio*100:.0f}%（数据损坏）"
+        )
+
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
 
@@ -211,14 +230,33 @@ def compare_return_based(tf_df: pd.DataFrame, ts_df: pd.DataFrame,
     )
 
     diffs = []
-    for _, row in merged.iterrows():
-        if pd.isna(row["ret_diff"]):
+    for idx, row in merged.iterrows():
+        # 首行无前日收益率，ret_diff 为 NaN 是正常的，跳过
+        if idx == 0:
             continue
 
         ret_diff = row["ret_diff"]
         vol_diff_pct = row["vol_diff_pct"]
         reasons = []
         level = ValidationLevel.OK
+
+        # 非首行 ret_diff 仍为 NaN → 价格缺失，标记 ERROR 而非静默跳过
+        if pd.isna(ret_diff):
+            diffs.append(DayDiff(
+                date=row["date"].date(),
+                symbol=symbol,
+                close_tf=row["tf_close"],
+                close_ts=row["ts_close"],
+                ret_tf=row["tf_ret"],
+                ret_ts=row["ts_ret"],
+                ret_diff_abs=0.0,
+                vol_tf=row["tf_vol"],
+                vol_ts=row["ts_vol"],
+                vol_diff_pct=0.0,
+                level=ValidationLevel.ERROR.value,
+                reason="价格缺失(NaN)导致收益率无法计算",
+            ))
+            continue
 
         if ret_diff > cfg.return_diff_error:
             level = ValidationLevel.ERROR
@@ -367,6 +405,14 @@ def validate_symbol(symbol: str) -> Optional[ValidationReport]:
             symbol=symbol, total_days=0, ok_days=0, warn_days=0,
             error_days=0, critical_days=1,
             worst_level="critical", worst_detail=str(e),
+            block_all_trading=True,
+        )
+    except DataError as e:
+        log.error("Tushare 缓存数据损坏 (%s): %s", symbol, str(e)[:200])
+        return ValidationReport(
+            symbol=symbol, total_days=0, ok_days=0, warn_days=0,
+            error_days=0, critical_days=1,
+            worst_level="critical", worst_detail=str(e)[:150],
             block_all_trading=True,
         )
 
