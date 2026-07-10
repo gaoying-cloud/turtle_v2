@@ -85,12 +85,15 @@ def _create_tushare_pro() -> Any:
 def _fetch_from_tushare(
     code: str, start_date: str, end_date: str, max_retries: int = 3
 ) -> pd.DataFrame:
-    """从 Tushare fund_daily 接口拉取数据，含自动分页与重试。"""
+    """从 Tushare fund_daily 接口拉取数据，含自动分页与重试。
+
+    每次重试从 offset=0 重新开始，避免翻页中途失败后残留 offset 导致数据错位。
+    """
     pro = _create_tushare_pro()
-    all_dfs = []
-    current_offset = 0
 
     for attempt in range(1, max_retries + 1):
+        all_dfs: List[pd.DataFrame] = []
+        current_offset = 0
         try:
             df = pro.fund_daily(
                 ts_code=code, start_date=start_date, end_date=end_date,
@@ -113,9 +116,19 @@ def _fetch_from_tushare(
                     all_dfs.append(df)
                     current_offset += len(df)
                 else:
+                    if df is None:
+                        logger.warning(
+                            "[%s] 分页中断：第 %d 页返回 None，已获取 %d 条（将重试）",
+                            code, len(all_dfs) + 1, current_offset,
+                        )
                     break
 
-            break
+            if not all_dfs:
+                return pd.DataFrame()
+
+            result = pd.concat(all_dfs, ignore_index=True)
+            logger.info("[%s] 拉取 %s~%s 共 %d 条", code, start_date, end_date, len(result))
+            return result
 
         except Exception as e:
             logger.warning("[%s] 第 %d/%d 次请求失败: %s", code, attempt, max_retries, e)
@@ -123,14 +136,8 @@ def _fetch_from_tushare(
                 sleep(attempt * 2)
             else:
                 logger.error("[%s] 已耗尽重试次数，跳过", code)
-                return pd.DataFrame()
 
-    if not all_dfs:
-        return pd.DataFrame()
-
-    result = pd.concat(all_dfs, ignore_index=True)
-    logger.info("[%s] 拉取 %s~%s 共 %d 条", code, start_date, end_date, len(result))
-    return result
+    return pd.DataFrame()
 
 # ════════════════════════════════════════════════════════════
 # 数据清洗与标准化 (抽取公共逻辑)
@@ -350,7 +357,7 @@ def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
         df["adj_factor"] = detect_series
     return df
 
-def _readjust_merged(df: pd.DataFrame, code: str) -> pd.DataFrame:
+def _readjust_merged(df: pd.DataFrame, code: str) -> Optional[pd.DataFrame]:
     """
     对增量合并后的全量序列重做前复权。
 
@@ -362,6 +369,10 @@ def _readjust_merged(df: pd.DataFrame, code: str) -> pd.DataFrame:
     基准迁移。因此本函数重新全量拉取原始日线，对整条序列统一走 _adjust_forward，
     保证历史段与新块在同一最新基准上。代价是增量更新时多一次全量 API 请求，
     但增量更新不频繁，正确性优先。
+
+    返回值：
+        - 成功：重做前复权后的 DataFrame（全新对象）
+        - 失败：None（原始日线拉取失败 或 复权校验失败），调用方应跳过落盘
     """
     if df.empty:
         return df
@@ -373,13 +384,13 @@ def _readjust_merged(df: pd.DataFrame, code: str) -> pd.DataFrame:
     raw = _fetch_from_tushare(code, earliest, latest)
     if raw.empty:
         logger.warning("[%s] 全量重做跳过：原始日线拉取失败，保留合并结果", code)
-        return df
+        return None
 
     cleaned = _clean_and_standardize_etf(raw)
     readjusted = _adjust_forward(cleaned, code)
     if readjusted.empty:
         logger.warning("[%s] 全量重做跳过：重做复权失败，保留合并结果", code)
-        return df
+        return None
 
     logger.info("[%s] 全量重做前复权完成：%d 行", code, len(readjusted))
     return readjusted
@@ -391,6 +402,26 @@ def _parquet_path(code: str) -> Path:
     """获取指定品种的 Parquet 缓存路径。"""
     return DATA_DIR / f"{code}.parquet"
 
+def _merge_into_cache(path: Path, df: pd.DataFrame) -> pd.DataFrame:
+    """将新数据合并到现有 Parquet 缓存并落盘，返回合并后的完整 DataFrame。
+
+    读取现有缓存 → concat 新数据 → 按 date 排序 → 去重(keep="last") → 写入。
+    ETF 和指数路径共用，消除重复实现。
+    """
+    if path.exists():
+        existing = pd.read_parquet(path)
+        if not existing.empty:
+            df = pd.concat([existing, df], ignore_index=True)
+
+    if not df.empty:
+        df.sort_values("date", inplace=True)
+        df.drop_duplicates(subset="date", keep="last", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False, compression="snappy")
+    return df
+
 def _read_local_cache(code: str) -> pd.DataFrame:
     """读取本地 Parquet 缓存，不存在则返回空 DataFrame。"""
     path = _parquet_path(code)
@@ -399,25 +430,10 @@ def _read_local_cache(code: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 def _save_to_parquet(df: pd.DataFrame, code: str):
-    """将 DataFrame 写入 Parquet 文件。"""
+    """将 DataFrame 写入 Parquet 文件（委托 _merge_into_cache 去重合并）。"""
     path = _parquet_path(code)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not df.empty:
-        if path.exists():
-            existing = pd.read_parquet(path)
-            if not existing.empty:
-                min_date = df["date"].min()
-                max_date = df["date"].max()
-                existing = existing[(existing["date"] < min_date) | (existing["date"] > max_date)]
-                df = pd.concat([existing, df], ignore_index=True)
-
-        df.sort_values("date", inplace=True)
-        df.drop_duplicates(subset="date", keep="last", inplace=True)
-        df.reset_index(drop=True, inplace=True)
-
-    df.to_parquet(path, index=False, compression="snappy")
-    logger.info("[%s] 缓存已写入: %s (%d 行)", code, path, len(df))
+    merged = _merge_into_cache(path, df)
+    logger.info("[%s] 缓存已写入: %s (%d 行)", code, path, len(merged))
 
 # ════════════════════════════════════════════════════════════
 # 核心拉取逻辑
@@ -488,11 +504,17 @@ def fetch_single(
 
     # 增量路径：新块（新因子基准）已与历史缓存（旧因子基准）合并，
     # 需对全量序列重做前复权基准对齐，消除拼接处断层。
+    # _readjust_merged 失败返回 None → 跳过落盘，保留旧缓存。
     if is_incremental:
         merged = _read_local_cache(code)
         if not merged.empty:
-            merged = _readjust_merged(merged, code)
-            _save_to_parquet(merged, code)
+            readjusted = _readjust_merged(merged, code)
+            if readjusted is not None:
+                _save_to_parquet(readjusted, code)
+            else:
+                logger.error(
+                    "[%s] 增量全量重做前复权失败，跳过写入保留旧缓存数据", code
+                )
 
     result = _read_local_cache(code)
     if not result.empty:
@@ -564,8 +586,14 @@ def _normalize_date(d) -> str:
         return d.replace("-", "")
     if isinstance(d, (datetime, date)):
         return d.strftime("%Y%m%d")
-    # 兜底：尝试转字符串后去分隔符（如 Timestamp）
-    return str(d).replace("-", "")[:8]
+    # 兜底：用 pd.Timestamp 解析 + 校验结果格式
+    try:
+        result = pd.Timestamp(d).strftime("%Y%m%d")
+    except (ValueError, TypeError):
+        raise ValueError(f"无法归一化日期: {d!r}") from None
+    if len(result) != 8 or not result.isdigit():
+        raise ValueError(f"日期归一化结果异常: {d!r} → {result!r}")
+    return result
 
 def _fetch_index_from_tushare(
     code: str, start_date: str, end_date: str, max_retries: int = 3
@@ -644,18 +672,11 @@ def fetch_index_daily(
     if df.empty:
         return _read_existing_index(code, start_ts, end_ts)
 
-    if cache_path.exists():
-        existing = pd.read_parquet(cache_path)
-        if not existing.empty:
-            df = pd.concat([existing, df], ignore_index=True)
-    df.sort_values("date", inplace=True)
-    df.drop_duplicates(subset="date", keep="last", inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    df.to_parquet(cache_path, index=False, compression="snappy")
-    logger.info("[指数 %s] 已缓存 %d 行", code, len(df))
+    merged = _merge_into_cache(cache_path, df)
+    logger.info("[指数 %s] 已缓存 %d 行", code, len(merged))
 
-    mask = (df["date"] >= start_ts) & (df["date"] <= end_ts)
-    return df[mask].reset_index(drop=True)
+    mask = (merged["date"] >= start_ts) & (merged["date"] <= end_ts)
+    return merged[mask].reset_index(drop=True)
 
 def _read_existing_index(code: str, start_ts, end_ts) -> pd.DataFrame:
     """从本地缓存读取指数数据（降级路径）。start_ts/end_ts 为 Timestamp。"""
@@ -668,5 +689,6 @@ def _read_existing_index(code: str, start_ts, end_ts) -> pd.DataFrame:
         return df[mask].reset_index(drop=True)
     return pd.DataFrame()
 
-# Backward compatibility alias
+# Backward compatibility alias — deprecated: 仅适用于 ETF（含 vol×100 / amount×1000 转换），
+# 指数数据请直接使用 _clean_raw_ohlc，避免误用单位转换。
 _clean_and_standardize = _clean_and_standardize_etf

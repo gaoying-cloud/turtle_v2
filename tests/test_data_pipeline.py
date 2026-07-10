@@ -463,22 +463,21 @@ class TestReadjustMerged:
         mock_adj.assert_called_once()
         assert len(result) == 3  # sample_raw_data 有 3 行
 
-    def test_readjust_returns_original_when_refetch_fails(self):
-        """重新拉取失败（返回空）→ 降级返回原 df，不报错。"""
+    def test_readjust_returns_none_when_refetch_fails(self):
+        """重新拉取失败（返回空）→ 返回 None。"""
         cache = self._make_cache_df()
         with patch("src.data_pipeline._fetch_from_tushare", return_value=pd.DataFrame()):
             result = _readjust_merged(cache, "510500.SH")
-        # 原样返回
-        assert result["close"].iloc[0] == 5.52
+        assert result is None
 
-    def test_readjust_returns_original_when_adjust_fails(self, sample_raw_data):
-        """重做复权失败（_adjust_forward 返回空）→ 降级返回原 df。"""
+    def test_readjust_returns_none_when_adjust_fails(self, sample_raw_data):
+        """重做复权失败（_adjust_forward 返回空）→ 返回 None。"""
         cache = self._make_cache_df()
         with patch("src.data_pipeline._fetch_from_tushare", return_value=sample_raw_data), \
              patch("src.data_pipeline._adjust_forward", return_value=pd.DataFrame()), \
              patch("src.data_pipeline._clean_and_standardize_etf", side_effect=lambda df: df):
             result = _readjust_merged(cache, "510500.SH")
-        assert result["close"].iloc[0] == 5.52
+        assert result is None
 
     def test_readjust_empty_df_returns_empty(self):
         """空 df → 直接返回空。"""
