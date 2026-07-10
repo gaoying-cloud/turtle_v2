@@ -177,12 +177,11 @@ def _clean_and_standardize_etf(raw: pd.DataFrame) -> pd.DataFrame:
 # ════════════════════════════════════════════════════════════
 def _adjust_forward(df: pd.DataFrame, code: str) -> pd.DataFrame:
     """
-    前复权处理：优先使用 Tushare fund_adj 官方因子，不可用时用价格检测。
-    """
-    adj_df = _fetch_adj_factors(code)
-    if not adj_df.empty:
-        return _apply_factor_adjustment(df, adj_df)
+    前复权处理：检测价格跳变事件（拆分/合并）并做逆向分段调整。
 
+    Tushare fund_adj 官方因子对 ETF 品种格式不兼容（方向/含义与股票不同），
+    因此跳过官方因子路径，直接使用价格检测法。
+    """
     return _detect_and_adjust_splits(df)
 
 def _fetch_adj_factors(code: str) -> pd.DataFrame:
@@ -229,7 +228,7 @@ def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataF
     df.loc[df.index[0], "pre_close"] = None
 
     # 显式强制类型转换为 float64，防止 int 推断
-    df["adj_factor"] = adj_series.fillna(1.0).astype("float64")
+    df["adj_factor"] = adj_series.fillna(1.0).astype("float64").values
     return df
 
 def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
@@ -239,10 +238,11 @@ def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
 
     for i in range(1, len(df)):
         prev_close = df.loc[i - 1, "close"]
-        curr_pre = df.loc[i, "pre_close"]
-        if prev_close <= 0:
+        curr_close = df.loc[i, "close"]
+        if prev_close <= 0 or curr_close <= 0:
             continue
-        ratio = curr_pre / prev_close
+        # 实际涨跌幅 = close[t] / close[t-1]，跨跳空日也能检测
+        ratio = curr_close / prev_close
         if abs(ratio - 1) > SPLIT_DETECTION_THRESHOLD:
             events.append((i, ratio))
 
