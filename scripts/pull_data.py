@@ -78,12 +78,17 @@ def cmd_fetch(args):
             sys.exit(1)
 
         print(f"拉取 {args.symbol} ...")
-        df = fetch_single(
-            code=args.symbol,
-            start_date=args.start,
-            end_date=args.end,
-            force=args.force,
-        )
+        try:
+            df = fetch_single(
+                code=args.symbol,
+                start_date=args.start,
+                end_date=args.end,
+                force=args.force,
+            )
+        except Exception as e:
+            # 与 pull_all 的兜底行为保持一致：单品种异常也不应崩 CLI
+            logging.error("[%s] 拉取失败: %s", args.symbol, e)
+            sys.exit(1)
         if df.empty:
             print(f"  {args.symbol}: 无数据")
         else:

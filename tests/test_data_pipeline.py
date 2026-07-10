@@ -34,6 +34,7 @@ from src.data_pipeline import (
     _parquet_path,
     _read_local_cache,
     _save_to_parquet,
+    _readjust_merged,
     fetch_single,
     check_status,
     DATA_DIR,
@@ -231,8 +232,11 @@ class TestFetchSingle:
             new_row = sample_raw_data.iloc[[2]].copy()
             mock_fetch.return_value = new_row
 
-            with patch("src.data_pipeline._adjust_forward") as mock_adj:
+            with patch("src.data_pipeline._adjust_forward") as mock_adj, \
+                 patch("src.data_pipeline._readjust_merged") as mock_readjust:
                 mock_adj.side_effect = lambda df, code: df
+                # _readjust_merged 在测试中走降级（返回传入的 df），避免二次网络请求
+                mock_readjust.side_effect = lambda df, code: df
                 df = fetch_single("510500.SH", start_date="2024-01-02", end_date="2024-01-04")
                 mock_fetch.assert_called_once()
                 assert len(df) == 3  # 合并后应有 3 行
@@ -287,3 +291,224 @@ class TestCheckStatus:
     def test_status_all_empty_returns_zero_rows(self):
         status = check_status()
         assert all(status["rows"] == 0)
+
+
+# ════════════════════════════════════════════════════════════
+#  前复权方向修正 + 组合策略 + 自愈校验 + 增量全量重做
+# ════════════════════════════════════════════════════════════
+
+class TestApplyFactorAdjustmentDirection:
+    """V5.19 修复1：前复权比率方向 adj[t]/adj[latest]（旧 latest/adj[t] 是后复权方向）。"""
+
+    def test_direction_pulls_old_prices_down(self):
+        """因子单调递增（拆分后变小）→ 旧价应被往下拉到新基准，最新日不变。
+
+        原始价 close=[10, 10, 5]（第3日 1:2 拆分），因子=[1.0, 1.0, 2.0]。
+        前复权正确：ratio=adj[t]/adj[latest]=adj[t]/2.0 → [0.5, 0.5, 1.0]
+        → 复权后 close=[5, 5, 5]，连续无跳空。
+        """
+        from src.data_pipeline import _apply_factor_adjustment
+        raw = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "open": [10.0, 10.0, 5.0], "high": [10.0, 10.0, 5.0],
+            "low": [10.0, 10.0, 5.0], "close": [10.0, 10.0, 5.0],
+        })
+        adj = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "adj_factor": [1.0, 1.0, 2.0],
+        })
+        result = _apply_factor_adjustment(raw, adj)
+        # 旧价被拉到新基准：10*0.5=5，最新日 5*1.0=5
+        assert result["close"].tolist() == [5.0, 5.0, 5.0]
+        # adj_factor 列存的是复权比率，最新日=1.0
+        assert result["adj_factor"].iloc[-1] == 1.0
+        assert result["adj_factor"].iloc[0] == 0.5
+
+    def test_wrong_direction_would_amplify(self):
+        """反向（旧代码 latest/adj[t]）会把旧价放大，证明方向修正的必要性。"""
+        from src.data_pipeline import _apply_factor_adjustment
+        raw = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-04"]),
+            "open": [10.0, 5.0], "high": [10.0, 5.0],
+            "low": [10.0, 5.0], "close": [10.0, 5.0],
+        })
+        adj = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-04"]),
+            "adj_factor": [1.0, 2.0],
+        })
+        result = _apply_factor_adjustment(raw, adj)
+        # 正确方向：10*(1/2)=5, 5*(2/2)=5 → 连续
+        assert result["close"].iloc[0] == 5.0
+        assert result["close"].iloc[1] == 5.0
+
+
+class TestAdjustForwardCombo:
+    """V5.19 修复2：fund_adj 后若残留跳空，叠加 _detect_and_adjust_splits 补漏。"""
+
+    def test_combo_catches_fund_adj_missed_event(self):
+        """fund_adj 因子平坦漏记拆分 → 组合策略用价格检测补齐。
+
+        场景：510500 的 2015-04 份额合并，fund_adj 因子全 0.2803 未变，
+        但原始价 close 2.67→9.32（+248%）。组合策略叠加价格检测消除跳空。
+        """
+        from src.data_pipeline import _adjust_forward
+        raw = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "open": [2.67, 2.67, 9.32], "high": [2.67, 2.67, 9.32],
+            "low": [2.67, 2.67, 9.32], "close": [2.67, 2.67, 9.32],
+        })
+        # fund_adj 因子平坦（漏记事件）
+        adj = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "adj_factor": [0.2803, 0.2803, 0.2803],
+        })
+
+        with patch("src.data_pipeline._fetch_adj_factors", return_value=adj):
+            result = _adjust_forward(raw, "510500.SH")
+
+        assert not result.empty
+        # 残留跳空应被消除：03→04 不应 >15%
+        chg = abs(result["close"].iloc[2] / result["close"].iloc[1] - 1)
+        assert chg < 0.15
+
+    def test_fund_adj_alone_sufficient_no_combo(self):
+        """fund_adj 充分覆盖时，不触发价格检测叠加。"""
+        from src.data_pipeline import _adjust_forward
+        raw = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "open": [10.0, 5.0], "high": [10.0, 5.0],
+            "low": [10.0, 5.0], "close": [10.0, 5.0],
+        })
+        adj = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "adj_factor": [1.0, 2.0],
+        })
+        with patch("src.data_pipeline._fetch_adj_factors", return_value=adj):
+            result = _adjust_forward(raw, "513100.SH")
+        # fund_adj 正确复权，无残留跳空，结果非空
+        assert not result.empty
+        assert result["close"].tolist() == [5.0, 5.0]
+
+
+class TestValidateAdjustment:
+    """V5.19 修复3：>50% 残留跳空 → 复权失败返回空，拒绝坏数据落盘。"""
+
+    def test_unfixable_gap_returns_empty(self):
+        """无法修复的 >50% 跳空 → _adjust_forward 返回空 DataFrame。"""
+        from src.data_pipeline import _adjust_forward
+        # 三个价位 10→30→90，每次 +200%，fund_adj 无法消除
+        raw = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "open": [10.0, 30.0, 90.0], "high": [10.0, 30.0, 90.0],
+            "low": [10.0, 30.0, 90.0], "close": [10.0, 30.0, 90.0],
+        })
+        adj = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "adj_factor": [1.0, 1.0, 1.0],
+        })
+        with patch("src.data_pipeline._fetch_adj_factors", return_value=adj):
+            result = _adjust_forward(raw, "BAD.SH")
+        assert result.empty
+
+    def test_normal_data_passes_validation(self):
+        """正常数据（无 >50% 跳空）通过校验。"""
+        from src.data_pipeline import _validate_adjustment
+        df = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "close": [5.0, 5.2, 5.1],
+        })
+        assert _validate_adjustment(df) is True
+
+    def test_large_gap_fails_validation(self):
+        """>50% 单日跳空 → 校验失败。"""
+        from src.data_pipeline import _validate_adjustment
+        df = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "close": [5.0, 20.0],  # +300%
+        })
+        assert _validate_adjustment(df) is False
+
+
+class TestReadjustMerged:
+    """3.1 修复：增量合并后全量重拉原始价 + 重做前复权。"""
+
+    def _make_cache_df(self) -> pd.DataFrame:
+        """模拟已前复权的历史缓存段。"""
+        return pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "open": [5.50, 5.55], "high": [5.58, 5.60],
+            "low": [5.45, 5.50], "close": [5.52, 5.53],
+            "volume": [1e6, 1.2e6], "amount": [5e7, 6e7],
+            "pre_close": [None, 5.52], "adj_factor": [1.0, 1.0],
+        })
+
+    def test_readjust_refetches_and_reapplies_adjust(self, sample_raw_data):
+        """_readjust_merged 重新拉取全量原始价并走 _adjust_forward。"""
+        cache = self._make_cache_df()
+        # mock _fetch_from_tushare 返回全量原始数据，_adjust_forward 透传
+        with patch("src.data_pipeline._fetch_from_tushare", return_value=sample_raw_data) as mock_fetch, \
+             patch("src.data_pipeline._adjust_forward", side_effect=lambda df, code: df) as mock_adj, \
+             patch("src.data_pipeline._clean_and_standardize_etf", side_effect=lambda df: df):
+            result = _readjust_merged(cache, "510500.SH")
+
+        # 应以缓存最早~最晚日期重新拉取
+        mock_fetch.assert_called_once_with("510500.SH", "20240102", "20240103")
+        mock_adj.assert_called_once()
+        assert len(result) == 3  # sample_raw_data 有 3 行
+
+    def test_readjust_returns_original_when_refetch_fails(self):
+        """重新拉取失败（返回空）→ 降级返回原 df，不报错。"""
+        cache = self._make_cache_df()
+        with patch("src.data_pipeline._fetch_from_tushare", return_value=pd.DataFrame()):
+            result = _readjust_merged(cache, "510500.SH")
+        # 原样返回
+        assert result["close"].iloc[0] == 5.52
+
+    def test_readjust_returns_original_when_adjust_fails(self, sample_raw_data):
+        """重做复权失败（_adjust_forward 返回空）→ 降级返回原 df。"""
+        cache = self._make_cache_df()
+        with patch("src.data_pipeline._fetch_from_tushare", return_value=sample_raw_data), \
+             patch("src.data_pipeline._adjust_forward", return_value=pd.DataFrame()), \
+             patch("src.data_pipeline._clean_and_standardize_etf", side_effect=lambda df: df):
+            result = _readjust_merged(cache, "510500.SH")
+        assert result["close"].iloc[0] == 5.52
+
+    def test_readjust_empty_df_returns_empty(self):
+        """空 df → 直接返回空。"""
+        with patch("src.data_pipeline._fetch_from_tushare") as mock_fetch:
+            result = _readjust_merged(pd.DataFrame(), "510500.SH")
+        assert result.empty
+        mock_fetch.assert_not_called()
+
+    def test_incremental_path_readjusts_full_series(self, sample_raw_data):
+        """端到端：增量拉取触发 _readjust_merged 全量重做前复权。
+
+        场景：缓存历史段（旧基准），增量拉取新块。_readjust_merged 重新拉取
+        全量原始数据并复权，消除基准断层。
+        """
+        # 1) 缓存历史段：2 行
+        cache_df = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "open": [5.50, 5.55], "high": [5.58, 5.60],
+            "low": [5.45, 5.50], "close": [5.52, 5.53],
+            "volume": [1e6, 1.2e6], "amount": [5e7, 6e7],
+            "pre_close": [None, 5.52], "adj_factor": [1.0, 1.0],
+        })
+        _save_to_parquet(cache_df, "510500.SH")
+
+        # 2) 增量拉取返回第3行；_readjust_merged 的全量重拉返回3行
+        inc_row = sample_raw_data.iloc[[2]].copy()
+        full_raw = sample_raw_data.copy()
+
+        with patch("src.data_pipeline._fetch_from_tushare", side_effect=[inc_row, full_raw]), \
+             patch("src.data_pipeline._adjust_forward", side_effect=lambda df, code: df):
+            df = fetch_single(
+                "510500.SH", start_date="2024-01-02", end_date="2024-01-04"
+            )
+
+        assert len(df) == 3
+        # _readjust_merged 重做后全量基于同一基准，拼接处无 >15% 跳空
+        chg_01 = abs(df["close"].iloc[1] / df["close"].iloc[0] - 1)
+        chg_12 = abs(df["close"].iloc[2] / df["close"].iloc[1] - 1)
+        assert chg_01 < 0.15
+        assert chg_12 < 0.15

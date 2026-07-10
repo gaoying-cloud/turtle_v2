@@ -1,5 +1,30 @@
 # Changelog
 
+## [V6.6-前复权彻底修复] - 2026-07-11
+### 前复权方向bug + 增量基准断层 + 组合策略 + 自愈校验
+- **根因1（方向bug）**: `_apply_factor_adjustment` 比率方向反了——用 `latest/adj[t]`（后复权方向）而非前复权正确公式 `adj[t]/adj[latest]`，把旧价放大而非拉到最新基准，造成拆分日假跌。CHANGELOG V5.19 曾记录此修复但代码从未真正提交，`6f6163e` 回滚后 `e08655a` 只补回两个小修，漏掉了方向修正。
+  - 实测：513100 在 2022-01-14 拆分日 close 25.97→1.015 的 96% 假跌，方向修正后消除为连续序列。
+- **根因2（增量基准断层）**: `fetch_single` 增量路径只对新拉取的 raw 块做 `_adjust_forward`，历史缓存段保留旧基准。Tushare 回溯更新 adj_factor（拆分/分红后必然发生）后，两段不在同一基准 → 拼接处伪跳空，污染 ATR/突破信号。
+  - 新增 `_readjust_merged`：增量合并后全量重拉原始日线 + 重做 `_adjust_forward`，保证整条序列统一在最新基准。代价是增量更新多一次全量 API 请求，正确性优先。
+  - 增量起点改为 `local_max + 1日`，避免与缓存最后一天重叠。
+- **根因3（fund_adj 漏记）**: 510500 的 2015-04 份额合并，Tushare fund_adj 因子平坦未变，单纯靠官方因子无法消除 248% 假涨。
+  - `_adjust_forward` 改为组合策略：fund_adj 后若 `_has_residual_cliff` 仍检测到 >15% 跳空，叠加 `_detect_and_adjust_splits` 用价格检测补齐 fund_adj 漏记的早期事件。
+  - `_detect_and_adjust_splits` 在组合模式下保留已有 adj_factor（乘入检测比率），不再覆盖。
+- **自愈校验**: 新增 `_validate_adjustment`——前复权后 close 单日涨跌幅 >50% 即判定复权失败返回空，触发 `fetch_single` 跳过写入保留旧缓存，杜绝坏数据落盘。
+- **存储语义统一**: adj_factor 列改为前复权比率（最新日=1.0），与降级路径语义统一，便于 verify_adjustment 校验 latest_ratio≈1.0。
+- **验证**: `--force` 重拉 7 品种后 `verify_adjustment.py` 全部 ok（510500/513100 从 FAIL 修复为 ok，latest_ratio=1.0，max单日变动 ≤20%）。
+- **回测基线变化**（前复权数据修正后）:
+  | 指标 | 旧基线（方向错） | 新基线（修正后） | 变化 |
+  |---|---|---|---|
+  | 总收益 | +492.58% | +622.22% | +129.64pp |
+  | CAGR | 15.38% | 17.23% | +1.85pp |
+  | Sharpe | 0.87 | 1.1031 | +0.23 |
+  | 最大回撤 | 8.68% | 13.84% | +5.16pp |
+  | 交易笔数 | 155 | 156 | +1 |
+  | 胜率 | 48.39% | 50.0% | +1.61pp |
+- **测试**: 新增 `TestApplyFactorAdjustmentDirection`/`TestAdjustForwardCombo`/`TestValidateAdjustment`/`TestReadjustMerged` 共 13 个测试，全量 235/235 passed。
+- **附带修复**: `scripts/pull_data.py` 单品种拉取加 try/except，与 `pull_all` 兜底行为一致。
+
 ## [V6.5-系列实验验证+ATR过滤OOS确认] - 2026-07-09
 
 ### OOS 验证（S17 延续）

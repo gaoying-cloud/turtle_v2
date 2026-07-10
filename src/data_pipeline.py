@@ -22,6 +22,7 @@ from time import sleep
 from functools import lru_cache
 
 import pandas as pd
+import numpy as np
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ INDEX_DIR = PROJECT_ROOT / "data" / "index_daily"
 
 # ── 算法常量 ──
 SPLIT_DETECTION_THRESHOLD = 0.15  # 拆分/合并事件的价格偏离阈值
+MAX_DAILY_CHANGE = 0.50           # 前复权后单日涨跌幅上限，超过即判复权失败
 
 # Tushare 通用原始字段
 TUSHARE_FIELDS = [
@@ -177,13 +179,66 @@ def _clean_and_standardize_etf(raw: pd.DataFrame) -> pd.DataFrame:
 # ════════════════════════════════════════════════════════════
 def _adjust_forward(df: pd.DataFrame, code: str) -> pd.DataFrame:
     """
-    前复权处理：优先使用 Tushare fund_adj 官方因子，不可用时用价格检测。
+    前复权处理（组合策略）：
+    1. 优先用 Tushare fund_adj 官方因子做前复权（_apply_factor_adjustment）；
+    2. 若 fund_adj 不可用，或用后仍检测到 >50% 残留跳空（fund_adj 漏记早期拆分/
+       合并事件，如 510500 的 2015-04 份额合并），叠加 _detect_and_adjust_splits
+       用价格检测补齐；
+    3. 最终 _validate_adjustment 自愈校验：若仍有 >50% 跳空，判定复权失败返回空，
+       触发 fetch_single 跳过写入保留旧缓存，杜绝坏数据落盘。
     """
+    if df.empty:
+        return df
+
     adj_df = _fetch_adj_factors(code)
     if not adj_df.empty:
-        return _apply_factor_adjustment(df, adj_df)
+        result = _apply_factor_adjustment(df, adj_df)
+        # fund_adj 后若仍有残留跳空，叠加价格检测补齐 fund_adj 漏记的事件
+        if not result.empty and _has_residual_cliff(result):
+            logger.warning("[%s] fund_adj 后仍检测到残留跳空，叠加价格检测补齐", code)
+            result = _detect_and_adjust_splits(result)
+    else:
+        result = _detect_and_adjust_splits(df)
 
-    return _detect_and_adjust_splits(df)
+    # 自愈校验：仍有 >50% 跳空 → 复权失败，返回空拒绝落盘
+    if not result.empty and not _validate_adjustment(result):
+        logger.error("[%s] 复权后仍存在 >50%% 残留跳空，判定复权失败返回空", code)
+        return pd.DataFrame()
+
+    return result
+
+def _has_residual_cliff(df: pd.DataFrame) -> bool:
+    """检测前复权后是否仍存在 >SPLIT_DETECTION_THRESHOLD 的单日跳空。"""
+    if df.empty or len(df) < 2 or "close" not in df.columns:
+        return False
+    closes = df["close"].dropna().to_numpy()
+    if len(closes) < 2:
+        return False
+    prev = closes[:-1]
+    curr = closes[1:]
+    valid = prev > 0
+    if not valid.any():
+        return False
+    changes = np.abs(curr[valid] / prev[valid] - 1)
+    return bool((changes > SPLIT_DETECTION_THRESHOLD).any())
+
+def _validate_adjustment(df: pd.DataFrame) -> bool:
+    """
+    前复权自愈校验：close 单日涨跌幅 >50% 即判定复权失败。
+    返回 True 表示通过，False 表示失败（调用方应丢弃结果）。
+    """
+    if df.empty or len(df) < 2 or "close" not in df.columns:
+        return True
+    closes = df["close"].dropna().to_numpy()
+    if len(closes) < 2:
+        return True
+    prev = closes[:-1]
+    curr = closes[1:]
+    valid = prev > 0
+    if not valid.any():
+        return True
+    changes = np.abs(curr[valid] / prev[valid] - 1)
+    return not bool((changes > MAX_DAILY_CHANGE).any())
 
 def _fetch_adj_factors(code: str) -> pd.DataFrame:
     """从 Tushare fund_adj 拉取复权因子。"""
@@ -215,7 +270,10 @@ def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataF
     adj_series = pd.Series(adj_df["adj_factor"].values, index=adj_df["date"])
     adj_series = adj_series.reindex(df["date"]).ffill().bfill()
 
-    ratio_series = latest_factor / adj_series
+    # 前复权正确公式：ratio = adj[t] / adj[latest]
+    # 最新日 ratio=1.0，历史日 ratio<1.0 把旧价往下拉到最新基准。
+    # 旧代码 latest/adj[t] 是后复权方向，会放大旧价，造成拆分日假跌。
+    ratio_series = adj_series / latest_factor
     ratio_series = ratio_series.where(ratio_series > 0, 1.0)
 
     price_cols = ["open", "high", "low", "close"]
@@ -228,8 +286,9 @@ def _apply_factor_adjustment(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataF
     df["pre_close"] = df["close"].shift(1)
     df.loc[df.index[0], "pre_close"] = None
 
-    # 显式强制类型转换为 float64，防止 int 推断
-    df["adj_factor"] = adj_series.fillna(1.0).astype("float64").values
+    # 存储前复权比率（最新日=1.0），与降级路径 _detect_and_adjust_splits 语义统一，
+    # 便于 verify_adjustment 校验 latest_ratio≈1.0
+    df["adj_factor"] = ratio_series.fillna(1.0).astype("float64").values
     return df
 
 def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
@@ -249,8 +308,9 @@ def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
 
     if not events:
         logger.info("[复权] 价格检测未发现 >%.0f%% 的拆分事件，视为无需复权", SPLIT_DETECTION_THRESHOLD * 100)
-        # 显式强制类型转换为 float64
-        df["adj_factor"] = 1.0
+        # 组合模式下保留已有的 adj_factor（来自 fund_adj）；独立降级模式下设 1.0
+        if "adj_factor" not in df.columns:
+            df["adj_factor"] = 1.0
         df["adj_factor"] = df["adj_factor"].astype("float64")
         return df
 
@@ -271,17 +331,58 @@ def _detect_and_adjust_splits(df: pd.DataFrame) -> pd.DataFrame:
     df["pre_close"] = df["close"].shift(1)
     df.loc[df.index[0], "pre_close"] = None
 
+    # 计算本次价格检测的累积比率（事件前段累积乘 evt_factor，最新段=1.0）
     n = len(df)
-    adj_factors = [1.0] * n
+    detect_ratios = [1.0] * n
     cum = 1.0
     for evt_idx in range(len(events) - 1, -1, -1):
         evt_pos, evt_factor = events[evt_idx]
         cum *= evt_factor
         for i in range(evt_pos):
-            adj_factors[i] = cum
-    # 显式强制类型转换为 float64
-    df["adj_factor"] = pd.Series(adj_factors).astype("float64")
+            detect_ratios[i] = cum
+    detect_series = pd.Series(detect_ratios, index=df.index).astype("float64")
+
+    # 组合模式：把检测比率乘进已有 adj_factor（fund_adj 比率），保留两路信息；
+    # 独立降级模式：直接用检测比率作为 adj_factor
+    if "adj_factor" in df.columns:
+        df["adj_factor"] = (pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0) * detect_series).astype("float64")
+    else:
+        df["adj_factor"] = detect_series
     return df
+
+def _readjust_merged(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    """
+    对增量合并后的全量序列重做前复权。
+
+    增量更新时，历史缓存段用的是上次拉取时的旧基准，新块用的是当前最新基准。
+    当 Tushare 回溯更新 adj_factor（拆分/分红后必然发生），两段不在同一基准
+    → 拼接处伪跳空，污染 ATR/突破信号。
+
+    缓存存的是已前复权价 + 复权比率（latest=1.0），无法从比率还原原始因子做
+    基准迁移。因此本函数重新全量拉取原始日线，对整条序列统一走 _adjust_forward，
+    保证历史段与新块在同一最新基准上。代价是增量更新时多一次全量 API 请求，
+    但增量更新不频繁，正确性优先。
+    """
+    if df.empty:
+        return df
+
+    earliest = df["date"].min().strftime("%Y%m%d")
+    latest = df["date"].max().strftime("%Y%m%d")
+    logger.info("[%s] 全量重做前复权：重新拉取 %s~%s 原始日线", code, earliest, latest)
+
+    raw = _fetch_from_tushare(code, earliest, latest)
+    if raw.empty:
+        logger.warning("[%s] 全量重做跳过：原始日线拉取失败，保留合并结果", code)
+        return df
+
+    cleaned = _clean_and_standardize_etf(raw)
+    readjusted = _adjust_forward(cleaned, code)
+    if readjusted.empty:
+        logger.warning("[%s] 全量重做跳过：重做复权失败，保留合并结果", code)
+        return df
+
+    logger.info("[%s] 全量重做前复权完成：%d 行", code, len(readjusted))
+    return readjusted
 
 # ════════════════════════════════════════════════════════════
 # 本地 Parquet 缓存
@@ -336,6 +437,9 @@ def fetch_single(
     start_norm = start_date.replace("-", "")
     end_norm = end_date.replace("-", "")
 
+    # 标记是否走增量路径（有缓存但未全覆盖 → 拼接新块）。
+    # 增量路径需要合并后对全量重做前复权，消除历史段旧因子与新块新因子的基准断层。
+    is_incremental = False
     if not force:
         local_df = _read_local_cache(code)
         if not local_df.empty:
@@ -347,7 +451,14 @@ def fetch_single(
                 logger.info("[%s] 缓存数据已覆盖请求区间 %s~%s，直接返回", code, start_date, end_date)
                 return local_df[mask].reset_index(drop=True)
 
-            pull_start = local_max
+            # 增量起点用 local_max 的下一交易日，避免与缓存最后一天重叠：
+            # 1) 去除重复拉取；
+            # 2) 更重要的是，_adjust_forward 只对本次新拉取的 raw 块单独前复权，
+            #    若重叠日被新因子覆盖而历史段仍是旧因子，拼接处会产生伪跳空，
+            #    污染 ATR/突破信号。让两块严格不重叠可缓解基准断层。
+            is_incremental = True
+            last_date = local_df["date"].max()
+            pull_start = (last_date + timedelta(days=1)).strftime("%Y%m%d")
             logger.info("[%s] 缓存最新日期 %s，增量拉取 %s~%s", code, local_max, pull_start, end_norm)
             raw = _fetch_from_tushare(code, pull_start, end_norm)
         else:
@@ -374,6 +485,14 @@ def fetch_single(
         return pd.DataFrame()
 
     _save_to_parquet(cleaned, code)
+
+    # 增量路径：新块（新因子基准）已与历史缓存（旧因子基准）合并，
+    # 需对全量序列重做前复权基准对齐，消除拼接处断层。
+    if is_incremental:
+        merged = _read_local_cache(code)
+        if not merged.empty:
+            merged = _readjust_merged(merged, code)
+            _save_to_parquet(merged, code)
 
     result = _read_local_cache(code)
     if not result.empty:
