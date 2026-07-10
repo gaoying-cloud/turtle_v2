@@ -1,5 +1,15 @@
 # Changelog
 
+## [V6.7-指数数据管道修复] - 2026-07-11
+### fetch_index_daily 增量分支 + 日期归一化 + 指数数据重建
+- **3.3 日期归一化**: `fetch_index_daily` 入口新增 `_normalize_date`，兼容 `"2020-01-01"`/`"20200101"`/`datetime`/`date` 输入，统一归一化为 8 位 YYYYMMDD。旧代码直接把调用方传入的字符串用于缓存命中判断（`cached_min <= start_date`）和 Tushare 调用，若传非 8 位格式会静默误判。
+- **3.2 增量拉取分支**: `fetch_index_daily` 新增增量逻辑——缓存部分覆盖时只拉缺失尾部（`cached_max+1 ~ end`，与 ETF 一致避免重叠），不再每次全量重拉浪费 API 配额。指数无复权因子，增量合并只需去重，不需 `_readjust_merged`。新增 `force` 参数跳过缓存全量重拉。
+- **抽取 `_fetch_index_from_tushare`**: 从 `fetch_index_daily` 抽取 Tushare index_daily 调用 + 重试逻辑为独立函数，与 ETF `_fetch_from_tushare` 对称，便于测试 mock。
+- **降级路径归一化**: `_read_existing_index` 改用 Timestamp 参数，消除 string vs datetime 比较隐患。
+- **指数数据重建**: 7 个指数 parquet（000001/000300/000905/000852/399006/000688/H00300）从过期（停在 2026-06-23）全量重拉到 2026-07-10。其中 000688.SH（科创50）2019-12-31 上市，仅 1580 行（预期）。
+- **验证**: `yearly_benchmark.py --etf-only` 全部 8 个基准（6 指数 + 2 跨市场 ETF）7 年数据可用；增量分支正确检测缓存最新日期并尝试拉取缺失段。
+- **测试**: 新增 `TestNormalizeDate`（4）+ `TestFetchIndexDaily`（6）共 10 个测试，覆盖日期归一化、缓存全覆盖、增量拉取、force、降级、无缓存全量。全量 245/245 passed。
+
 ## [V6.6-前复权彻底修复] - 2026-07-11
 ### 前复权方向bug + 增量基准断层 + 组合策略 + 自愈校验
 - **根因1（方向bug）**: `_apply_factor_adjustment` 比率方向反了——用 `latest/adj[t]`（后复权方向）而非前复权正确公式 `adj[t]/adj[latest]`，把旧价放大而非拉到最新基准，造成拆分日假跌。CHANGELOG V5.19 曾记录此修复但代码从未真正提交，`6f6163e` 回滚后 `e08655a` 只补回两个小修，漏掉了方向修正。

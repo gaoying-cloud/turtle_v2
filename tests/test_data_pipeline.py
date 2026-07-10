@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -35,9 +35,12 @@ from src.data_pipeline import (
     _read_local_cache,
     _save_to_parquet,
     _readjust_merged,
+    _normalize_date,
     fetch_single,
+    fetch_index_daily,
     check_status,
     DATA_DIR,
+    INDEX_DIR,
     STD_COLUMNS,
 )
 
@@ -49,12 +52,16 @@ from src.data_pipeline import (
 @pytest.fixture(autouse=True)
 def patch_data_dir(tmp_path):
     """将所有 Parquet 读写重定向到临时目录，避免污染真实数据。"""
-    original = DATA_DIR
     import src.data_pipeline as dp
+    original_etf = dp.DATA_DIR
+    original_idx = dp.INDEX_DIR
     dp.DATA_DIR = tmp_path / "etf_daily"
     dp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    dp.INDEX_DIR = tmp_path / "index_daily"
+    dp.INDEX_DIR.mkdir(parents=True, exist_ok=True)
     yield
-    dp.DATA_DIR = original
+    dp.DATA_DIR = original_etf
+    dp.INDEX_DIR = original_idx
 
 
 @pytest.fixture
@@ -512,3 +519,124 @@ class TestReadjustMerged:
         chg_12 = abs(df["close"].iloc[2] / df["close"].iloc[1] - 1)
         assert chg_01 < 0.15
         assert chg_12 < 0.15
+
+
+# ════════════════════════════════════════════════════════════
+#  指数日线拉取（3.2 增量分支 + 3.3 日期归一化）
+# ════════════════════════════════════════════════════════════
+
+def _sample_index_raw(rows=None) -> pd.DataFrame:
+    """模拟 Tushare index_daily 返回的原始数据（2024-01-02 ~ 01-04）。"""
+    base = {
+        "ts_code": ["000300.SH", "000300.SH", "000300.SH"],
+        "trade_date": ["20240102", "20240103", "20240104"],
+        "open": [3500.0, 3510.0, 3495.0],
+        "high": [3520.0, 3530.0, 3505.0],
+        "low": [3490.0, 3500.0, 3485.0],
+        "close": [3510.0, 3520.0, 3500.0],
+        "pre_close": [3495.0, 3510.0, 3520.0],
+        "change": [15.0, 10.0, -20.0],
+        "pct_chg": [0.43, 0.28, -0.57],
+        "vol": [1.2e8, 1.5e8, 1.1e8],
+        "amount": [4.2e6, 5.3e6, 3.8e6],
+    }
+    df = pd.DataFrame(base)
+    if rows is not None:
+        df = df.iloc[rows].reset_index(drop=True)
+    return df
+
+
+class TestNormalizeDate:
+    def test_str_with_dashes(self):
+        assert _normalize_date("2020-01-01") == "20200101"
+
+    def test_str_8digit(self):
+        assert _normalize_date("20200101") == "20200101"
+
+    def test_datetime_object(self):
+        assert _normalize_date(datetime(2024, 3, 15)) == "20240315"
+
+    def test_date_object(self):
+        assert _normalize_date(date(2024, 3, 15)) == "20240315"
+
+
+class TestFetchIndexDaily:
+    def test_cached_full_coverage_no_network(self):
+        """缓存全覆盖请求区间时，不应调用 Tushare。"""
+        # 写入覆盖 2024-01-02 ~ 01-04 的缓存
+        cache = _sample_index_raw()
+        cache = pd.DataFrame(cache)
+        cache["date"] = pd.to_datetime(cache["trade_date"], format="%Y%m%d")
+        cache.drop(columns=["trade_date"], inplace=True)
+        import src.data_pipeline as dp
+        dp.INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        cache.to_parquet(dp.INDEX_DIR / "000300.SH.parquet", index=False)
+
+        with patch("src.data_pipeline._fetch_index_from_tushare") as mock_fetch:
+            df = fetch_index_daily("000300.SH", "20240102", "20240104")
+            mock_fetch.assert_not_called()
+            assert len(df) == 3
+
+    def test_partial_cache_triggers_incremental(self):
+        """缓存只覆盖部分区间时，应增量拉取缺失尾部。"""
+        # 缓存只有前两行（01-02, 01-03）
+        cache = _sample_index_raw(rows=[0, 1]).copy()
+        cache["date"] = pd.to_datetime(cache["trade_date"], format="%Y%m%d")
+        cache.drop(columns=["trade_date"], inplace=True)
+        import src.data_pipeline as dp
+        dp.INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        cache.to_parquet(dp.INDEX_DIR / "000300.SH.parquet", index=False)
+
+        # mock 返回第3行
+        new_row = _sample_index_raw(rows=[2])
+        with patch("src.data_pipeline._fetch_index_from_tushare", return_value=new_row) as mock_fetch:
+            df = fetch_index_daily("000300.SH", "20240102", "20240104")
+            mock_fetch.assert_called_once()
+            # 增量起点应为 cached_max(01-03) + 1日 = 01-04（位置参数）
+            assert mock_fetch.call_args[0][1] == "20240104"
+            assert len(df) == 3  # 合并后 3 行
+
+    def test_force_skips_cache_full_fetch(self):
+        """force=True 时跳过缓存直接全量拉取。"""
+        cache = _sample_index_raw(rows=[0, 1]).copy()
+        cache["date"] = pd.to_datetime(cache["trade_date"], format="%Y%m%d")
+        cache.drop(columns=["trade_date"], inplace=True)
+        import src.data_pipeline as dp
+        dp.INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        cache.to_parquet(dp.INDEX_DIR / "000300.SH.parquet", index=False)
+
+        with patch("src.data_pipeline._fetch_index_from_tushare", return_value=_sample_index_raw()) as mock_fetch:
+            df = fetch_index_daily("000300.SH", "20240102", "20240104", force=True)
+            mock_fetch.assert_called_once()
+            # force 应全量拉取，start_date = 请求起点（位置参数）
+            assert mock_fetch.call_args[0][1] == "20240102"
+
+    def test_fetch_failure_returns_existing_cache(self):
+        """拉取失败（返回空）时降级返回缓存中落在区间内的数据。"""
+        cache = _sample_index_raw(rows=[0, 1]).copy()
+        cache["date"] = pd.to_datetime(cache["trade_date"], format="%Y%m%d")
+        cache.drop(columns=["trade_date"], inplace=True)
+        import src.data_pipeline as dp
+        dp.INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        cache.to_parquet(dp.INDEX_DIR / "000300.SH.parquet", index=False)
+
+        with patch("src.data_pipeline._fetch_index_from_tushare", return_value=pd.DataFrame()):
+            df = fetch_index_daily("000300.SH", "20240102", "20240103")
+            # 降级返回缓存的 2 行
+            assert len(df) == 2
+
+    def test_date_normalization_handles_dashed_input(self):
+        """传 "2024-01-02" 格式也能正确处理（3.3 归一化）。"""
+        with patch("src.data_pipeline._fetch_index_from_tushare", return_value=_sample_index_raw()):
+            df = fetch_index_daily("000300.SH", "2024-01-02", "2024-01-04")
+            assert len(df) == 3
+
+    def test_no_cache_full_fetch(self):
+        """无缓存时全量拉取。"""
+        with patch("src.data_pipeline._fetch_index_from_tushare", return_value=_sample_index_raw()) as mock_fetch:
+            df = fetch_index_daily("000300.SH", "20240102", "20240104")
+            mock_fetch.assert_called_once()
+            assert len(df) == 3
+            # 落盘后缓存存在
+            import src.data_pipeline as dp
+            assert (dp.INDEX_DIR / "000300.SH.parquet").exists()

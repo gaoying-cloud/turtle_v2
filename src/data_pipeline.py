@@ -553,64 +553,118 @@ def _index_cache_path(code: str) -> Path:
     """指数 parquet 缓存路径。"""
     return INDEX_DIR / f"{code}.parquet"
 
-def fetch_index_daily(
+def _normalize_date(d) -> str:
+    """归一化日期为 8 位 YYYYMMDD 字符串。
+
+    兼容 "2020-01-01"、"20200101"、datetime、date 等输入。
+    用于 fetch_index_daily 入口归一化，使缓存命中判断的字符串比较可靠、
+    Tushare 调用一致，避免调用方传非 8 位格式时静默误判。
+    """
+    if isinstance(d, str):
+        return d.replace("-", "")
+    if isinstance(d, (datetime, date)):
+        return d.strftime("%Y%m%d")
+    # 兜底：尝试转字符串后去分隔符（如 Timestamp）
+    return str(d).replace("-", "")[:8]
+
+def _fetch_index_from_tushare(
     code: str, start_date: str, end_date: str, max_retries: int = 3
 ) -> pd.DataFrame:
-    """从 Tushare index_daily 接口拉取指数日线，存入本地缓存。"""
+    """从 Tushare index_daily 接口拉取指数日线，含重试。与 ETF _fetch_from_tushare 对称。"""
+    pro = _create_tushare_pro()
+    for attempt in range(1, max_retries + 1):
+        try:
+            df = pro.index_daily(
+                ts_code=code, start_date=start_date, end_date=end_date,
+                fields=",".join(TUSHARE_FIELDS)
+            )
+            if df is None or df.empty:
+                logger.warning("[指数 %s] %s~%s 无数据返回", code, start_date, end_date)
+                return pd.DataFrame()
+            logger.info("[指数 %s] 拉取 %s~%s 共 %d 条", code, start_date, end_date, len(df))
+            return df
+        except Exception as e:
+            logger.warning("[指数 %s] 第 %d/%d 次请求失败: %s", code, attempt, max_retries, e)
+            if attempt < max_retries:
+                sleep(attempt * 2)
+            else:
+                logger.error("[指数 %s] 已耗尽重试次数", code)
+                return pd.DataFrame()
+    return pd.DataFrame()
+
+def fetch_index_daily(
+    code: str, start_date: str, end_date: str, max_retries: int = 3,
+    force: bool = False,
+) -> pd.DataFrame:
+    """从 Tushare index_daily 接口拉取指数日线，存入本地缓存。
+
+    - 缓存全覆盖请求区间 → 直接返回切片，不请求网络
+    - 缓存部分覆盖且非 force → 增量拉取缺失尾部（cached_max+1 ~ end）
+    - force 或无缓存 → 全量拉取
+    指数无复权因子，增量合并只需去重，不需 _readjust_merged。
+    """
+    start_norm = _normalize_date(start_date)
+    end_norm = _normalize_date(end_date)
+    start_ts = pd.to_datetime(start_norm, format="%Y%m%d")
+    end_ts = pd.to_datetime(end_norm, format="%Y%m%d")
+
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     cache_path = _index_cache_path(code)
 
-    if cache_path.exists():
+    if not force and cache_path.exists():
         cached = pd.read_parquet(cache_path)
         if not cached.empty:
             cached_min = cached["date"].min().strftime("%Y%m%d")
             cached_max = cached["date"].max().strftime("%Y%m%d")
-            if cached_min <= start_date and cached_max >= end_date:
-                mask = (cached["date"] >= start_date) & (cached["date"] <= end_date)
+            if cached_min <= start_norm and cached_max >= end_norm:
+                mask = (cached["date"] >= start_ts) & (cached["date"] <= end_ts)
+                logger.info("[指数 %s] 缓存已覆盖 %s~%s，直接返回", code, start_norm, end_norm)
                 return cached[mask].reset_index(drop=True)
 
-    try:
-        pro = _create_tushare_pro()
-        for attempt in range(1, max_retries + 1):
-            try:
-                df = pro.index_daily(
-                    ts_code=code, start_date=start_date, end_date=end_date,
-                    fields=",".join(TUSHARE_FIELDS)
-                )
-                if df is None or df.empty:
-                    logger.warning("[指数 %s] %s~%s 无数据返回", code, start_date, end_date)
-                    return _read_existing_index(code, start_date, end_date)
+            # 增量拉取缺失尾部（与 ETF 一致：cached_max+1日 起，避免重叠）
+            last_date = cached["date"].max()
+            pull_start = (last_date + timedelta(days=1)).strftime("%Y%m%d")
+            if pull_start > end_norm:
+                # 缓存已超过请求区间（cached_min > start_norm 的历史缺口不补，
+                # 仅返回缓存中落在区间内的部分）
+                mask = (cached["date"] >= start_ts) & (cached["date"] <= end_ts)
+                return cached[mask].reset_index(drop=True)
+            logger.info("[指数 %s] 缓存最新 %s，增量拉取 %s~%s", code, cached_max, pull_start, end_norm)
+            raw = _fetch_index_from_tushare(code, pull_start, end_norm, max_retries)
+        else:
+            raw = _fetch_index_from_tushare(code, start_norm, end_norm, max_retries)
+    else:
+        raw = _fetch_index_from_tushare(code, start_norm, end_norm, max_retries)
 
-                # 调用公共清洗函数
-                df = _clean_raw_ohlc(df)
+    if raw.empty:
+        return _read_existing_index(code, start_ts, end_ts)
 
-                if cache_path.exists():
-                    existing = pd.read_parquet(cache_path)
-                    df = pd.concat([existing, df], ignore_index=True)
-                    df.sort_values("date", inplace=True)
-                    df.drop_duplicates(subset="date", keep="last", inplace=True)
-                    df.reset_index(drop=True, inplace=True)
+    # 清洗 + 合并去重落盘
+    df = _clean_raw_ohlc(raw)
+    if df.empty:
+        return _read_existing_index(code, start_ts, end_ts)
 
-                df.to_parquet(cache_path, index=False, compression="snappy")
-                logger.info("[指数 %s] 已缓存 %d 行", code, len(df))
-                mask = (df["date"] >= start_date) & (df["date"] <= end_date)
-                return df[mask].reset_index(drop=True)
+    if cache_path.exists():
+        existing = pd.read_parquet(cache_path)
+        if not existing.empty:
+            df = pd.concat([existing, df], ignore_index=True)
+    df.sort_values("date", inplace=True)
+    df.drop_duplicates(subset="date", keep="last", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    df.to_parquet(cache_path, index=False, compression="snappy")
+    logger.info("[指数 %s] 已缓存 %d 行", code, len(df))
 
-            except Exception as e:
-                logger.warning("[指数 %s] 第 %d/%d 次请求失败: %s", code, attempt, max_retries, e)
-                if attempt < max_retries:
-                    sleep(attempt * 2)
-        return _read_existing_index(code, start_date, end_date)
-    except Exception as e:
-        logger.warning("Tushare 接口初始化失败，无法拉取指数数据: %s", e)
-        return _read_existing_index(code, start_date, end_date)
+    mask = (df["date"] >= start_ts) & (df["date"] <= end_ts)
+    return df[mask].reset_index(drop=True)
 
-def _read_existing_index(code: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """从本地缓存读取指数数据（降级路径）。"""
+def _read_existing_index(code: str, start_ts, end_ts) -> pd.DataFrame:
+    """从本地缓存读取指数数据（降级路径）。start_ts/end_ts 为 Timestamp。"""
     cache_path = _index_cache_path(code)
     if cache_path.exists():
         df = pd.read_parquet(cache_path)
-        mask = (df["date"] >= start_date) & (df["date"] <= end_date)
+        if df.empty:
+            return df
+        mask = (df["date"] >= start_ts) & (df["date"] <= end_ts)
         return df[mask].reset_index(drop=True)
     return pd.DataFrame()
 
