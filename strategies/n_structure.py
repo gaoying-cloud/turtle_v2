@@ -271,7 +271,8 @@ class NStructureStrategy:
         result = df.copy()
         result['atr'] = compute_atr(result['high'], result['low'],
                                      result['close'], self.atr_period)
-        result['ma250'] = compute_ma(result['close'], self.ma_trend)
+        if self.ma_trend > 0:
+            result['ma_trend'] = compute_ma(result['close'], self.ma_trend)
         result['ma5'] = compute_ma(result['close'], self.ma_confirm)
         return result
 
@@ -362,15 +363,17 @@ class NStructureStrategy:
             if not ma5_confirm(df, ns, prev):
                 return
 
-        # 3. 进场条件：昨日收盘 > B 且 昨日收盘 > MA250
+        # 3. 进场条件：昨日收盘 > B 且（可选）昨日收盘 > 趋势 MA
         prev_close = df.loc[prev, 'close']
-        prev_ma250 = df.loc[prev, 'ma250']
 
-        if pd.isna(prev_ma250):
+        if prev_close <= ns.b_price:
             return
 
-        if prev_close <= ns.b_price or prev_close <= prev_ma250:
-            return
+        # 趋势过滤（ma_trend <= 0 表示关闭）
+        if self.ma_trend > 0:
+            prev_ma = df.loc[prev, 'ma_trend']
+            if pd.isna(prev_ma) or prev_close <= prev_ma:
+                return
 
         # ── 信号触发 → 今日开盘进场 ──
         entry_price = df.loc[i, 'open']
@@ -538,16 +541,18 @@ class NStructureStrategy:
 
         prev = i - 1
         prev_close = df.loc[prev, 'close']
-        prev_ma250 = df.loc[prev, 'ma250']
 
-        if pd.isna(prev_ma250):
+        # 条件：价格仍在 B 点之上
+        if prev_close <= pos.reentry_b_price:
             pos.reentry_eligible = False
             return
 
-        # 条件：价格仍在 B 点之上 且 仍在 MA250 之上
-        if prev_close <= pos.reentry_b_price or prev_close <= prev_ma250:
-            pos.reentry_eligible = False
-            return
+        # 趋势过滤（与进场一致）
+        if self.ma_trend > 0:
+            prev_ma = df.loc[prev, 'ma_trend']
+            if pd.isna(prev_ma) or prev_close <= prev_ma:
+                pos.reentry_eligible = False
+                return
 
         # 进场
         entry_price = df.loc[i, 'open']

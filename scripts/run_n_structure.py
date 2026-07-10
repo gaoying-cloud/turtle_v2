@@ -215,6 +215,8 @@ def main():
                         help="再进场次数，0=关闭 (默认: 0)")
     parser.add_argument("--no_ma5", action="store_true",
                         help="不使用 MA5 辅助确认")
+    parser.add_argument("--no_ma_trend", action="store_true",
+                        help="不使用趋势均线过滤 (MA250)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="打印逐笔交易明细")
     parser.add_argument("--diagnose", action="store_true",
@@ -226,7 +228,8 @@ def main():
           f"stop={args.stop_mult}×ATR, trail={args.trail_mult}×ATR, "
           f"add={args.add_step}×ATR, max_u={args.max_units}, "
           f"再进场={re_str}, "
-          f"MA5确认={'OFF' if args.no_ma5 else 'ON'}")
+          f"MA5确认={'OFF' if args.no_ma5 else 'ON'}, "
+          f"趋势过滤={'OFF' if args.no_ma_trend else 'ON'}")
     print(f"📅  区间: {args.start} ~ {args.end}")
     print(f"📈  品种: {', '.join(args.symbols)}")
 
@@ -240,6 +243,7 @@ def main():
         max_units=args.max_units,
         max_reentries=args.reentries,
         use_ma5_confirm=not args.no_ma5,
+        ma_trend=0 if args.no_ma_trend else 250,
     )
 
     # 逐个品种跑
