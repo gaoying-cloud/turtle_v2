@@ -104,6 +104,7 @@ def run_backtest(params: dict, start: str, end: str) -> dict:
         "total_pnl": total_pnl,
         "trades": total_trades,
         "all_profitable": all_profitable,
+        "n_symbols": len(all_trades),  # 实际参与品种数
     }
 
 
@@ -116,6 +117,8 @@ BASELINE = dict(
     max_units=6,
     use_ma5_confirm=False,
     num_symbols=6,
+    slippage_pct=0.001,
+    commission_pct=0.00015,
 )
 
 # ── 各参数扫描范围 ──
@@ -137,8 +140,14 @@ def make_params(param_name: str, param_value) -> dict:
 
 
 def print_table(results: list[dict], title: str):
-    """打印结果表格，按 CAGR 降序排列。"""
-    valid = [r for r in results if r["cagr"] > 0]
+    """打印结果表格，按 CAGR 降序排列（包含负收益结果）。"""
+    if not results:
+        print(f"\n{'=' * 85}")
+        print(f"  {title}")
+        print(f"{'=' * 85}")
+        print("  ⚠️ 无回测结果（可能因无交易数据）")
+        print()
+        return []
 
     print(f"\n{'=' * 85}")
     print(f"  {title}")
@@ -148,7 +157,7 @@ def print_table(results: list[dict], title: str):
     print(header)
     print("-" * 85)
 
-    for r in sorted(valid, key=lambda x: x["cagr"], reverse=True):
+    for r in sorted(results, key=lambda x: x["cagr"], reverse=True):
         pv = r["_value"]
         if isinstance(pv, bool):
             pv_str = "ON" if pv else "OFF"
@@ -164,14 +173,17 @@ def print_table(results: list[dict], title: str):
 	              f"{'✅' if r['all_profitable'] else '❌':>6}")
 
     print("-" * 85)
-    if valid:
-        best = max(valid, key=lambda x: x["cagr"])
-        print(f"  🏆 最优: {best['_param']}={best['_value']}  "
+    positive = [r for r in results if r["cagr"] > 0]
+    if positive:
+        best = max(positive, key=lambda x: x["cagr"])
+        print(f"  🏆 最优(正收益): {best['_param']}={best['_value']}  "
               f"CAGR={best['cagr']*100:.1f}%  Sharpe={best['sharpe']:.2f}  "
               f"盈利={'✅' if best['all_profitable'] else '❌'}")
+    else:
+        print(f"  ⚠️ 所有参数 CAGR ≤ 0，可能过拟合或无有效信号")
     print()
 
-    return valid
+    return results  # 返回全部结果，不再过滤
 
 
 def scan_param(param_name: str):
@@ -218,13 +230,14 @@ def scan_param(param_name: str):
 
         # IS vs OOS 对比
         print(f"\n  📊 IS vs OOS 对比:")
-        print(f"  {'参数':>14} {'IS-CAGR':>8} {'OOS-CAGR':>9} {'IS-Sharpe':>10} {'OOS-Sharpe':>11} {'衰减':>6}")
+        print(f"  {'参数':>14} {'IS-CAGR':>8} {'OOS-CAGR':>9} {'IS-Sharpe':>10} {'OOS-Sharpe':>11} {'Δ(pp)':>6}")
         print(f"  {'-'*60}")
         for r in valid[:top_n]:
             pv = r["_value"]
             oos_r = next((o for o in oos_results if o["_value"] == pv), None)
-            if oos_r and oos_r["cagr"] > 0:
-                decay = (oos_r["cagr"] / r["cagr"] - 1) * 100 if r["cagr"] > 0 else 0
+            if oos_r:
+                # 百分点差替代比值：避免 IS CAGR≈0 时的极端值
+                decay_pp = (oos_r["cagr"] - r["cagr"]) * 100
                 label = f"{param_name}={pv}"
                 if isinstance(pv, bool):
                     label = f"{param_name}={('ON' if pv else 'OFF')}"
@@ -232,7 +245,7 @@ def scan_param(param_name: str):
                     label = f"{param_name}={pv:.1f}"
                 print(f"  {label:>14} {r['cagr']*100:>8.1f}% {oos_r['cagr']*100:>9.1f}% "
                       f"{r['sharpe']:>10.2f} {oos_r['sharpe']:>11.2f} "
-                      f"{decay:>+5.0f}%")
+                      f"{decay_pp:>+5.1f}pp")
 
 
 def run_robustness_check():
@@ -251,17 +264,22 @@ def run_robustness_check():
 
     params = dict(BASELINE)
     print(f"\n  📊 滚动窗口 OOS (3年IS → 2年OOS, 参数={params})")
-    print(f"  {'窗口':<14} {'IS CAGR':>8} {'OOS CAGR':>9} {'衰减':>8} {'OOS盈利':>8}")
+    print(f"  {'窗口':<14} {'IS CAGR':>8} {'OOS CAGR':>9} {'Δ(pp)':>7} {'OOS盈利':>8}")
     print(f"  {'-'*50}")
 
     all_oos_cagrs = []
+    n_rolling = len(windows) * 2  # IS + OOS per window
+    rolling_done = 0
     for label, is_s, is_e, oos_s, oos_e in windows:
+        rolling_done += 1
+        print(f"    [{rolling_done}/{n_rolling}] {label} ... ", end="", flush=True)
         is_r = run_backtest(params, is_s, is_e)
+        rolling_done += 1
         oos_r = run_backtest(params, oos_s, oos_e)
-        decay = (oos_r['cagr'] / is_r['cagr'] - 1) if is_r['cagr'] > 0 else 0
+        decay_pp = (oos_r['cagr'] - is_r['cagr']) * 100
         all_oos_cagrs.append(oos_r['cagr'])
         print(f"  {label:<14} {is_r['cagr']*100:>8.1f}% {oos_r['cagr']*100:>9.1f}% "
-              f"{decay*100:>+7.1f}% {'✅' if oos_r['all_profitable'] else '❌':>8}")
+              f"{decay_pp:>+6.1f}pp {'✅' if oos_r['all_profitable'] else '❌':>8}")
 
     oos_positive = sum(1 for c in all_oos_cagrs if c > 0)
     print(f"  {'-'*50}")
@@ -276,10 +294,10 @@ def run_robustness_check():
     baseline_r = run_backtest(params, IS_START, IS_END)
     baseline_cagr = baseline_r['cagr']
 
-    for pname, base_val in [
-        ('stop_mult', 1.5), ('trail_mult', 5.0), ('add_step', 2.0),
-        ('max_units', 6), ('window_size', 100),
-    ]:
+    plateau_done = 0
+    n_params = 5
+    for pname in ['stop_mult', 'trail_mult', 'add_step', 'max_units', 'window_size']:
+        base_val = BASELINE[pname]
         row = []
         cagrs_at_levels = []
         for pct in [-0.2, -0.1, 0, 0.1, 0.2]:
@@ -291,19 +309,26 @@ def run_robustness_check():
                 test_val = max(40, test_val)
             else:
                 test_val = base_val * (1 + pct)
+
+            # 跳过与基线重复的值（如 max_units=6+10%=6.6→int=6 与基线相同）
+            if pct != 0 and test_val == base_val:
+                row.append("   —")
+                cagrs_at_levels.append(baseline_cagr)
+                continue
+
             test_params = dict(params)
             test_params[pname] = test_val
             r = run_backtest(test_params, IS_START, IS_END)
             cagrs_at_levels.append(r['cagr'])
-            if pct == 0:
-                row.append(f"{r['cagr']*100:>7.1f}%")
-            else:
-                row.append(f"{r['cagr']*100:>7.1f}%")
+            row.append(f"{r['cagr']*100:>7.1f}%")
 
         # 平坦度: max - min across levels
         cagr_range = max(cagrs_at_levels) - min(cagrs_at_levels)
         is_flat = "✅" if cagr_range < 0.03 else ("⚠️" if cagr_range < 0.06 else "❌")
-        print(f"  {pname:<14} {row[0]} {row[1]} {row[2]} {row[3]} {row[4]} "
+        # row 长度可能少于 5（如 max_units 跳过重复值），左对齐后补空
+        row_str = " ".join(f"{v:>8}" for v in row)
+        plateau_done += 1
+        print(f"  [{plateau_done}/{n_params}] {pname:<8} {row_str} "
               f"{is_flat:>6} (range={cagr_range*100:.1f}%)")
 
     print(f"\n  💡 平坦度: ✅=CAGR波动<3pp ⚠️=3-6pp ❌=>6pp")
@@ -334,7 +359,15 @@ def main():
 
     if args.param:
         if args.values:
-            vals = [float(x.strip()) for x in args.values.split(",")]
+            # 按参数类型解析值列表
+            baseline_val = BASELINE.get(args.param)
+            raw_vals = [x.strip() for x in args.values.split(",")]
+            if isinstance(baseline_val, bool):
+                vals = [v.lower() in ("true", "1", "yes", "on") for v in raw_vals]
+            elif isinstance(baseline_val, int):
+                vals = [int(v) for v in raw_vals]
+            else:
+                vals = [float(v) for v in raw_vals]
             SCAN_RANGES[args.param] = vals
         scan_param(args.param)
     else:
