@@ -44,6 +44,11 @@ DEFAULT_PARAMS = dict(
     initial_capital=100_000, risk_per_trade=0.01, num_symbols=6,
     slippage_pct=0.001, commission_pct=0.00015,
     use_dynamic_equity=True, max_consecutive_losses=5, pause_bars=20,
+    # S24 形态识别参数
+    confirm_k=2, min_advance=0.05, min_gap_ad=5, min_gap_db=3,
+    local_half_window=2,
+    # S27 止损地板参数
+    stop_floor_pre_break=0.97, stop_floor_post_break=0.95,
 )
 
 
@@ -150,7 +155,8 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
 
     # 6. 计算入场价（含滑点）、止损、仓位
     entry_price = strategy._buy_price(df_ind.loc[idx, 'open'])
-    stop = min(ns.b_price - strategy.stop_mult * atr, ns.b_price * 0.95)
+    stop = min(ns.b_price - strategy.stop_mult * atr,
+               ns.b_price * strategy.stop_floor_post_break)
 
     equity = float(state.get("equity", strategy.initial_capital))
     equity_for_sizing = equity if strategy.use_dynamic_equity else strategy.capital_per_symbol
@@ -161,6 +167,7 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
         "entry_price": round(entry_price, 3),
         "stop_loss": round(stop, 3),
         "shares": shares,
+        "total_cost": round(entry_price * shares, 2),
         "a_price": round(float(ns.a_price), 3),
         "d_price": round(float(ns.d_price), 3),
         "b_price": round(float(ns.b_price), 3),
@@ -199,7 +206,7 @@ def check_position_exit(df_ind: pd.DataFrame, idx: int,
             pass
         else:
             # B 点止损地板（S27：简化逻辑，不再强制平仓）
-            b_floor = b_price * 0.97
+            b_floor = b_price * strategy.stop_floor_pre_break
             if stop_loss < b_floor:
                 pass  # 止损会自动提到 B 点附近
 
@@ -240,24 +247,35 @@ def check_position_add(df_ind: pd.DataFrame, idx: int,
     max_units = strategy.max_units
 
     if not d_broken and close > d_price:
-        # D 点突破加仓
-        new_stop = min(d_price - strategy.stop_mult * atr, b_price * 0.95)
+        # D 点突破加仓（对齐 _manage_position）
+        new_stop = max(
+            stop_loss,
+            min(d_price - strategy.stop_mult * atr,
+                b_price * strategy.stop_floor_post_break)
+        )
         add_price = strategy._buy_price(close)
+        # 加仓后上移止损保护新增仓位
+        new_stop = max(new_stop, close * strategy.stop_floor_post_break)
         return {
             "type": "D点突破加仓",
             "price": round(add_price, 3),
             "new_units": units + 1,
             "new_stop": round(new_stop, 3),
+            "add_cost": round(close * pos.get("shares_per_unit", 0), 2),
         }
 
     if d_broken and units < max_units:
         next_level = entry_price + units * strategy.add_step * atr
         if high >= next_level:
+            # 金字塔加仓（对齐 _manage_position）
+            new_stop = max(stop_loss, close * strategy.stop_floor_pre_break)
             return {
                 "type": "金字塔加仓",
                 "price": round(close, 3),
                 "new_units": units + 1,
                 "next_level": round(entry_price + (units + 1) * strategy.add_step * atr, 3),
+                "new_stop": round(new_stop, 3),
+                "add_cost": round(close * pos.get("shares_per_unit", 0), 2),
             }
 
     return None
@@ -385,7 +403,9 @@ def print_signals(signals: dict, state: dict):
         for sym, info in adds:
             print(f"     {sym}: {info.get('type', '')} "
                   f"@ {info.get('price', 0):.3f}  "
-                  f"→ {info.get('new_units', 0)}单位")
+                  f"→ {info.get('new_units', 0)}单位  "
+                  f"新止损={info.get('new_stop', 0):.3f}  "
+                  f"成本+¥{info.get('add_cost', 0):,.0f}")
         print()
 
     # 入场信号
