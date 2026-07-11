@@ -233,9 +233,11 @@ def main():
     parser.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS,
                         help="品种代码列表 (默认: 6 核心 ETF)")
     parser.add_argument("--start", default="2014-01-01",
-                        help="起始日期 (默认: 2014-01-01)")
-    parser.add_argument("--end", default=None,
-                        help="截止日期 (默认: 数据最大日期)")
+                        help="起始日期")
+    parser.add_argument("--end", default="2020-01-01",
+                        help="截止日期 (默认: 2020-01-01, IS 6年)")
+    parser.add_argument("--oos", action="store_true",
+                        help="OOS 验证模式: 2020-01-01 ~ 数据末尾")
     parser.add_argument("--window", type=int, default=100,
                         help="滑动窗口大小 (默认: 100, S22调优定型)")
     parser.add_argument("--atr_period", type=int, default=25,
@@ -264,6 +266,10 @@ def main():
                         help="组合模式：共享资金池回测 (S26)")
     parser.add_argument("--max-exposure", type=float, default=1.5,
                         help="组合模式最大总敞口 (默认: 1.5 = 150%%)")
+    parser.add_argument("--no-ma-cross", action="store_true",
+                        help="关闭 MA5×MA20 金叉过滤")
+    parser.add_argument("--max-pos-pct", type=float, default=0.25,
+                        help="单品种最大仓位比例 (默认: 0.25 = 25%%)")
     parser.add_argument("--diagnose", action="store_true",
                         help="诊断分析：退出原因分布/持仓时长/PnL分解")
     args = parser.parse_args()
@@ -276,8 +282,12 @@ def main():
           f"滑点={args.slippage:.3f}, 费率={args.commission:.4f}, "
           f"MA5确认={'ON' if args.ma5 else 'OFF'}, "
           f"趋势过滤={'ON' if args.ma_trend else 'OFF'}")
+    if args.oos:
+        args.start = "2020-01-01"
+        args.end = None
     end_label = args.end if args.end else "数据末尾"
-    print(f"📅  区间: {args.start} ~ {end_label}")
+    mode_label = "OOS" if args.oos else "IS"
+    print(f"📅  区间 [{mode_label}]: {args.start} ~ {end_label}")
     print(f"📈  品种: {', '.join(args.symbols)}")
 
     # 初始化策略
@@ -294,6 +304,8 @@ def main():
         num_symbols=len(args.symbols),
         slippage_pct=args.slippage,
         commission_pct=args.commission,
+        use_ma_cross=not args.no_ma_cross,
+        max_position_pct=args.max_pos_pct,
     )
 
     # ── 组合模式 (S26) ──

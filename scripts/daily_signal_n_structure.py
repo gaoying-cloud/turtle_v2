@@ -49,6 +49,8 @@ DEFAULT_PARAMS = dict(
     local_half_window=2,
     # S27 止损地板参数
     stop_floor_pre_break=0.97, stop_floor_post_break=0.95,
+    # S30 信号过滤 + 仓位管理
+    use_ma_cross=True, max_position_pct=0.25,
 )
 
 
@@ -149,6 +151,13 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
     if strategy.ma_trend > 0:
         prev_ma = df_ind.loc[prev, 'ma_trend']
         if pd.isna(prev_ma) or prev_close <= prev_ma:
+            return None
+
+    # 4b. MA5×MA20 金叉过滤（S30）
+    if strategy.use_ma_cross:
+        ma5_val = df_ind.loc[prev, 'ma5']
+        ma20_val = df_ind.loc[prev, 'ma20']
+        if pd.isna(ma5_val) or pd.isna(ma20_val) or ma5_val <= ma20_val:
             return None
 
     # 5. ATR 有效性
@@ -357,15 +366,15 @@ def scan_signals(symbols: list[str], state: dict,
         # ── 应用入场到 state ──
         if entry_info:
             positions[sym] = {
-                "entry_price": entry_info["entry_price"],
-                "stop_loss": entry_info["stop_loss"],
-                "shares_per_unit": entry_info["shares"],
-                "total_cost": entry_info["total_cost"],
+                "entry_price": float(entry_info["entry_price"]),
+                "stop_loss": float(entry_info["stop_loss"]),
+                "shares_per_unit": int(entry_info["shares"]),
+                "total_cost": float(entry_info["total_cost"]),
                 "units": 1,
-                "d_broken": entry_info["entry_price"] > entry_info["d_price"],
-                "b_price": entry_info["b_price"],
-                "d_price": entry_info["d_price"],
-                "a_price": entry_info["a_price"],
+                "d_broken": bool(entry_info["entry_price"] > entry_info["d_price"]),
+                "b_price": float(entry_info["b_price"]),
+                "d_price": float(entry_info["d_price"]),
+                "a_price": float(entry_info["a_price"]),
             }
             state["positions"] = positions
 

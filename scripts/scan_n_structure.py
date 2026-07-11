@@ -34,10 +34,10 @@ logger = logging.getLogger(__name__)
 DATA_DIR = REPO_DIR / "data" / "etf_daily"
 SYMBOLS = ["510500.SH", "159915.SZ", "513100.SH", "518880.SH", "159985.SZ", "513520.SH"]
 
-IS_START = "2020-01-01"
-IS_END = "2026-06-30"
-OOS_START = "2014-01-01"
-OOS_END = "2019-12-31"
+IS_START = "2014-01-01"
+IS_END = "2020-01-01"
+OOS_START = "2020-01-01"
+OOS_END = "2026-06-30"
 
 
 def load_data(symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -119,6 +119,8 @@ BASELINE = dict(
     num_symbols=6,
     slippage_pct=0.001,
     commission_pct=0.00015,
+    use_ma_cross=True,
+    max_position_pct=0.25,
 )
 
 # ── 各参数扫描范围 ──

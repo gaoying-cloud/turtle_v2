@@ -379,6 +379,9 @@ class NStructureStrategy:
     # ── S27 止损地板参数 ──
     stop_floor_pre_break: float = 0.97,    # D点未突破时止损地板（更紧，快速止损未确认持仓）
     stop_floor_post_break: float = 0.95,   # D点突破后/进场时止损地板（放宽，给趋势留空间）
+    # ── S30 信号过滤 + 仓位管理 ──
+    use_ma_cross: bool = True,             # MA5>MA20 金叉过滤（过滤短期下行假突破）
+    max_position_pct: float = 0.25,        # 单品种最大仓位上限（价格比例，防 ETF 杠杆过度）
     ):
         self.window_size = window_size
         self.atr_period = atr_period
@@ -409,6 +412,9 @@ class NStructureStrategy:
         # S27 止损地板
         self.stop_floor_pre_break = stop_floor_pre_break
         self.stop_floor_post_break = stop_floor_post_break
+        # S30 信号过滤 + 仓位
+        self.use_ma_cross = use_ma_cross
+        self.max_position_pct = max_position_pct
 
     def _buy_price(self, price: float) -> float:
         """买入实际成交价 = 理想价 × (1 + 滑点)。"""
@@ -430,21 +436,27 @@ class NStructureStrategy:
         if self.ma_trend > 0:
             result['ma_trend'] = compute_ma(result['close'], self.ma_trend)
         result['ma5'] = compute_ma(result['close'], self.ma_confirm)
+        if self.use_ma_cross:
+            result['ma20'] = compute_ma(result['close'], 20)
         return result
 
     def _calc_shares(self, equity: float, price: float, atr: float) -> int:
-        """海龟风格仓位计算。
+        """仓位计算：ATR 风险预算 + 价格比例上限，取较小值。
 
-        risk_amount = equity × risk_per_trade
-        per_share_risk = stop_mult × ATR
-        shares = risk_amount / per_share_risk，舍入到 100 的倍数
+        1. ATR-based: risk_amount / per_share_risk（海龟原版）
+        2. Price-cap:   equity × max_position_pct / price（防 ETF 杠杆过度）
+        3. 取 min，舍入到 100 的倍数，下限 100 股
         """
+        # ATR 风险预算
         risk_amount = equity * self.risk_per_trade
         per_share_risk = self.stop_mult * atr
-        if per_share_risk <= 0:
-            return 0
-        theoretical = risk_amount / per_share_risk
-        shares = int(theoretical / 100) * 100
+        atr_shares = risk_amount / per_share_risk if per_share_risk > 0 else 0
+
+        # 价格比例上限
+        max_cost = equity * self.max_position_pct
+        price_cap_shares = max_cost / price if price > 0 else 0
+
+        shares = int(min(atr_shares, price_cap_shares) / 100) * 100
         return max(100, shares)
 
     def run(self, df: pd.DataFrame, symbol: str = "",
@@ -601,6 +613,13 @@ class NStructureStrategy:
         if self.ma_trend > 0:
             prev_ma = df.loc[prev, 'ma_trend']
             if pd.isna(prev_ma) or prev_close <= prev_ma:
+                return
+
+        # MA5×MA20 金叉过滤（S30：过滤短期下行假突破）
+        if self.use_ma_cross:
+            ma5_val = df.loc[prev, 'ma5']
+            ma20_val = df.loc[prev, 'ma20']
+            if pd.isna(ma5_val) or pd.isna(ma20_val) or ma5_val <= ma20_val:
                 return
 
         # ── 信号触发 → 今日开盘进场 ──
@@ -799,6 +818,14 @@ class NStructureStrategy:
         if self.ma_trend > 0:
             prev_ma = df.loc[prev, 'ma_trend']
             if pd.isna(prev_ma) or prev_close <= prev_ma:
+                pos.reentry_eligible = False
+                return
+
+        # MA5×MA20 金叉过滤（S30）
+        if self.use_ma_cross:
+            ma5_val = df.loc[prev, 'ma5']
+            ma20_val = df.loc[prev, 'ma20']
+            if pd.isna(ma5_val) or pd.isna(ma20_val) or ma5_val <= ma20_val:
                 pos.reentry_eligible = False
                 return
 
@@ -1023,6 +1050,11 @@ class NStructureStrategy:
                     if self.ma_trend > 0:
                         prev_ma = df_sym.loc[prev, 'ma_trend']
                         if pd.isna(prev_ma) or prev_close <= prev_ma:
+                            continue
+                    if self.use_ma_cross:
+                        ma5_val = df_sym.loc[prev, 'ma5']
+                        ma20_val = df_sym.loc[prev, 'ma20']
+                        if pd.isna(ma5_val) or pd.isna(ma20_val) or ma5_val <= ma20_val:
                             continue
                     atr = df_sym.loc[prev, 'atr']
                     if pd.isna(atr) or atr <= 0:
