@@ -43,14 +43,17 @@ DEFAULT_SYMBOLS = [
 DATA_DIR = REPO_DIR / "data" / "etf_daily"
 
 
-def load_data(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+def load_data(symbol: str, start_date: str,
+              end_date: str | None = None) -> pd.DataFrame:
     """加载单个品种数据。"""
     path = DATA_DIR / f"{symbol}.parquet"
     if not path.exists():
         logger.warning("文件不存在: %s", path)
         return pd.DataFrame()
     df = pd.read_parquet(path)
-    mask = (df["date"] >= start_date) & (df["date"] <= end_date)
+    mask = df["date"] >= start_date
+    if end_date is not None:
+        mask &= df["date"] <= end_date
     df = df[mask].copy()
     if df.empty:
         return df
@@ -87,6 +90,7 @@ def compute_metrics(trades: list, initial_capital: float = 100000.0,
         "总交易": 0, "胜率": 0, "总盈亏": 0,
         "最大回撤": 0, "盈亏比": 0, "夏普": 0,
         "平均盈亏": 0, "CAGR": 0,
+        "盈利笔数": 0, "亏损笔数": 0,
     }
 
     if not trades:
@@ -94,7 +98,7 @@ def compute_metrics(trades: list, initial_capital: float = 100000.0,
 
     pnls = np.array([t.pnl for t in trades])
     wins = pnls[pnls > 0]
-    losses = pnls[pnls <= 0]
+    losses = pnls[pnls < 0]
     total_pnl = pnls.sum()
 
     # 胜率
@@ -127,15 +131,15 @@ def compute_metrics(trades: list, initial_capital: float = 100000.0,
         else:
             sharpe = 0.0
     else:
-        # 年化收益率（基于总回测时长，非交易天数累加）
+        # ⚠️ 旧版回退（无日频净值时）—— 交易序列近似，精度低于日频
         total_return = total_pnl / initial_capital
         cagr = ((1 + total_return) ** (1 / total_years) - 1) if total_pnl > -initial_capital else -1
-        # ── 旧版回退：按交易序列计算 ──
         equity = initial_capital + np.cumsum(pnls)
         peak = np.maximum.accumulate(equity)
         drawdown = (peak - equity) / peak
         max_drawdown = float(drawdown.max()) if len(drawdown) > 0 else 0.0
 
+        # per-trade 夏普近似（推荐改用日频净值获得准确值）
         trade_returns = pnls / initial_capital
         if trade_returns.std() > 0 and len(trades) > 1:
             avg_holding_days = max(1, total_years * 252 / len(trades))
@@ -230,8 +234,8 @@ def main():
                         help="品种代码列表 (默认: 6 核心 ETF)")
     parser.add_argument("--start", default="2014-01-01",
                         help="起始日期 (默认: 2014-01-01)")
-    parser.add_argument("--end", default="2026-07-09",
-                        help="截止日期 (默认: 2026-07-09)")
+    parser.add_argument("--end", default=None,
+                        help="截止日期 (默认: 数据最大日期)")
     parser.add_argument("--window", type=int, default=100,
                         help="滑动窗口大小 (默认: 100, S22调优定型)")
     parser.add_argument("--atr_period", type=int, default=25,
@@ -272,7 +276,8 @@ def main():
           f"滑点={args.slippage:.3f}, 费率={args.commission:.4f}, "
           f"MA5确认={'ON' if args.ma5 else 'OFF'}, "
           f"趋势过滤={'ON' if args.ma_trend else 'OFF'}")
-    print(f"📅  区间: {args.start} ~ {args.end}")
+    end_label = args.end if args.end else "数据末尾"
+    print(f"📅  区间: {args.start} ~ {end_label}")
     print(f"📈  品种: {', '.join(args.symbols)}")
 
     # 初始化策略
@@ -397,6 +402,10 @@ def main():
             i_str = f"{v_ind:{fmt}}" if fmt else str(v_ind)
             print(f"  {label:<12} {p_str:>14} {i_str:>14} {delta:>10}")
         print()
+
+        if args.diagnose:
+            print("⚠️  --diagnose 目前仅支持独立模式，组合模式下已跳过。")
+
         return
 
     # 逐个品种跑（独立模式）
@@ -455,10 +464,10 @@ def main():
          f"{sum(len(t) for t in all_trades.values())}"),
         ("平均胜率 > 25%", np.mean([_get_metric(sym, "胜率", all_trades, all_equity, date_ranges, cap_per_sym)
          for sym, t in all_trades.items() if t]) > 0.25,
-         f"{np.mean([compute_metrics(t, initial_capital=cap_per_sym, daily_equity=all_equity.get(sym))['胜率'] for sym, t in all_trades.items() if t]):.1%}"),
+         f"{np.mean([_get_metric(sym, '胜率', all_trades, all_equity, date_ranges, cap_per_sym) for sym, t in all_trades.items() if t]):.1%}"),
         ("平均最大回撤 < 30%", np.mean([_get_metric(sym, "最大回撤", all_trades, all_equity, date_ranges, cap_per_sym)
          for sym, t in all_trades.items() if t]) < 0.30,
-         f"{np.mean([compute_metrics(t, initial_capital=cap_per_sym, daily_equity=all_equity.get(sym))['最大回撤'] for sym, t in all_trades.items() if t]):.1%}"),
+         f"{np.mean([_get_metric(sym, '最大回撤', all_trades, all_equity, date_ranges, cap_per_sym) for sym, t in all_trades.items() if t]):.1%}"),
     ]
 
     passed = 0
@@ -484,14 +493,14 @@ def diagnose_trades(all_trades: dict[str, list], date_ranges: dict[str, float],
     """诊断退出原因分布和持仓特征。"""
     # 按退出原因分类
     by_reason: dict[str, list] = {}
+    trade_meta: dict[int, dict] = {}  # id(t) → {symbol, years}
     for symbol, trades in all_trades.items():
         years = date_ranges.get(symbol, 12.5)
         for t in trades:
             reason = t.exit_reason or "未知"
             if reason not in by_reason:
                 by_reason[reason] = []
-            t._symbol = symbol
-            t._years = years
+            trade_meta[id(t)] = {"symbol": symbol, "years": years}
             by_reason[reason].append(t)
 
     # 列头
@@ -500,10 +509,12 @@ def diagnose_trades(all_trades: dict[str, list], date_ranges: dict[str, float],
     sep = "-" * len(header)
     print(f"\n{header}\n{sep}")
 
-    for reason, trades in sorted(by_reason.items()):
+    for reason, trades in sorted(by_reason.items(),
+                                  key=lambda kv: sum(t.pnl for t in kv[1]),
+                                  reverse=True):
         pnls = np.array([t.pnl for t in trades])
         wins = pnls[pnls > 0]
-        total_years = np.mean([getattr(t, '_years', 12.5) for t in trades])
+        total_years = np.mean([trade_meta.get(id(t), {}).get("years", 12.5) for t in trades])
         m = compute_metrics(trades, initial_capital=capital_per_symbol,
                             total_years=total_years)
 
@@ -523,22 +534,22 @@ def diagnose_trades(all_trades: dict[str, list], date_ranges: dict[str, float],
     # ── 深度分析：D点突破失败 vs 止损 ──
     print(f"\n📌 关键发现")
 
-    # 1. D点失败的后续潜力（模拟放宽到60天）
-    d_fails = by_reason.get("D点突破失败", [])
+    # 1. D点未突破即止损 = "初始止损"（D点突破失败等价分析）
+    d_fails = by_reason.get("初始止损", [])
     if d_fails:
         d_pnls = np.array([t.pnl for t in d_fails])
         d_wins = d_pnls[d_pnls > 0]
-        print(f"\n  D点突破失败: {len(d_fails)}笔, "
+        print(f"\n  D点未突破即止损: {len(d_fails)}笔, "
               f"胜率 {len(d_wins)/len(d_fails):.1%}, "
               f"总盈亏 {d_pnls.sum():+.0f}, "
               f"平均持仓 {np.mean([max(0,t.exit_idx-t.entry_idx) for t in d_fails]):.0f}天")
 
-    # 2. 止损分析
-    stops = by_reason.get("止损", [])
+    # 2. 止损分析（初始止损 + 跟踪止损）
+    stops = by_reason.get("初始止损", []) + by_reason.get("跟踪止损", [])
     if stops:
         s_pnls = np.array([t.pnl for t in stops])
         s_wins = s_pnls[s_pnls > 0]
-        s_losses = s_pnls[s_pnls <= 0]
+        s_losses = s_pnls[s_pnls < 0]
         print(f"\n  止损退出: {len(stops)}笔, "
               f"胜率 {len(s_wins)/len(stops):.1%}, "
               f"总盈亏 {s_pnls.sum():+.0f}, "
@@ -564,8 +575,8 @@ def diagnose_trades(all_trades: dict[str, list], date_ranges: dict[str, float],
                   f"后10%亏损: {np.mean(bottom10):.0f} | "
                   f"比值 {abs(np.mean(top10)/np.mean(bottom10)):.1f}x")
 
-    # 4. 与海龟对比
-    print(f"\n📊 与海龟系统对比（参考）")
+    # 4. 与海龟对比（参考值，非本次回测结果）
+    print(f"\n📊 与海龟系统对比（参考值，非本次回测结果）")
     print(f"  N字结构: avg CAGR ~6%, 胜率~58%, 盈亏比~2.5")
     print(f"  海龟系统: avg CAGR ~15%, 胜率~40%, 盈亏比~4.2")
     print(f"  → N字胜率高但单笔赚得少 → 趋势没吃透")
