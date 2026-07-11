@@ -256,6 +256,10 @@ def main():
                         help="手续费率 (默认: 0.00015 = 万1.5)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="打印逐笔交易明细")
+    parser.add_argument("--portfolio", action="store_true",
+                        help="组合模式：共享资金池回测 (S26)")
+    parser.add_argument("--max-exposure", type=float, default=1.5,
+                        help="组合模式最大总敞口 (默认: 1.5 = 150%%)")
     parser.add_argument("--diagnose", action="store_true",
                         help="诊断分析：退出原因分布/持仓时长/PnL分解")
     args = parser.parse_args()
@@ -287,7 +291,115 @@ def main():
         commission_pct=args.commission,
     )
 
-    # 逐个品种跑
+    # ── 组合模式 (S26) ──
+    if args.portfolio:
+        print(f"\n{'='*60}")
+        print(f"  📊 组合模式 — 共享资金池回测")
+        print(f"  总资金: ¥{strategy.initial_capital:,.0f}  |  "
+              f"最大敞口: {args.max_exposure:.0%}")
+        print(f"{'='*60}")
+
+        dfs = {}
+        for symbol in args.symbols:
+            df = load_data(symbol, args.start, args.end)
+            if df.empty:
+                print(f"\n⚠️  {symbol}: 无数据，跳过")
+                continue
+            dfs[symbol] = df
+            days = (df['date'].iloc[-1] - df['date'].iloc[0]).days
+            print(f"📥  {symbol}: {len(df)} 条数据 ({df['date'].iloc[0].date()} ~ "
+                  f"{df['date'].iloc[-1].date()}, {days/365.25:.1f}年)")
+
+        result = strategy.run_portfolio(
+            dfs, max_total_exposure=args.max_exposure,
+            verbose=args.verbose,
+        )
+
+        # 组合汇总
+        eq = result['portfolio_equity']
+        years = (eq.index[-1] - eq.index[0]).days / 365.25
+        m = compute_metrics(
+            result['all_trades'],
+            initial_capital=strategy.initial_capital,
+            total_years=years,
+            daily_equity=eq,
+        )
+        print(f"\n{'='*65}")
+        print(f"  组合回测结果")
+        print(f"{'='*65}")
+        print(f"  总交易: {m['总交易']}  |  胜率: {m['胜率']:.1%}  |  "
+              f"总盈亏: ¥{m['总盈亏']:+,.0f}")
+        print(f"  CAGR: {m['CAGR']:.1%}  |  夏普: {m['夏普']:.2f}  |  "
+              f"MDD: {m['最大回撤']:.1%}  |  盈亏比: {m['盈亏比']:.2f}")
+        print(f"  终值: ¥{eq.iloc[-1]:,.0f}  |  最高敞口: "
+              f"{result['daily_exposure'].max():.0%}")
+        print()
+
+        # 品种归因
+        print(f"  {'品种':<12} {'交易':>5} {'盈亏':>12} {'贡献%':>7}")
+        print(f"  {'-'*40}")
+        total_pnl = sum(
+            sum(t.pnl for t in result['symbol_trades'].get(s, []))
+            for s in args.symbols
+        )
+        for s in args.symbols:
+            st = result['symbol_trades'].get(s, [])
+            spnl = sum(t.pnl for t in st)
+            share = spnl / total_pnl * 100 if total_pnl != 0 else 0
+            print(f"  {s:<12} {len(st):>5} {spnl:>+12,.0f} {share:>6.1f}%")
+        print()
+
+        # ── 与独立模式对比 ──
+        print(f"  {'='*65}")
+        print(f"  📊 组合 vs 独立 对比")
+        print(f"  {'='*65}")
+        # 跑独立模式
+        all_trades_ind: dict[str, list] = {}
+        all_equity_ind: dict[str, pd.Series] = {}
+        for sym in args.symbols:
+            if sym not in dfs:
+                continue
+            _, trades, eq_sym = strategy.run(dfs[sym], symbol=sym, verbose=False)
+            all_trades_ind[sym] = trades
+            all_equity_ind[sym] = eq_sym
+        # 独立模式总净值 = 各品种净值之和
+        eq_panel = pd.DataFrame(all_equity_ind).ffill()
+        eq_combined = eq_panel.sum(axis=1)
+        total_trades_ind = sum(len(t) for t in all_trades_ind.values())
+        total_pnl_ind = sum(
+            sum(t.pnl for t in trades) for trades in all_trades_ind.values()
+        )
+        m_ind = compute_metrics(
+            [t for trades in all_trades_ind.values() for t in trades],
+            initial_capital=strategy.initial_capital,
+            total_years=years,
+            daily_equity=eq_combined,
+        )
+        print(f"  {'指标':<12} {'组合(共享池)':>14} {'独立(求和)':>14} {'变化':>10}")
+        print(f"  {'-'*52}")
+        for label, key, fmt in [
+            ('CAGR', 'CAGR', '.1%'), ('夏普', '夏普', '.2f'),
+            ('MDD', '最大回撤', '.1%'), ('交易笔数', '总交易', ''),
+            ('胜率', '胜率', '.1%'),
+        ]:
+            v_port = m[key]
+            v_ind = m_ind[key]
+            if key == '总交易':
+                v_port = m['总交易']
+                v_ind = total_trades_ind
+            if 'CAGR' in key or 'MDD' in key or '胜率' in key:
+                delta = f"{v_port - v_ind:+.1%}"
+            elif fmt == '.2f':
+                delta = f"{v_port - v_ind:+.2f}"
+            else:
+                delta = f"{int(v_port) - int(v_ind):+d}"
+            p_str = f"{v_port:{fmt}}" if fmt else str(v_port)
+            i_str = f"{v_ind:{fmt}}" if fmt else str(v_ind)
+            print(f"  {label:<12} {p_str:>14} {i_str:>14} {delta:>10}")
+        print()
+        return
+
+    # 逐个品种跑（独立模式）
     all_trades: dict[str, list] = {}
     all_equity: dict[str, pd.Series] = {}
     date_ranges: dict[str, float] = {}

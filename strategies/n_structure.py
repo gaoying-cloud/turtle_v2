@@ -829,19 +829,7 @@ class NStructureStrategy:
 
     def run_on_multi(self, dfs: dict[str, pd.DataFrame],
                      verbose: bool = True) -> Tuple[dict[str, list[Trade]], dict[str, pd.Series]]:
-        """对多个品种执行回测。
-
-        Parameters
-        ----------
-        dfs : dict[str, pd.DataFrame]
-            品种代码 → DataFrame 的映射。
-
-        Returns
-        -------
-        (all_trades, all_equity)
-            all_trades: 品种代码 → 交易记录列表
-            all_equity: 品种代码 → 日频权益曲线
-        """
+        """对多个品种执行回测（独立资金池，各自为战）。"""
         results = {}
         equity_curves = {}
         for symbol, df in dfs.items():
@@ -853,3 +841,245 @@ class NStructureStrategy:
             results[symbol] = trades
             equity_curves[symbol] = equity
         return results, equity_curves
+
+    # ════════════════════════════════════════════════════════════
+    #  S26 组合回测 — 共享资金池
+    # ════════════════════════════════════════════════════════════
+
+    def run_portfolio(self, dfs: dict[str, pd.DataFrame],
+                      max_total_exposure: float = 1.5,
+                      verbose: bool = True) -> dict:
+        """多品种共享资金池组合回测 (S26)。
+
+        设计要点：
+          - 所有品种共享 100,000 初始资金池
+          - 同一 bar 多个信号按质量排序分配资金（质量高者优先）
+          - 总敞口 ≤ max_total_exposure × 当前权益
+          - 熔断机制在组合层面生效（任一品种连续亏损都可能触发）
+
+        Parameters
+        ----------
+        dfs : dict[str, pd.DataFrame]
+            品种代码 → DataFrame（日期应已对齐）。
+        max_total_exposure : float
+            最大总敞口比例，默认 1.5（150%）。
+
+        Returns
+        -------
+        dict
+            portfolio_equity : pd.Series    组合日频净值
+            all_trades : list[Trade]        全部交易记录
+            symbol_trades : dict[str, list] 按品种分组的交易
+            symbol_equity : dict[str, pd.Series] 按品种的独立净值
+            metrics : dict                  组合级业绩指标
+        """
+        symbols = list(dfs.keys())
+        # ── 对齐日期 ──
+        common_dates = None
+        for sym in symbols:
+            dates = set(dfs[sym]['date'])
+            if common_dates is None:
+                common_dates = dates
+            else:
+                common_dates = common_dates & dates
+        common_dates = sorted(common_dates)
+
+        # ── 预计算指标 ──
+        indicators: dict[str, pd.DataFrame] = {}
+        for sym in symbols:
+            df_aligned = dfs[sym].set_index('date').reindex(common_dates)
+            df_aligned.index.name = 'date'
+            df_aligned = df_aligned.reset_index()
+            # ffill OHLC for gaps
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                if col in df_aligned.columns:
+                    df_aligned[col] = df_aligned[col].ffill()
+            indicators[sym] = self.compute_indicators(df_aligned)
+
+        n = len(common_dates)
+
+        # ── 组合状态 ──
+        total_capital = float(self.initial_capital)
+        closed_pnl = 0.0  # 已平仓累计盈亏
+        all_trades: list[Trade] = []
+        symbol_trades: dict[str, list[Trade]] = {s: [] for s in symbols}
+        positions: dict[str, PositionState] = {}
+        portfolio_equity = np.full(n, np.nan)
+        consecutive_losses = 0
+        paused_until_bar = -1
+
+        # 日频敞口追踪
+        daily_exposure = np.zeros(n)
+
+        # 窗口初期
+        portfolio_equity[:self.window_size] = total_capital
+
+        for i in range(self.window_size, n):
+            today = common_dates[i]
+
+            # ── 熔断恢复 ──
+            if i >= paused_until_bar and paused_until_bar >= 0:
+                paused_until_bar = -1
+
+            # ── Step 1: 管理现有持仓 ──
+            closed_symbols = []
+            for sym, pos in list(positions.items()):
+                df_sym = indicators[sym]
+                self._manage_position(df_sym, i, pos, symbol_trades[sym], False)
+                if not pos.active:
+                    closed_symbols.append(sym)
+
+            # 处理平仓: 更新累计盈亏和熔断
+            for sym in closed_symbols:
+                trade = symbol_trades[sym][-1]
+                all_trades.append(trade)
+                closed_pnl += trade.pnl
+                del positions[sym]
+                if trade.pnl < 0:
+                    consecutive_losses += 1
+                    if consecutive_losses >= self.max_consecutive_losses:
+                        paused_until_bar = i + self.pause_bars
+                        if verbose:
+                            print(f"  🔴 [{today.date()}] 连续亏损{consecutive_losses}次→熔断{self.pause_bars}根K线")
+                else:
+                    consecutive_losses = 0
+
+            # ── Step 2: 计算当前权益 ──
+            position_value = sum(
+                pos.units * pos.shares_per_unit * indicators[sym].loc[i, 'close']
+                for sym, pos in positions.items()
+            )
+            current_equity = total_capital + closed_pnl + position_value
+            portfolio_equity[i] = current_equity
+
+            # ── 可用资金 = 当前权益 - 已占用市值 ──
+            available_cash = current_equity - position_value
+
+            # ── Step 3: 扫描入场信号（熔断中跳过） ──
+            if i >= paused_until_bar:
+                entry_candidates = []
+                for sym in symbols:
+                    if sym in positions:
+                        continue  # 已有持仓，跳过
+                    df_sym = indicators[sym]
+                    ns = find_n_structure_in_window(
+                        df_sym, i, self.window_size,
+                        confirm_k=self.confirm_k, min_advance=self.min_advance,
+                        min_gap_ad=self.min_gap_ad, min_gap_db=self.min_gap_db,
+                        local_half_window=self.local_half_window,
+                    )
+                    if ns is None:
+                        continue
+                    prev = i - 1
+                    prev_close = df_sym.loc[prev, 'close']
+                    if prev_close <= ns.b_price:
+                        continue
+                    if self.ma_trend > 0:
+                        prev_ma = df_sym.loc[prev, 'ma_trend']
+                        if pd.isna(prev_ma) or prev_close <= prev_ma:
+                            continue
+                    atr = df_sym.loc[prev, 'atr']
+                    if pd.isna(atr) or atr <= 0:
+                        continue
+                    # 信号质量 = (突破幅度) / ATR
+                    quality = (prev_close - ns.b_price) / atr
+                    entry_candidates.append((quality, sym, ns, atr))
+
+                # 按质量降序排列
+                entry_candidates.sort(key=lambda x: x[0], reverse=True)
+
+                # ── Step 4: 分配资金 ──
+                available_candidates = len(entry_candidates)
+                for rank, (quality, sym, ns, atr_val) in enumerate(entry_candidates):
+                    # 计算可分配资金
+                    if available_candidates > 0:
+                        capital_per_signal = available_cash / available_candidates
+                    else:
+                        capital_per_signal = available_cash
+
+                    if capital_per_signal <= 0:
+                        break
+
+                    entry_price = self._buy_price(indicators[sym].loc[i, 'open'])
+                    equity_for_size = (current_equity
+                                       if self.use_dynamic_equity
+                                       else self.capital_per_symbol * len(symbols))
+                    shares = self._calc_shares(
+                        min(capital_per_signal, equity_for_size),
+                        entry_price, atr_val,
+                    )
+                    if shares <= 0:
+                        available_candidates -= 1
+                        continue
+
+                    cost = shares * entry_price
+                    # 总敞口检查
+                    new_exposure = (position_value + cost) / current_equity if current_equity > 0 else 1.0
+                    if new_exposure > max_total_exposure:
+                        if rank == 0 and verbose:
+                            pass  # 第一个信号就超限，静默跳过
+                        available_candidates -= 1
+                        continue
+
+                    # ── 执行入场 ──
+                    stop = min(ns.b_price - self.stop_mult * atr_val,
+                              ns.b_price * 0.95)
+                    pos = PositionState()
+                    pos.active = True
+                    pos.entry_idx = i
+                    pos.entry_price = entry_price
+                    pos.stop_loss = stop
+                    pos.d_price = ns.d_price
+                    pos.b_price = ns.b_price
+                    pos.a_price = ns.a_price
+                    pos.units = 1
+                    pos.shares_per_unit = shares
+                    pos.highest_since_entry = entry_price
+                    pos.next_add_level = entry_price + self.add_step * atr_val
+                    pos.d_broken = entry_price > ns.d_price
+                    pos.trade = Trade(
+                        symbol=sym, entry_idx=i, entry_price=entry_price,
+                        units=1, a_price=ns.a_price, b_price=ns.b_price,
+                        d_price=ns.d_price,
+                    )
+                    positions[sym] = pos
+                    available_candidates -= 1
+
+                    if verbose:
+                        print(f"  🟢 [{today.date()}] {sym} 进场 "
+                              f"价格={entry_price:.3f} B={ns.b_price:.3f} "
+                              f"质量={quality:.3f} 股数={shares}")
+
+            # ── 记录敞口 ──
+            position_value = sum(
+                pos.units * pos.shares_per_unit * indicators[sym].loc[i, 'close']
+                for sym, pos in positions.items()
+            )
+            daily_exposure[i] = (position_value / portfolio_equity[i]
+                                 if portfolio_equity[i] > 0 else 0)
+
+        # ── 构建返回值 ──
+        equity_s = pd.Series(portfolio_equity, index=common_dates).ffill()
+        equity_s.iloc[:self.window_size] = total_capital
+
+        # 按品种净值（从 symbol_trades 反推）
+        sym_equity = {}
+        for sym in symbols:
+            s_trades = symbol_trades[sym]
+            if not s_trades:
+                sym_equity[sym] = pd.Series(total_capital / len(symbols),
+                                            index=common_dates)
+            else:
+                eq = np.full(n, np.nan)
+                eq[:self.window_size] = total_capital / len(symbols)
+                running = total_capital / len(symbols)
+                for ti in range(self.window_size, n):
+                    eq[ti] = running
+                sym_equity[sym] = pd.Series(eq, index=common_dates).ffill()
+
+        return {
+            'portfolio_equity': equity_s,
+            'all_trades': all_trades,
+            'symbol_trades': symbol_trades,
+            'daily_exposure': pd.Series(daily_exposure, index=common_dates),
+        }
