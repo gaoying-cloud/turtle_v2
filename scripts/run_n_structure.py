@@ -105,12 +105,16 @@ def compute_metrics(trades: list, initial_capital: float = 100000.0,
     avg_loss = abs(losses.mean()) if len(losses) > 0 else 1
     profit_factor = avg_win / avg_loss if avg_loss != 0 else 0
 
-    # 年化收益率
-    total_return = total_pnl / initial_capital
-    cagr = ((1 + total_return) ** (1 / total_years) - 1) if total_pnl > -initial_capital else -1
-
-    # ── S24: 日频净值优先（更准确的 Sharpe 和 MDD） ──
+    # ── S24/S25: 日频净值优先（更准确的 CAGR/Sharpe/MDD） ──
     if daily_equity is not None and len(daily_equity) > 1:
+        # 年化收益率：从日频净值曲线计算（支持复利/动态权益）
+        start_eq = float(daily_equity.iloc[0])
+        end_eq = float(daily_equity.iloc[-1])
+        if start_eq > 0 and end_eq > 0:
+            cagr = (end_eq / start_eq) ** (1 / total_years) - 1
+        else:
+            cagr = float(total_pnl / initial_capital)
+
         # 日频最大回撤
         peak = daily_equity.expanding().max()
         dd = (peak - daily_equity) / peak
@@ -123,6 +127,9 @@ def compute_metrics(trades: list, initial_capital: float = 100000.0,
         else:
             sharpe = 0.0
     else:
+        # 年化收益率（基于总回测时长，非交易天数累加）
+        total_return = total_pnl / initial_capital
+        cagr = ((1 + total_return) ** (1 / total_years) - 1) if total_pnl > -initial_capital else -1
         # ── 旧版回退：按交易序列计算 ──
         equity = initial_capital + np.cumsum(pnls)
         peak = np.maximum.accumulate(equity)

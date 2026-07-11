@@ -362,6 +362,10 @@ class NStructureStrategy:
     # ── S24 摩擦成本参数 ──
     slippage_pct: float = 0.001,     # 成交滑点 (0.1%)
     commission_pct: float = 0.00015, # 手续费率 (0.015%, ETF 万1.5)
+    # ── S25 风控参数 ──
+    use_dynamic_equity: bool = True,       # 动态权益仓位（复利）
+    max_consecutive_losses: int = 5,        # 连续亏损熔断阈值（42%胜率下概率≈6.6%）
+    pause_bars: int = 20,                   # 熔断冷却 K 线数
     ):
         self.window_size = window_size
         self.atr_period = atr_period
@@ -385,6 +389,10 @@ class NStructureStrategy:
         # S24 摩擦成本
         self.slippage_pct = slippage_pct
         self.commission_pct = commission_pct
+        # S25 风控
+        self.use_dynamic_equity = use_dynamic_equity
+        self.max_consecutive_losses = max_consecutive_losses
+        self.pause_bars = pause_bars
 
     def _buy_price(self, price: float) -> float:
         """买入实际成交价 = 理想价 × (1 + 滑点)。"""
@@ -452,47 +460,76 @@ class NStructureStrategy:
 
         n = len(df)
 
-        # ── 日频权益追踪 (S24) ──
+        # ── 日频权益追踪 (S24/S25) ──
         equity_arr = np.full(n, np.nan)
-        closed_pnl = 0.0  # 已平仓交易的累计盈亏
+        current_equity = float(self.capital_per_symbol)  # 已实现权益（现金）
+
+        # ── 连续亏损熔断 (S25) ──
+        consecutive_losses = 0
+        paused_until_bar = -1
 
         # 窗口初期：无交易，权益 = 初始资金
         equity_arr[:self.window_size] = self.capital_per_symbol
 
         for i in range(self.window_size, n):
+            # ── 熔断恢复检查 (S25) ──
+            if i >= paused_until_bar and paused_until_bar >= 0:
+                if verbose:
+                    print(f"  🟢 熔断恢复 [{i}]  继续交易")
+                paused_until_bar = -1
+
             # ── 持仓管理 ──
             if pos.active:
                 self._manage_position(df, i, pos, trades, verbose)
-                # 计算当日权益：本金 + 已实现盈亏 + 未实现盈亏
                 if pos.active:
                     unrealized = ((df.loc[i, 'close'] - pos.entry_price)
                                   * pos.units * pos.shares_per_unit)
-                    equity_arr[i] = self.capital_per_symbol + closed_pnl + unrealized
+                    equity_arr[i] = current_equity + unrealized
                 else:
-                    # 刚平仓：累加已实现盈亏
-                    closed_pnl += trades[-1].pnl
-                    equity_arr[i] = self.capital_per_symbol + closed_pnl
+                    # 刚平仓：更新已实现权益 + 熔断计数
+                    current_equity += trades[-1].pnl
+                    equity_arr[i] = current_equity
+                    if trades[-1].pnl < 0:
+                        consecutive_losses += 1
+                        if consecutive_losses >= self.max_consecutive_losses:
+                            paused_until_bar = i + self.pause_bars
+                            if verbose:
+                                print(f"  🔴 连续亏损 {consecutive_losses} 次 → 熔断 "
+                                      f"{self.pause_bars} 根 K 线 (至 bar {paused_until_bar})")
+                    else:
+                        consecutive_losses = 0
                 continue
 
-            # ── 再进场检查（仅限刚平仓后的第一个 bar） ──
+            # ── 熔断中：跳过进场 (S25) ──
+            if i < paused_until_bar:
+                equity_arr[i] = current_equity
+                continue
+
+            # ── 用于仓位计算的权益（取上一日权益值） ──
+            sizing_equity = (equity_arr[i - 1] if i > 0 and not np.isnan(equity_arr[i - 1])
+                             else current_equity)
+
+            # ── 再进场检查 ──
             if pos.reentry_eligible:
-                self._execute_reentry(df, i, pos, trades, symbol, verbose)
+                self._execute_reentry(df, i, pos, trades, symbol, verbose,
+                                      current_equity=sizing_equity)
                 if pos.active:
                     pos.reentry_eligible = False
                     unrealized = ((df.loc[i, 'close'] - pos.entry_price)
                                   * pos.units * pos.shares_per_unit)
-                    equity_arr[i] = self.capital_per_symbol + closed_pnl + unrealized
+                    equity_arr[i] = current_equity + unrealized
                     continue
                 pos.reentry_eligible = False
 
             # ── 正常进场扫描 ──
-            self._check_entry_from_prev(df, i, pos, trades, symbol, verbose)
+            self._check_entry_from_prev(df, i, pos, trades, symbol, verbose,
+                                        current_equity=sizing_equity)
             if pos.active:
                 unrealized = ((df.loc[i, 'close'] - pos.entry_price)
                               * pos.units * pos.shares_per_unit)
-                equity_arr[i] = self.capital_per_symbol + closed_pnl + unrealized
+                equity_arr[i] = current_equity + unrealized
             else:
-                equity_arr[i] = self.capital_per_symbol + closed_pnl
+                equity_arr[i] = current_equity
 
         # 填充前导 NaN + 构建 Series
         equity_filled = pd.Series(equity_arr, index=df.index).ffill()
@@ -502,13 +539,18 @@ class NStructureStrategy:
 
     def _check_entry_from_prev(self, df: pd.DataFrame, i: int,
                                 pos: PositionState, trades: list[Trade],
-                                symbol: str, verbose: bool):
+                                symbol: str, verbose: bool,
+                                current_equity: float | None = None):
         """用 bar i-1 的数据检查信号，在 bar i 的开盘进场。
 
         设计原因：实盘中无法在收盘价成交，信号触发后最早在下个开盘进场。
         """
         if i < 1:
             return
+
+        # S25: 动态权益（默认使用固定 capital_per_symbol）
+        if current_equity is None:
+            current_equity = self.capital_per_symbol
 
         # 用昨日收盘数据检测信号
         prev = i - 1
@@ -551,8 +593,9 @@ class NStructureStrategy:
         # 初始止损
         stop = min(ns.b_price - self.stop_mult * atr, ns.b_price * 0.95)
 
-        # 仓位计算
-        shares_per_unit = self._calc_shares(self.capital_per_symbol, entry_price, atr)
+        # 仓位计算 (S25: 使用动态权益)
+        equity_for_sizing = current_equity if self.use_dynamic_equity else self.capital_per_symbol
+        shares_per_unit = self._calc_shares(equity_for_sizing, entry_price, atr)
         if shares_per_unit <= 0:
             return
 
@@ -712,11 +755,15 @@ class NStructureStrategy:
 
     def _execute_reentry(self, df: pd.DataFrame, i: int,
                           pos: PositionState, trades: list[Trade],
-                          symbol: str, verbose: bool):
+                          symbol: str, verbose: bool,
+                          current_equity: float | None = None):
         """在平仓后的下一 bar 执行再进场（如果条件满足）。"""
         if i < 1:
             pos.reentry_eligible = False
             return
+
+        if current_equity is None:
+            current_equity = self.capital_per_symbol
 
         prev = i - 1
         prev_close = df.loc[prev, 'close']
@@ -743,7 +790,8 @@ class NStructureStrategy:
         stop = min(pos.reentry_b_price - self.stop_mult * atr,
                    pos.reentry_b_price * 0.95)
 
-        shares_per_unit = self._calc_shares(self.capital_per_symbol, entry_price, atr)
+        equity_for_sizing = current_equity if self.use_dynamic_equity else self.capital_per_symbol
+        shares_per_unit = self._calc_shares(equity_for_sizing, entry_price, atr)
         if shares_per_unit <= 0:
             pos.reentry_eligible = False
             return
