@@ -40,12 +40,21 @@
 Layer 0: 外部库       pandas, numpy, backtrader, yaml
 Layer 1: 工具模块     config_loader, data_utils, data_pipeline
 Layer 2: 计算模块     turtle_core, risk_parity, market_regime, benchmarks
-Layer 3: 策略层       turtle_trading.py (TurtleStrategy)
+Layer 3: 策略层       turtle_trading.py (TurtleStrategy) + n_structure.py (N字结构)
 Layer 4: 脚本层       各 scripts/run_*.py
 Layer 5: 数据输出     results/ 目录下的报告与 CSV
 ```
 
 **核心规则**：下层模块不依赖上层。例如 `turtle_core.py` 不依赖 `turtle_trading.py`。
+
+**双策略体系**：
+
+| 策略 | 引擎 | 定位 | CAGR | 实盘对接 |
+|:--|:--|:--|:--:|:--|
+| 海龟 TurtleStrategy | Backtrader | **主力** — 20日突破+三层权重 | 17.2% | daily_signal.py |
+| N字结构 NStructureStrategy | 纯 pandas | **实验/辅助** — 回调买入 | 18.5% | daily_signal_n_structure.py |
+
+两者互补：海龟追突破（趋势市），N字买回调（震荡市）。未来可组合使用（Phase 5 规划）。
 
 ---
 
