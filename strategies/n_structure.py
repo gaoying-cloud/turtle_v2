@@ -353,7 +353,10 @@ class NStructureStrategy:
     window_size: int = 100,
     atr_period: int = 25,
     stop_mult: float = 1.5,
-    trail_mult: float = 5.0,    # 跟踪止损 ATR 倍数
+    trail_mult: float = 5.0,    # 跟踪止损 ATR 倍数（中期正常）
+    trail_mult_wide: float = 8.0,  # 跟踪止损 ATR 倍数（D突破初期，宽止损让趋势发育）
+    trail_mult_tight: float = 3.0, # 跟踪止损 ATR 倍数（大浮盈锁利）
+    d_timeout_days: int = 40,      # D点超时：持仓N天未突破D则退出
     add_step: float = 2.0,      # 加仓间隔（ATR 倍数），每 2N 加仓一次
     max_units: int = 6,         # 最大单位数：1 初始 + 5 次加仓（S22 调优）
     ma_trend: int = 0,          # 0=关闭趋势过滤（S22 调优）
@@ -377,7 +380,7 @@ class NStructureStrategy:
     max_consecutive_losses: int = 5,        # 连续亏损熔断阈值（42%胜率下概率≈6.6%）
     pause_bars: int = 20,                   # 熔断冷却 K 线数
     # ── S27 止损地板参数 ──
-    stop_floor_pre_break: float = 0.97,    # D点未突破时止损地板（更紧，快速止损未确认持仓）
+    stop_floor_pre_break: float = 0.93,    # D点未突破时止损地板（放宽，给横盘呼吸空间）
     stop_floor_post_break: float = 0.95,   # D点突破后/进场时止损地板（放宽，给趋势留空间）
     # ── S30 信号过滤 + 仓位管理 ──
     use_ma_cross: bool = True,             # MA5>MA20 金叉过滤（过滤短期下行假突破）
@@ -387,6 +390,9 @@ class NStructureStrategy:
         self.atr_period = atr_period
         self.stop_mult = stop_mult
         self.trail_mult = trail_mult
+        self.trail_mult_wide = trail_mult_wide
+        self.trail_mult_tight = trail_mult_tight
+        self.d_timeout_days = d_timeout_days
         self.add_step = add_step
         self.max_units = max_units
         self.ma_trend = ma_trend
@@ -726,13 +732,34 @@ class NStructureStrategy:
             self._setup_reentry(pos)
             return
 
-        # ── 2. D 点突破前：结构保护 (S27: B点为止损地板) ──
+        # ── 2. D 点突破前 ──
+        held_days = i - pos.entry_idx
         if not pos.d_broken:
+            # D 点超时退出（S30：持仓 > d_timeout_days 天仍未突破 D）
+            if held_days > self.d_timeout_days:
+                exit_price = self._sell_price(close)
+                pos.trade.exit_idx = i
+                pos.trade.exit_price = exit_price
+                pos.trade.exit_reason = "D点超时"
+                avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
+                gross_pnl = (exit_price - avg_cost) * total_shares
+                commission = (self._commission_cost(avg_cost, total_shares)
+                              + self._commission_cost(exit_price, total_shares))
+                pos.trade.pnl = gross_pnl - commission
+                pos.trade.units = pos.units
+                trades.append(pos.trade)
+                if verbose:
+                    print(f"  ⏰ D点超时 [{i}]  持仓{held_days}天  价格={exit_price:.3f}  "
+                          f"盈亏={pos.trade.pnl:.0f}")
+                pos.active = False
+                self._setup_reentry(pos)
+                return
+
             if close > pos.d_price:
                 pos.d_broken = True
                 atr_val = df.loc[i, 'atr']
                 if not pd.isna(atr_val) and atr_val > 0:
-                    # D点突破后止损上移：不低于当前止损，且不低于入场价
+                    # D点突破后止损上移：不低于当前止损
                     new_stop = min(
                         pos.d_price - self.stop_mult * atr_val,
                         pos.b_price * self.stop_floor_post_break
@@ -745,7 +772,6 @@ class NStructureStrategy:
                             pos.total_cost += close * pos.shares_per_unit
                             pos.next_add_level = (pos.entry_price
                                                   + pos.units * self.add_step * atr_val)
-                            # 加仓后上移止损保护新增仓位
                             pos.stop_loss = max(pos.stop_loss, close * self.stop_floor_post_break)
                             if verbose:
                                 print(f"  ➕ D点突破加仓 [{i}]  价格={close:.3f}  "
@@ -754,18 +780,30 @@ class NStructureStrategy:
                     print(f"  🟡 突破 D [{i}]  价格={close:.3f}  D={pos.d_price:.3f}  "
                           f"止损调整至 {pos.stop_loss:.3f}")
             else:
-                # S27: B点作为止损地板，删除独立的B点失效检查和D点超时
+                # B点作为止损地板（放宽到 stop_floor_pre_break）
                 b_floor = pos.b_price * self.stop_floor_pre_break
                 if pos.stop_loss < b_floor:
                     pos.stop_loss = b_floor
             return
 
-        # ── 3. 已突破 D：跟踪止损 + 加仓 ──
+        # ── 3. D 突破后：三阶段动态跟踪止损 + 加仓 ──
         atr = df.loc[i, 'atr']
         if pd.isna(atr) or atr <= 0:
             return
 
-        new_stop = high - self.trail_mult * atr
+        # 计算浮盈比例
+        avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
+        profit_pct = (close - avg_cost) / avg_cost if avg_cost > 0 else 0
+
+        # 三阶段动态跟踪倍数
+        if profit_pct > 0.25:
+            trail_mult = self.trail_mult_tight   # 锁利模式
+        elif held_days > 30 or profit_pct > 0.15:
+            trail_mult = self.trail_mult          # 正常模式
+        else:
+            trail_mult = self.trail_mult_wide     # 宽止损，让趋势发育
+
+        new_stop = high - trail_mult * atr
         pos.stop_loss = max(pos.stop_loss, new_stop)
 
         # 加仓：每 2N 加一个单位

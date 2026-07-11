@@ -121,6 +121,10 @@ BASELINE = dict(
     commission_pct=0.00015,
     use_ma_cross=True,
     max_position_pct=0.25,
+    trail_mult_wide=8.0,
+    trail_mult_tight=3.0,
+    d_timeout_days=40,
+    stop_floor_pre_break=0.93,
 )
 
 # ── 各参数扫描范围 ──

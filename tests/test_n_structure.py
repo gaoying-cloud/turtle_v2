@@ -172,7 +172,7 @@ class TestStrategy:
                                use_dynamic_equity=False)
         _, trades, _ = s.run(df, symbol='TEST', verbose=False)
         for t in trades:
-            assert t.exit_reason in ('初始止损', '跟踪止损')
+            assert t.exit_reason in ('初始止损', '跟踪止损', 'D点超时')
 
     def test_no_trades_without_structure(self):
         """Random walk without clear N-structure should produce few/no trades"""
@@ -355,7 +355,7 @@ class TestStopFloors:
 
     def test_default_floors(self):
         s = NStructureStrategy()
-        assert s.stop_floor_pre_break == 0.97
+        assert s.stop_floor_pre_break == 0.93
         assert s.stop_floor_post_break == 0.95
 
     def test_custom_floors(self):

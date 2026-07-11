@@ -246,6 +246,12 @@ def main():
                         help="初始止损 ATR 倍数 (默认: 1.5, S22调优)")
     parser.add_argument("--trail_mult", type=float, default=5.0,
                         help="跟踪止损 ATR 倍数 (默认: 5.0)")
+    parser.add_argument("--trail-wide", type=float, default=8.0,
+                        help="跟踪止损宽倍数 (默认: 8.0, D突破初期)")
+    parser.add_argument("--trail-tight", type=float, default=3.0,
+                        help="跟踪止损紧倍数 (默认: 3.0, 大浮盈锁利)")
+    parser.add_argument("--d-timeout", type=int, default=40,
+                        help="D点超时天数 (默认: 40)")
     parser.add_argument("--add_step", type=float, default=2.0,
                         help="加仓间隔 ATR 倍数 (默认: 2.0)")
     parser.add_argument("--max_units", type=int, default=6,
@@ -306,6 +312,9 @@ def main():
         commission_pct=args.commission,
         use_ma_cross=not args.no_ma_cross,
         max_position_pct=args.max_pos_pct,
+        trail_mult_wide=args.trail_wide,
+        trail_mult_tight=args.trail_tight,
+        d_timeout_days=args.d_timeout,
     )
 
     # ── 组合模式 (S26) ──

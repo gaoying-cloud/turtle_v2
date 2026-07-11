@@ -48,9 +48,11 @@ DEFAULT_PARAMS = dict(
     confirm_k=2, min_advance=0.05, min_gap_ad=5, min_gap_db=3,
     local_half_window=2,
     # S27 止损地板参数
-    stop_floor_pre_break=0.97, stop_floor_post_break=0.95,
+    stop_floor_pre_break=0.93, stop_floor_post_break=0.95,
     # S30 信号过滤 + 仓位管理
     use_ma_cross=True, max_position_pct=0.25,
+    # S31 动态跟踪止损
+    trail_mult_wide=8.0, trail_mult_tight=3.0, d_timeout_days=40,
 )
 
 
@@ -236,7 +238,24 @@ def update_position(df_ind: pd.DataFrame, idx: int,
         return {"action": "exit", "detail": {"reason": reason, "pnl": round(pnl, 2)}}
 
     # ── 2. D 点突破前 ──
+    held_days = idx - pos.get("entry_idx", idx)
     if not d_broken:
+        # D 点超时退出（S31）
+        if held_days > strategy.d_timeout_days:
+            exit_price = strategy._sell_price(close)
+            total_shares = units * shares_per_unit
+            avg_cost = total_cost / total_shares if total_shares > 0 else entry_price
+            gross_pnl = (exit_price - avg_cost) * total_shares
+            entry_comm = strategy._commission_cost(avg_cost, total_shares)
+            exit_comm = strategy._commission_cost(exit_price, total_shares)
+            pnl = gross_pnl - entry_comm - exit_comm
+            pos["_exit"] = {
+                "exit_price": round(exit_price, 3),
+                "pnl": round(pnl, 2),
+                "reason": "D点超时",
+            }
+            return {"action": "exit", "detail": {"reason": "D点超时", "pnl": round(pnl, 2)}}
+
         if close > d_price:
             # D 点突破
             pos["d_broken"] = True
@@ -269,9 +288,22 @@ def update_position(df_ind: pd.DataFrame, idx: int,
                 pos["stop_loss"] = b_floor
         return {"action": "hold", "detail": {}}
 
-    # ── 3. D 突破后：跟踪止损 + 金字塔加仓 ──
+    # ── 3. D 突破后：三阶段动态跟踪止损 + 金字塔加仓 ──
     if not pd.isna(atr) and atr > 0:
-        new_stop = round(high - strategy.trail_mult * atr, 3)
+        # 计算浮盈比例
+        total_shares = units * shares_per_unit
+        avg_cost = total_cost / total_shares if total_shares > 0 else entry_price
+        profit_pct = (close - avg_cost) / avg_cost if avg_cost > 0 else 0
+
+        # 三阶段动态跟踪倍数
+        if profit_pct > 0.25:
+            trail_mult = strategy.trail_mult_tight   # 锁利
+        elif held_days > 30 or profit_pct > 0.15:
+            trail_mult = strategy.trail_mult          # 正常
+        else:
+            trail_mult = strategy.trail_mult_wide     # 宽止损
+
+        new_stop = round(high - trail_mult * atr, 3)
         pos["stop_loss"] = round(max(stop_loss, new_stop), 3)
 
     if units < strategy.max_units:
