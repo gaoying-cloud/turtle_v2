@@ -235,13 +235,94 @@ def scan_param(param_name: str):
                       f"{decay:>+5.0f}%")
 
 
+def run_robustness_check():
+    """S27: 参数稳健性检验 — 滚动OOS + 参数平原测试。"""
+    print(f"\n{'=' * 85}")
+    print(f"  🔬 S27 参数稳健性检验")
+    print(f"{'=' * 85}")
+
+    # ── 1. 滚动窗口 OOS ──
+    windows = [
+        ("2014-2016", "2014-01-01", "2016-12-31", "2017-01-01", "2018-12-31"),
+        ("2016-2018", "2016-01-01", "2018-12-31", "2019-01-01", "2020-06-30"),
+        ("2018-2020", "2018-01-01", "2020-12-31", "2021-01-01", "2022-12-31"),
+        ("2020-2022", "2020-01-01", "2022-12-31", "2023-01-01", "2024-12-31"),
+    ]
+
+    params = dict(BASELINE)
+    print(f"\n  📊 滚动窗口 OOS (3年IS → 2年OOS, 参数={params})")
+    print(f"  {'窗口':<14} {'IS CAGR':>8} {'OOS CAGR':>9} {'衰减':>8} {'OOS盈利':>8}")
+    print(f"  {'-'*50}")
+
+    all_oos_cagrs = []
+    for label, is_s, is_e, oos_s, oos_e in windows:
+        is_r = run_backtest(params, is_s, is_e)
+        oos_r = run_backtest(params, oos_s, oos_e)
+        decay = (oos_r['cagr'] / is_r['cagr'] - 1) if is_r['cagr'] > 0 else 0
+        all_oos_cagrs.append(oos_r['cagr'])
+        print(f"  {label:<14} {is_r['cagr']*100:>8.1f}% {oos_r['cagr']*100:>9.1f}% "
+              f"{decay*100:>+7.1f}% {'✅' if oos_r['all_profitable'] else '❌':>8}")
+
+    oos_positive = sum(1 for c in all_oos_cagrs if c > 0)
+    print(f"  {'-'*50}")
+    print(f"  OOS 窗口正收益: {oos_positive}/{len(windows)}  |  "
+          f"平均 OOS CAGR: {np.mean(all_oos_cagrs)*100:.1f}%")
+
+    # ── 2. 参数平原测试 ──
+    print(f"\n  📊 参数平原测试 (±20% around baseline, IS: {IS_START}~{IS_END})")
+    print(f"  {'参数':<14} {'-20%':>8} {'-10%':>8} {'基线':>8} {'+10%':>8} {'+20%':>8} {'平坦?':>6}")
+    print(f"  {'-'*60}")
+
+    baseline_r = run_backtest(params, IS_START, IS_END)
+    baseline_cagr = baseline_r['cagr']
+
+    for pname, base_val in [
+        ('stop_mult', 1.5), ('trail_mult', 5.0), ('add_step', 2.0),
+        ('max_units', 6), ('window_size', 100),
+    ]:
+        row = []
+        cagrs_at_levels = []
+        for pct in [-0.2, -0.1, 0, 0.1, 0.2]:
+            if pname == 'max_units':
+                test_val = int(base_val * (1 + pct))
+                test_val = max(2, test_val)
+            elif pname == 'window_size':
+                test_val = int(base_val * (1 + pct))
+                test_val = max(40, test_val)
+            else:
+                test_val = base_val * (1 + pct)
+            test_params = dict(params)
+            test_params[pname] = test_val
+            r = run_backtest(test_params, IS_START, IS_END)
+            cagrs_at_levels.append(r['cagr'])
+            if pct == 0:
+                row.append(f"{r['cagr']*100:>7.1f}%")
+            else:
+                row.append(f"{r['cagr']*100:>7.1f}%")
+
+        # 平坦度: max - min across levels
+        cagr_range = max(cagrs_at_levels) - min(cagrs_at_levels)
+        is_flat = "✅" if cagr_range < 0.03 else ("⚠️" if cagr_range < 0.06 else "❌")
+        print(f"  {pname:<14} {row[0]} {row[1]} {row[2]} {row[3]} {row[4]} "
+              f"{is_flat:>6} (range={cagr_range*100:.1f}%)")
+
+    print(f"\n  💡 平坦度: ✅=CAGR波动<3pp ⚠️=3-6pp ❌=>6pp")
+    print(f"  基线CAGR: {baseline_cagr*100:.1f}%")
+
+
 def main():
     parser = argparse.ArgumentParser(description="N 字结构参数扫描")
     parser.add_argument("--param", choices=list(SCAN_RANGES.keys()),
                         help="指定参数 (默认: 全部)")
     parser.add_argument("--values", type=str,
                         help="自定义参数值列表，逗号分隔 (需配合 --param 使用)")
+    parser.add_argument("--robustness", action="store_true",
+                        help="S27 参数稳健性检验 (滚动OOS + 参数平原)")
     args = parser.parse_args()
+
+    if args.robustness:
+        run_robustness_check()
+        return
 
     print(f"{'=' * 85}")
     print(f"  N 字结构参数扫描")

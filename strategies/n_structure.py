@@ -662,18 +662,16 @@ class NStructureStrategy:
             self._setup_reentry(pos)
             return
 
-        # ── 2. D 点突破判断 ──
+        # ── 2. D 点突破前：结构保护 (S27: B点为止损地板) ──
         if not pos.d_broken:
             if close > pos.d_price:
                 pos.d_broken = True
                 atr_val = df.loc[i, 'atr']
-                # 止损移到 D 点附近
                 if not pd.isna(atr_val) and atr_val > 0:
                     pos.stop_loss = min(
                         pos.d_price - self.stop_mult * atr_val,
                         pos.b_price * 0.95
                     )
-                    # 突破 D 点 → 立即加仓 1 个单位
                     if pos.units < self.max_units:
                         pos.units += 1
                         pos.next_add_level = (pos.entry_price
@@ -685,43 +683,10 @@ class NStructureStrategy:
                     print(f"  🟡 突破 D [{i}]  价格={close:.3f}  D={pos.d_price:.3f}  "
                           f"止损调整至 {pos.stop_loss:.3f}")
             else:
-                # ① 收盘价跌破 B 点 → N字结构失效，立即平仓
-                if close < pos.b_price:
-                    exit_price = self._sell_price(close)
-                    pos.trade.exit_idx = i
-                    pos.trade.exit_price = exit_price
-                    pos.trade.exit_reason = "B点结构失效"
-                    gross_pnl = (exit_price - pos.entry_price) * total_shares
-                    commission = (self._commission_cost(pos.entry_price, total_shares)
-                                  + self._commission_cost(exit_price, total_shares))
-                    pos.trade.pnl = gross_pnl - commission
-                    pos.trade.units = pos.units
-                    trades.append(pos.trade)
-                    if verbose:
-                        print(f"  🔴 B 点结构失效 [{i}]  价格={close:.3f}  "
-                              f"B={pos.b_price:.3f}  盈亏={pos.trade.pnl:.0f}")
-                    pos.active = False
-                    self._setup_reentry(pos)
-                    return
-                # ② 超过 5 根 K 线未突破 D 点 → 超时平仓
-                bars_since_entry = i - pos.entry_idx
-                if bars_since_entry > 5:
-                    exit_price = self._sell_price(close)
-                    pos.trade.exit_idx = i
-                    pos.trade.exit_price = exit_price
-                    pos.trade.exit_reason = "D点突破失败"
-                    gross_pnl = (exit_price - pos.entry_price) * total_shares
-                    commission = (self._commission_cost(pos.entry_price, total_shares)
-                                  + self._commission_cost(exit_price, total_shares))
-                    pos.trade.pnl = gross_pnl - commission
-                    pos.trade.units = pos.units
-                    trades.append(pos.trade)
-                    if verbose:
-                        print(f"  🔴 D 突破失败 [{i}]  价格={close:.3f}  "
-                              f"D={pos.d_price:.3f}  盈亏={pos.trade.pnl:.0f}")
-                    pos.active = False
-                    self._setup_reentry(pos)
-                    return
+                # S27: B点作为止损地板，删除独立的B点失效检查和D点超时
+                b_floor = pos.b_price * 0.97
+                if pos.stop_loss < b_floor:
+                    pos.stop_loss = b_floor
             return
 
         # ── 3. 已突破 D：跟踪止损 + 加仓 ──
