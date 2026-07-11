@@ -86,7 +86,8 @@ def load_symbol_data(symbol: str, lookback: int = 300) -> pd.DataFrame:
     return df
 
 
-def check_circuit_breaker(state: dict, params: dict) -> tuple[bool, str]:
+def check_circuit_breaker(state: dict, params: dict,
+                          target_date: Optional[date] = None) -> tuple[bool, str]:
     """检查是否在熔断期（对齐回测 paused_until_bar 逻辑）。
 
     Returns (is_paused, reason)
@@ -94,9 +95,10 @@ def check_circuit_breaker(state: dict, params: dict) -> tuple[bool, str]:
     paused_until = state.get("paused_until")
     if paused_until is None:
         return False, ""
+    ref_date = target_date or date.today()
     try:
         until_date = date.fromisoformat(paused_until)
-        if date.today() < until_date:
+        if ref_date < until_date:
             return True, f"熔断中 (至 {paused_until})"
     except (ValueError, TypeError):
         pass
@@ -105,15 +107,16 @@ def check_circuit_breaker(state: dict, params: dict) -> tuple[bool, str]:
 
 def check_entry_signal(df_ind: pd.DataFrame, idx: int,
                        strategy: NStructureStrategy,
-                       state: dict) -> dict | None:
+                       state: dict,
+                       sizing_equity: float | None = None) -> dict | None:
     """检查单个品种的入场信号。
 
     对齐回测 _check_entry_from_prev() 的全部逻辑。
 
-    Returns
-    -------
-    dict or None
-        有信号时返回 {entry_price, stop, shares, ...}；无信号返回 None。
+    Parameters
+    ----------
+    sizing_equity : float | None
+        用于仓位计算的权益。None 时使用 state["equity"]（向后兼容）。
     """
     if idx < 1:
         return None
@@ -158,8 +161,11 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
     stop = min(ns.b_price - strategy.stop_mult * atr,
                ns.b_price * strategy.stop_floor_post_break)
 
-    equity = float(state.get("equity", strategy.initial_capital))
-    equity_for_sizing = equity if strategy.use_dynamic_equity else strategy.capital_per_symbol
+    if sizing_equity is not None:
+        equity_for_sizing = sizing_equity
+    else:
+        equity = float(state.get("equity", strategy.initial_capital))
+        equity_for_sizing = equity if strategy.use_dynamic_equity else strategy.capital_per_symbol
     shares = strategy._calc_shares(equity_for_sizing, entry_price, atr)
 
     return {
@@ -176,122 +182,119 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
     }
 
 
-def check_position_exit(df_ind: pd.DataFrame, idx: int,
-                        pos: dict, strategy: NStructureStrategy) -> str:
-    """检查持仓是否需要退出。
+def update_position(df_ind: pd.DataFrame, idx: int,
+                    pos: dict, strategy: NStructureStrategy) -> dict:
+    """统一持仓管理：止损→退出→D突破→加仓（对齐 _manage_position 全部逻辑）。
 
-    对齐回测 _manage_position() 的退出逻辑。
+    直接修改 pos dict（更新止损/d_broken/units/total_cost），
+    返回触发的操作摘要。
 
     Returns
     -------
-    str
-        "" = 不退出, "初始止损"/"跟踪止损" = 退出原因。
+    dict
+        {'action': 'exit'|'d_break_add'|'pyramid_add'|'hold',
+         'detail': {...}  # 操作详情}
     """
     low = df_ind.loc[idx, 'low']
     high = df_ind.loc[idx, 'high']
     close = df_ind.loc[idx, 'close']
+    atr = df_ind.loc[idx, 'atr']
+
     stop_loss = pos.get("stop_loss", 0)
     b_price = pos.get("b_price", 0)
     d_price = pos.get("d_price", 0)
     d_broken = pos.get("d_broken", False)
+    units = pos.get("units", 1)
+    entry_price = pos.get("entry_price", 0)
+    shares_per_unit = pos.get("shares_per_unit", 0)
+    total_cost = pos.get("total_cost", 0)
 
-    # 1. 止损检查
+    # ── 1. 止损检查 ──
     if low <= stop_loss:
-        return "跟踪止损" if d_broken else "初始止损"
+        exit_price = strategy._sell_price(min(close, stop_loss))
+        total_shares = units * shares_per_unit
+        avg_cost = total_cost / total_shares if total_shares > 0 else entry_price
+        gross_pnl = (exit_price - avg_cost) * total_shares
+        entry_comm = strategy._commission_cost(avg_cost, total_shares)
+        exit_comm = strategy._commission_cost(exit_price, total_shares)
+        pnl = gross_pnl - entry_comm - exit_comm
+        reason = "跟踪止损" if d_broken else "初始止损"
+        pos["_exit"] = {
+            "exit_price": round(exit_price, 3),
+            "pnl": round(pnl, 2),
+            "reason": reason,
+        }
+        return {"action": "exit", "detail": {"reason": reason, "pnl": round(pnl, 2)}}
 
-    # 2. D 点突破前：B 点作为止损地板
+    # ── 2. D 点突破前 ──
     if not d_broken:
         if close > d_price:
-            # 突破 D — 这是加仓信号，不是退出
-            pass
+            # D 点突破
+            pos["d_broken"] = True
+            if not pd.isna(atr) and atr > 0:
+                new_stop = max(
+                    stop_loss,
+                    min(d_price - strategy.stop_mult * atr,
+                        b_price * strategy.stop_floor_post_break)
+                )
+                pos["stop_loss"] = round(new_stop, 3)
+                if units < strategy.max_units:
+                    pos["units"] = units + 1
+                    pos["total_cost"] = round(total_cost + close * shares_per_unit, 2)
+                    pos["stop_loss"] = round(
+                        max(pos["stop_loss"], close * strategy.stop_floor_post_break), 3)
+                    add_cost = round(close * shares_per_unit, 2)
+                    return {"action": "d_break_add",
+                            "detail": {"type": "D点突破加仓", "price": round(close, 3),
+                                       "new_units": units + 1,
+                                       "new_stop": pos["stop_loss"],
+                                       "add_cost": add_cost}}
+                return {"action": "hold",
+                        "detail": {"d_broken": True, "new_stop": pos["stop_loss"]}}
+            # ATR 无效时仅标记 d_broken，不更新止损
+            return {"action": "hold", "detail": {"d_broken": True}}
         else:
-            # B 点止损地板（S27：简化逻辑，不再强制平仓）
-            b_floor = b_price * strategy.stop_floor_pre_break
+            # B 点止损地板：上移止损
+            b_floor = round(b_price * strategy.stop_floor_pre_break, 3)
             if stop_loss < b_floor:
-                pass  # 止损会自动提到 B 点附近
+                pos["stop_loss"] = b_floor
+        return {"action": "hold", "detail": {}}
 
-    # 3. D 突破后：跟踪止损
-    if d_broken:
-        atr = df_ind.loc[idx, 'atr']
-        if not pd.isna(atr) and atr > 0:
-            new_stop = high - strategy.trail_mult * atr
-            # 如果 low <= 新的跟踪止损 → 应该在步骤 1 已触发
-            pass
+    # ── 3. D 突破后：跟踪止损 + 金字塔加仓 ──
+    if not pd.isna(atr) and atr > 0:
+        new_stop = round(high - strategy.trail_mult * atr, 3)
+        pos["stop_loss"] = round(max(stop_loss, new_stop), 3)
 
-    return ""
-
-
-def check_position_add(df_ind: pd.DataFrame, idx: int,
-                       pos: dict, strategy: NStructureStrategy) -> dict | None:
-    """检查持仓是否需要加仓。
-
-    对齐回测 _manage_position() 的 D 点突破加仓和金字塔加仓。
-
-    Returns
-    -------
-    dict or None
-    """
-    close = df_ind.loc[idx, 'close']
-    high = df_ind.loc[idx, 'high']
-    atr = df_ind.loc[idx, 'atr']
-    if pd.isna(atr) or atr <= 0:
-        return None
-
-    units = pos.get("units", 1)
-    d_price = pos.get("d_price", 0)
-    d_broken = pos.get("d_broken", False)
-    entry_price = pos.get("entry_price", 0)
-    stop_loss = pos.get("stop_loss", 0)
-    b_price = pos.get("b_price", 0)
-
-    max_units = strategy.max_units
-
-    if not d_broken and close > d_price:
-        # D 点突破加仓（对齐 _manage_position）
-        new_stop = max(
-            stop_loss,
-            min(d_price - strategy.stop_mult * atr,
-                b_price * strategy.stop_floor_post_break)
-        )
-        add_price = strategy._buy_price(close)
-        # 加仓后上移止损保护新增仓位
-        new_stop = max(new_stop, close * strategy.stop_floor_post_break)
-        return {
-            "type": "D点突破加仓",
-            "price": round(add_price, 3),
-            "new_units": units + 1,
-            "new_stop": round(new_stop, 3),
-            "add_cost": round(close * pos.get("shares_per_unit", 0), 2),
-        }
-
-    if d_broken and units < max_units:
+    if units < strategy.max_units:
         next_level = entry_price + units * strategy.add_step * atr
-        if high >= next_level:
-            # 金字塔加仓（对齐 _manage_position）
-            new_stop = max(stop_loss, close * strategy.stop_floor_pre_break)
-            return {
-                "type": "金字塔加仓",
-                "price": round(close, 3),
-                "new_units": units + 1,
-                "next_level": round(entry_price + (units + 1) * strategy.add_step * atr, 3),
-                "new_stop": round(new_stop, 3),
-                "add_cost": round(close * pos.get("shares_per_unit", 0), 2),
-            }
+        if close >= next_level:  # 对齐回测：用 close 而非 high
+            pos["units"] = units + 1
+            pos["total_cost"] = round(total_cost + close * shares_per_unit, 2)
+            pos["stop_loss"] = round(
+                max(pos["stop_loss"], close * strategy.stop_floor_pre_break), 3)
+            add_cost = round(close * shares_per_unit, 2)
+            return {"action": "pyramid_add",
+                    "detail": {"type": "金字塔加仓", "price": round(close, 3),
+                               "new_units": units + 1,
+                               "new_stop": pos["stop_loss"],
+                               "add_cost": add_cost}}
 
-    return None
+    return {"action": "hold", "detail": {}}
 
 
 def scan_signals(symbols: list[str], state: dict,
                  target_date: Optional[date] = None) -> dict:
     """扫描所有品种的 N 字结构信号。
 
-    对齐回测 run() 的完整逻辑：熔断→退出→加仓→入场。
+    对齐回测 run() 的完整逻辑：熔断→持仓管理→入场。
+    直接修改 state dict（权益/持仓/连续亏损/熔断）。
     """
     strategy = NStructureStrategy(**DEFAULT_PARAMS)
     results = {}
 
     # ── 熔断检查 ──
-    is_paused, pause_reason = check_circuit_breaker(state, DEFAULT_PARAMS)
+    is_paused, pause_reason = check_circuit_breaker(state, DEFAULT_PARAMS,
+                                                     target_date=target_date)
 
     for sym in symbols:
         df = load_symbol_data(sym, lookback=300)
@@ -309,29 +312,67 @@ def scan_signals(symbols: list[str], state: dict,
 
         df_ind = strategy.compute_indicators(df)
 
-        # ── 检查已有持仓的退出/加仓 ──
-        exit_info = {}
-        add_info = {}
+        # ── 持仓管理：统一处理退出/止损更新/加仓 ──
         positions = state.get("positions", {})
+        pos_action = {"action": "hold", "detail": {}}
         if sym in positions and not is_paused:
-            exit_reason = check_position_exit(
+            pos_action = update_position(
                 df_ind, target_idx, positions[sym], strategy,
             )
-            if exit_reason:
-                exit_info = {"reason": exit_reason, "symbol": sym}
-            else:
-                add_info = check_position_add(
-                    df_ind, target_idx, positions[sym], strategy,
-                )
+            # 退出：更新权益和连续亏损计数
+            if pos_action["action"] == "exit":
+                exit_detail = pos_action["detail"]
+                state["equity"] = round(
+                    float(state.get("equity", strategy.initial_capital))
+                    + exit_detail["pnl"], 2)
+                state["consecutive_losses"] = (
+                    state.get("consecutive_losses", 0) + 1
+                    if exit_detail["pnl"] < 0 else 0)
+                # 熔断检查
+                if state["consecutive_losses"] >= strategy.max_consecutive_losses:
+                    from datetime import timedelta
+                    pause_date = (target_date or date.today()) + timedelta(
+                        days=strategy.pause_bars)
+                    state["paused_until"] = pause_date.isoformat()
+                # 移除持仓
+                pos_snapshot = positions.pop(sym)
+                state["trade_history"].append({
+                    "symbol": sym,
+                    "entry_price": pos_snapshot.get("entry_price"),
+                    "exit_price": pos_snapshot.get("_exit", {}).get("exit_price"),
+                    "pnl": exit_detail["pnl"],
+                    "reason": exit_detail["reason"],
+                })
 
         # ── 入场信号（无持仓 + 非熔断） ──
         entry_info = None
         if sym not in positions and not is_paused:
-            entry_info = check_entry_signal(df_ind, target_idx, strategy, state)
+            # 用 per-symbol 权益计算仓位（对齐回测 capital_per_symbol）
+            per_symbol_equity = float(state.get("equity", strategy.initial_capital))
+            entry_info = check_entry_signal(
+                df_ind, target_idx, strategy, state,
+                sizing_equity=per_symbol_equity / max(1, len(symbols)),
+            )
 
-        # ── N 字结构信息（始终扫描，供参考） ──
+        # ── 应用入场到 state ──
+        if entry_info:
+            positions[sym] = {
+                "entry_price": entry_info["entry_price"],
+                "stop_loss": entry_info["stop_loss"],
+                "shares_per_unit": entry_info["shares"],
+                "total_cost": entry_info["total_cost"],
+                "units": 1,
+                "d_broken": entry_info["entry_price"] > entry_info["d_price"],
+                "b_price": entry_info["b_price"],
+                "d_price": entry_info["d_price"],
+                "a_price": entry_info["a_price"],
+            }
+            state["positions"] = positions
+
+        # ── N 字结构参考信息（用 i-1 避免未来信息泄露） ──
+        ref_idx = max(0, target_idx - 1)
         ns = find_n_structure_in_window(
-            df_ind, target_idx, strategy.window_size,
+            df_ind, ref_idx, strategy.window_size,
             confirm_k=strategy.confirm_k,
             min_advance=strategy.min_advance,
             min_gap_ad=strategy.min_gap_ad,
@@ -344,20 +385,23 @@ def scan_signals(symbols: list[str], state: dict,
             "has_position": sym in positions,
             "has_structure": ns is not None,
             "entry": entry_info,
-            "exit": exit_info if exit_info else None,
-            "add": add_info if add_info else None,
+            "exit": pos_action["detail"] if pos_action["action"] == "exit" else None,
+            "add": pos_action["detail"] if pos_action["action"] in ("d_break_add", "pyramid_add") else None,
             "paused": is_paused,
         }
 
     return results
 
 
-def print_signals(signals: dict, state: dict):
+def print_signals(signals: dict, state: dict,
+                  target_date: Optional[date] = None):
     """打印信号汇总。"""
-    today = date.today().isoformat()
+    ref_date = target_date or date.today()
+    today = ref_date.isoformat()
     positions = state.get("positions", {})
 
-    is_paused, pause_reason = check_circuit_breaker(state, DEFAULT_PARAMS)
+    is_paused, pause_reason = check_circuit_breaker(state, DEFAULT_PARAMS,
+                                                     target_date=target_date)
 
     print(f"\n{'='*60}")
     print(f"  N字结构策略 · 每日信号  ({today})")
@@ -381,9 +425,11 @@ def print_signals(signals: dict, state: dict):
                 flags = f"  ⚠️ 退出信号: {exit_sig.get('reason', '')}"
             elif add_sig:
                 flags = f"  ➕ 加仓信号: {add_sig.get('type', '')}"
+            cost = pos.get("total_cost", 0)
             print(f"     {sym}: {pos.get('units', 1)}单位 "
                   f"@{pos.get('entry_price', 0):.3f}  "
-                  f"止损={pos.get('stop_loss', 0):.3f}{flags}")
+                  f"止损={pos.get('stop_loss', 0):.3f}  "
+                  f"成本=¥{cost:,.0f}{flags}")
         print()
 
     # 出场信号汇总
@@ -392,7 +438,8 @@ def print_signals(signals: dict, state: dict):
     if exits:
         print(f"  🔴 出场信号 ({len(exits)}):")
         for sym, info in exits:
-            print(f"     {sym}: {info.get('reason', '')}")
+            print(f"     {sym}: {info.get('reason', '')}  "
+                  f"盈亏=¥{info.get('pnl', 0):+,.0f}")
         print()
 
     # 加仓信号
@@ -458,7 +505,7 @@ def main():
 
     print(f"🔍 扫描 N 字结构信号...")
     signals = scan_signals(args.symbols, state, target)
-    print_signals(signals, state)
+    print_signals(signals, state, target_date=target)
 
     save_state(state, state_path)
     print(f"💾 状态已保存: {state_path}")
