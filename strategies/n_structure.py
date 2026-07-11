@@ -7,14 +7,20 @@ N字结构策略 — 纯 pandas/numpy 实现
   3. D 点突破确认/止损/加仓管理
 
 策略参数（可在实例化时覆盖）：
-    window_size   : int   = 100   — 滑动窗口大小
+    window_size   : int   = 100   — 滑动窗口大小（S22 调优定型）
     atr_period    : int   = 25    — ATR 周期
-    stop_mult     : float = 2.0   — 初始止损 ATR 倍数
+    stop_mult     : float = 1.5   — 初始止损 ATR 倍数（S22 调优后）
     trail_mult    : float = 5.0   — 跟踪止损 ATR 倍数
     add_step      : float = 2.0   — 加仓间隔（ATR 倍数）
-    max_units     : int   = 4     — 最大单位数
-    ma_trend      : int   = 250   — 趋势过滤均线周期
-    ma_confirm    : int   = 5     — 形态确认均线周期
+    max_units     : int   = 6     — 最大单位数（S22 调优后）
+    ma_trend      : int   = 0     — 趋势过滤均线周期，0=关闭（S22 调优后）
+    ma_confirm    : int   = 5     — 形态确认均线周期（S22 调优后关闭 use_ma5_confirm）
+
+形态识别参数（S24 新增，控制局部极值确认）：
+    confirm_k     : int   = 2     — 极值确认延迟（K 线数）
+    min_advance   : float = 0.05  — D > A 的最小幅度
+    min_gap_ad    : int   = 5     — A→D 最小 K 线间距
+    min_gap_db    : int   = 3     — D→B 最小 K 线间距
 """
 
 from __future__ import annotations
@@ -100,61 +106,155 @@ class NStructure:
         return self.b_price > self.a_price
 
 
-def find_n_structure_in_window(df: pd.DataFrame, end_idx: int,
-                                window_size: int = 100) -> Optional[NStructure]:
-    """在 [end_idx - window_size, end_idx] 窗口内寻找 N 字结构。
+def _is_local_min(series: pd.Series, idx: int, half_window: int = 2) -> bool:
+    """检查 idx 是否为局部最低点（±half_window 范围内）。
 
-    关键防偷价规则：
-      - B 点必须在 end_idx 之前（至少 1 根 K 线的确认）
-      - 窗口不含 end_idx 的完整信息（只用已闭合的 K 线）
+    仅用 idx 两侧各 half_window 根已闭合 K 线做比较。
+    边界附近自动缩小比较范围。
+    """
+    n = len(series)
+    lo = max(0, idx - half_window)
+    hi = min(n - 1, idx + half_window)
+    if lo == hi:
+        return True
+    window_min = series.iloc[lo:hi + 1].min()
+    return series.iloc[idx] <= window_min
+
+
+def _is_local_max(series: pd.Series, idx: int, half_window: int = 2) -> bool:
+    """检查 idx 是否为局部最高点（±half_window 范围内）。"""
+    n = len(series)
+    lo = max(0, idx - half_window)
+    hi = min(n - 1, idx + half_window)
+    if lo == hi:
+        return True
+    window_max = series.iloc[lo:hi + 1].max()
+    return series.iloc[idx] >= window_max
+
+
+def _is_confirmed_low(df: pd.DataFrame, idx: int, confirm_k: int = 2) -> bool:
+    """idx 处的低点是否已确认：后续 confirm_k 根 K 线未再创新低。"""
+    n = len(df)
+    end_check = min(n, idx + confirm_k + 1)
+    after_low = df['low'].iloc[idx + 1:end_check].min()
+    return after_low >= df.loc[idx, 'low']
+
+
+def _is_confirmed_high(df: pd.DataFrame, idx: int, confirm_k: int = 2) -> bool:
+    """idx 处的高点是否已确认：后续 confirm_k 根 K 线未再创新高。"""
+    n = len(df)
+    end_check = min(n, idx + confirm_k + 1)
+    after_high = df['high'].iloc[idx + 1:end_check].max()
+    return after_high <= df.loc[idx, 'high']
+
+
+# ── 向后兼容别名（旧函数签名，内部转发到新实现） ──
+def find_n_structure_in_window(
+    df: pd.DataFrame,
+    end_idx: int,
+    window_size: int = 100,
+    *,
+    confirm_k: int = 2,
+    min_advance: float = 0.05,
+    min_gap_ad: int = 5,
+    min_gap_db: int = 3,
+    local_half_window: int = 2,
+) -> Optional[NStructure]:
+    """在窗口中寻找实时可确认的 N 字结构（无未来信息泄露）。
+
+    **与旧版关键区别**：
+      旧版用 window.low.idxmin() / high.idxmax() — 全局极值依赖完整窗口数据。
+      新版用局部极值 + 确认延迟 — 每个关键点在当时即可确认。
+
+    算法概要：
+      1. 从窗口右侧向左扫描，找已确认的局部低点作为 B 候选
+      2. 对每个 B，向左找已确认的局部高点作为 D
+      3. 对每个 D，向左找 A（窗口内低点，B > A 即有效）
+      4. 返回第一个满足条件的完整 N 字结构（最接近当前的）
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        含 date, open, high, low, close 列，按日期升序。
+    end_idx : int
+        当前 bar 索引（不含，仅用 [end_idx - window_size, end_idx)）。
+    window_size : int
+        滑动窗口大小。
+    confirm_k : int
+        极值确认延迟（K 线数），默认 2。一个低点/高点出现后，
+        需要 confirm_k 根 K 线不创新低/新高才算确认。
+    min_advance : float
+        D 必须高于 A 的最小比例，默认 0.05（5%）。
+    min_gap_ad : int
+        A→D 最小 K 线间距。
+    min_gap_db : int
+        D→B 最小 K 线间距。
+    local_half_window : int
+        局部极值判断的半窗口大小，默认 2（±2 根 K 线内最低/最高）。
 
     Returns
     -------
     NStructure or None
-        找到的有效结构；None 表示未找到。
     """
-    # 窗口只包含已闭合的 K 线，不含当前 bar
     start = max(0, end_idx - window_size)
-    window = df.iloc[start:end_idx]  # 不含 end_idx
+    last_bar = end_idx - 1  # 最后可用 K 线索引
 
-    if len(window) < 30:  # 最少需要 30 根 K 线
+    if last_bar - start < 30:
         return None
 
-    # ── A：窗口内最低价 ──
-    a_local_idx = window['low'].idxmin()
-    a_idx = a_local_idx
-    a_price = window.loc[a_local_idx, 'low']
+    # 数据切片：start 到 end_idx（不含），全部是已闭合 K 线
+    # 为了索引方便，直接在原 df 上用整数位置操作
 
-    # ── D：A 之后的最高价 ──
-    after_a = window.loc[a_local_idx:]
-    d_local_idx = after_a['high'].idxmax()
-    d_idx = d_local_idx
-    d_price = after_a.loc[d_local_idx, 'high']
-
-    # D 必须在 A 之后至少 5 根 K 线
-    if d_idx - a_idx < 5:
+    # 可确认的最晚位置：必须有 confirm_k 根 K 线在它之后
+    latest_usable = last_bar - confirm_k
+    if latest_usable < start:
         return None
 
-    # ── B：D 之后的最低价 ──
-    after_d = after_a.loc[d_local_idx:]
-    b_local_idx = after_d['low'].idxmin()
-    b_idx = b_local_idx
-    b_price = after_d.loc[b_local_idx, 'low']
+    # ── 从右向左扫描 B 候选（最近的结构优先） ──
+    b_search_end = latest_usable
+    b_search_start = start + min_gap_ad + min_gap_db + 2  # B 前面至少要有 A 和 D
 
-    # B 必须在 D 之后至少 3 根 K 线
-    if b_idx - d_idx < 3:
-        return None
+    for b_idx in range(b_search_end, b_search_start, -1):
+        if not _is_local_min(df['low'], b_idx, local_half_window):
+            continue
+        if not _is_confirmed_low(df, b_idx, confirm_k):
+            continue
 
-    # B 必须在 end_idx 之前（至少 1 根 K 线的确认）
-    if b_idx >= end_idx - 1:
-        return None
+        b_price = df.loc[b_idx, 'low']
 
-    ns = NStructure(
-        a_idx=a_idx, d_idx=d_idx, b_idx=b_idx,
-        a_price=a_price, d_price=d_price, b_price=b_price,
-    )
+        # ── 向左扫描 D 候选 ──
+        d_search_end = b_idx - min_gap_db
+        d_search_start = start + min_gap_ad + 1
 
-    return ns if ns.is_valid() else None
+        for d_idx in range(d_search_end, d_search_start, -1):
+            if not _is_local_max(df['high'], d_idx, local_half_window):
+                continue
+            if not _is_confirmed_high(df, d_idx, confirm_k):
+                continue
+
+            d_price = df.loc[d_idx, 'high']
+
+            # ── 找 A：start 到 d_idx 之间的最低价 ──
+            a_slice = df['low'].iloc[start:d_idx + 1]
+            if len(a_slice) == 0:
+                continue
+            a_idx = int(a_slice.idxmin())  # type: ignore[arg-type]
+            a_price = df.loc[a_idx, 'low']
+
+            # ── 结构有效性检查 ──
+            if d_idx - a_idx < min_gap_ad:
+                continue
+            if d_price <= a_price * (1 + min_advance):
+                continue
+            if not (a_price < b_price < d_price):
+                continue
+
+            return NStructure(
+                a_idx=a_idx, d_idx=d_idx, b_idx=b_idx,
+                a_price=a_price, d_price=d_price, b_price=b_price,
+            )
+
+    return None
 
 
 def ma5_confirm(df: pd.DataFrame, ns: NStructure,
@@ -242,17 +342,26 @@ class NStructureStrategy:
         self,
     window_size: int = 100,
     atr_period: int = 25,
-    stop_mult: float = 2.0,
+    stop_mult: float = 1.5,
     trail_mult: float = 5.0,    # 跟踪止损 ATR 倍数
     add_step: float = 2.0,      # 加仓间隔（ATR 倍数），每 2N 加仓一次
-    max_units: int = 4,         # 最大单位数：1 初始 + 3 次加仓
-    ma_trend: int = 250,
+    max_units: int = 6,         # 最大单位数：1 初始 + 5 次加仓（S22 调优）
+    ma_trend: int = 0,          # 0=关闭趋势过滤（S22 调优）
     ma_confirm: int = 5,
-    use_ma5_confirm: bool = True,
+    use_ma5_confirm: bool = False,  # 关闭 MA5 确认（S22 调优）
     initial_capital: float = 100000.0,
     risk_per_trade: float = 0.01,
     max_reentries: int = 0,     # 0=关闭, N=最多再进场N次
     num_symbols: int = 6,       # 品种数，用于资金分配
+    # ── S24 形态识别参数 ──
+    confirm_k: int = 2,              # 极值确认延迟（K线数）
+    min_advance: float = 0.05,       # D > A 的最小幅度
+    min_gap_ad: int = 5,             # A→D 最小K线间距
+    min_gap_db: int = 3,             # D→B 最小K线间距
+    local_half_window: int = 2,      # 局部极值判断半窗口
+    # ── S24 摩擦成本参数 ──
+    slippage_pct: float = 0.001,     # 成交滑点 (0.1%)
+    commission_pct: float = 0.00015, # 手续费率 (0.015%, ETF 万1.5)
     ):
         self.window_size = window_size
         self.atr_period = atr_period
@@ -267,6 +376,27 @@ class NStructureStrategy:
         self.risk_per_trade = risk_per_trade
         self.max_reentries = max_reentries
         self.capital_per_symbol = initial_capital / max(1, num_symbols)
+        # S24 形态识别参数
+        self.confirm_k = confirm_k
+        self.min_advance = min_advance
+        self.min_gap_ad = min_gap_ad
+        self.min_gap_db = min_gap_db
+        self.local_half_window = local_half_window
+        # S24 摩擦成本
+        self.slippage_pct = slippage_pct
+        self.commission_pct = commission_pct
+
+    def _buy_price(self, price: float) -> float:
+        """买入实际成交价 = 理想价 × (1 + 滑点)。"""
+        return price * (1 + self.slippage_pct)
+
+    def _sell_price(self, price: float) -> float:
+        """卖出实际成交价 = 理想价 × (1 - 滑点)。"""
+        return price * (1 - self.slippage_pct)
+
+    def _commission_cost(self, price: float, shares: int) -> float:
+        """单边手续费 = 成交价 × 股数 × 费率。"""
+        return price * shares * self.commission_pct
 
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """预计算策略所需的全部指标。"""
@@ -294,7 +424,7 @@ class NStructureStrategy:
         return max(100, shares)
 
     def run(self, df: pd.DataFrame, symbol: str = "",
-            verbose: bool = True) -> Tuple[pd.DataFrame, list[Trade]]:
+            verbose: bool = True) -> Tuple[pd.DataFrame, list[Trade], pd.Series]:
         """对单品种执行 N 字结构策略回测。
 
         进场规则（防偷价）：
@@ -312,8 +442,9 @@ class NStructureStrategy:
 
         Returns
         -------
-        (df_result, trades)
-            df_result 带了信号列；trades 为 Trade 列表。
+        (df_result, trades, equity_curve)
+            df_result 带了信号列；trades 为 Trade 列表；
+            equity_curve 为日频权益 Series（index=date）。
         """
         df = self.compute_indicators(df)
         trades: list[Trade] = []
@@ -321,11 +452,26 @@ class NStructureStrategy:
 
         n = len(df)
 
+        # ── 日频权益追踪 (S24) ──
+        equity_arr = np.full(n, np.nan)
+        closed_pnl = 0.0  # 已平仓交易的累计盈亏
+
+        # 窗口初期：无交易，权益 = 初始资金
+        equity_arr[:self.window_size] = self.capital_per_symbol
+
         for i in range(self.window_size, n):
             # ── 持仓管理 ──
             if pos.active:
                 self._manage_position(df, i, pos, trades, verbose)
-                # 平仓后不立即再进场，等下一 bar
+                # 计算当日权益：本金 + 已实现盈亏 + 未实现盈亏
+                if pos.active:
+                    unrealized = ((df.loc[i, 'close'] - pos.entry_price)
+                                  * pos.units * pos.shares_per_unit)
+                    equity_arr[i] = self.capital_per_symbol + closed_pnl + unrealized
+                else:
+                    # 刚平仓：累加已实现盈亏
+                    closed_pnl += trades[-1].pnl
+                    equity_arr[i] = self.capital_per_symbol + closed_pnl
                 continue
 
             # ── 再进场检查（仅限刚平仓后的第一个 bar） ──
@@ -333,14 +479,26 @@ class NStructureStrategy:
                 self._execute_reentry(df, i, pos, trades, symbol, verbose)
                 if pos.active:
                     pos.reentry_eligible = False
+                    unrealized = ((df.loc[i, 'close'] - pos.entry_price)
+                                  * pos.units * pos.shares_per_unit)
+                    equity_arr[i] = self.capital_per_symbol + closed_pnl + unrealized
                     continue
-                # 再进场失败，清除标记
                 pos.reentry_eligible = False
 
             # ── 正常进场扫描 ──
             self._check_entry_from_prev(df, i, pos, trades, symbol, verbose)
+            if pos.active:
+                unrealized = ((df.loc[i, 'close'] - pos.entry_price)
+                              * pos.units * pos.shares_per_unit)
+                equity_arr[i] = self.capital_per_symbol + closed_pnl + unrealized
+            else:
+                equity_arr[i] = self.capital_per_symbol + closed_pnl
 
-        return df, trades
+        # 填充前导 NaN + 构建 Series
+        equity_filled = pd.Series(equity_arr, index=df.index).ffill()
+        equity_curve = pd.Series(equity_filled.values, index=df['date'])
+
+        return df, trades, equity_curve
 
     def _check_entry_from_prev(self, df: pd.DataFrame, i: int,
                                 pos: PositionState, trades: list[Trade],
@@ -356,7 +514,14 @@ class NStructureStrategy:
         prev = i - 1
 
         # 1. 扫描 N 字结构（数据截止到 prev，不含当前 bar）
-        ns = find_n_structure_in_window(df, prev, self.window_size)
+        ns = find_n_structure_in_window(
+            df, prev, self.window_size,
+            confirm_k=self.confirm_k,
+            min_advance=self.min_advance,
+            min_gap_ad=self.min_gap_ad,
+            min_gap_db=self.min_gap_db,
+            local_half_window=self.local_half_window,
+        )
         if ns is None:
             return
 
@@ -378,7 +543,7 @@ class NStructureStrategy:
                 return
 
         # ── 信号触发 → 今日开盘进场 ──
-        entry_price = df.loc[i, 'open']
+        entry_price = self._buy_price(df.loc[i, 'open'])
         atr = df.loc[prev, 'atr']
         if pd.isna(atr) or atr <= 0:
             return
@@ -437,11 +602,14 @@ class NStructureStrategy:
 
         # ── 1. 止损检查（区分 初始止损 / 跟踪止损） ──
         if low <= pos.stop_loss:
-            exit_price = min(close, pos.stop_loss)
+            exit_price = self._sell_price(min(close, pos.stop_loss))
             pos.trade.exit_idx = i
             pos.trade.exit_price = exit_price
             pos.trade.exit_reason = "跟踪止损" if pos.d_broken else "初始止损"
-            pos.trade.pnl = (exit_price - pos.entry_price) * total_shares
+            gross_pnl = (exit_price - pos.entry_price) * total_shares
+            commission = (self._commission_cost(pos.entry_price, total_shares)
+                          + self._commission_cost(exit_price, total_shares))
+            pos.trade.pnl = gross_pnl - commission
             pos.trade.units = pos.units
             trades.append(pos.trade)
             if verbose:
@@ -476,10 +644,14 @@ class NStructureStrategy:
             else:
                 # ① 收盘价跌破 B 点 → N字结构失效，立即平仓
                 if close < pos.b_price:
+                    exit_price = self._sell_price(close)
                     pos.trade.exit_idx = i
-                    pos.trade.exit_price = close
+                    pos.trade.exit_price = exit_price
                     pos.trade.exit_reason = "B点结构失效"
-                    pos.trade.pnl = (close - pos.entry_price) * total_shares
+                    gross_pnl = (exit_price - pos.entry_price) * total_shares
+                    commission = (self._commission_cost(pos.entry_price, total_shares)
+                                  + self._commission_cost(exit_price, total_shares))
+                    pos.trade.pnl = gross_pnl - commission
                     pos.trade.units = pos.units
                     trades.append(pos.trade)
                     if verbose:
@@ -491,10 +663,14 @@ class NStructureStrategy:
                 # ② 超过 5 根 K 线未突破 D 点 → 超时平仓
                 bars_since_entry = i - pos.entry_idx
                 if bars_since_entry > 5:
+                    exit_price = self._sell_price(close)
                     pos.trade.exit_idx = i
-                    pos.trade.exit_price = close
+                    pos.trade.exit_price = exit_price
                     pos.trade.exit_reason = "D点突破失败"
-                    pos.trade.pnl = (close - pos.entry_price) * total_shares
+                    gross_pnl = (exit_price - pos.entry_price) * total_shares
+                    commission = (self._commission_cost(pos.entry_price, total_shares)
+                                  + self._commission_cost(exit_price, total_shares))
+                    pos.trade.pnl = gross_pnl - commission
                     pos.trade.units = pos.units
                     trades.append(pos.trade)
                     if verbose:
@@ -558,7 +734,7 @@ class NStructureStrategy:
                 return
 
         # 进场
-        entry_price = df.loc[i, 'open']
+        entry_price = self._buy_price(df.loc[i, 'open'])
         atr = df.loc[prev, 'atr']
         if pd.isna(atr) or atr <= 0:
             pos.reentry_eligible = False
@@ -604,7 +780,7 @@ class NStructureStrategy:
                   f"第{pos.reentry_count}次")
 
     def run_on_multi(self, dfs: dict[str, pd.DataFrame],
-                     verbose: bool = True) -> dict[str, list[Trade]]:
+                     verbose: bool = True) -> Tuple[dict[str, list[Trade]], dict[str, pd.Series]]:
         """对多个品种执行回测。
 
         Parameters
@@ -614,15 +790,18 @@ class NStructureStrategy:
 
         Returns
         -------
-        dict[str, list[Trade]]
-            品种代码 → 交易记录列表。
+        (all_trades, all_equity)
+            all_trades: 品种代码 → 交易记录列表
+            all_equity: 品种代码 → 日频权益曲线
         """
         results = {}
+        equity_curves = {}
         for symbol, df in dfs.items():
             if verbose:
                 print(f"\n{'='*60}")
                 print(f"📊 {symbol}")
                 print(f"{'='*60}")
-            _, trades = self.run(df, symbol=symbol, verbose=verbose)
+            _, trades, equity = self.run(df, symbol=symbol, verbose=verbose)
             results[symbol] = trades
-        return results
+            equity_curves[symbol] = equity
+        return results, equity_curves

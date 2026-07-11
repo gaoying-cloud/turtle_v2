@@ -62,7 +62,8 @@ def load_data(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
 
 
 def compute_metrics(trades: list, initial_capital: float = 100000.0,
-                    total_years: float = 12.5) -> dict:
+                    total_years: float = 12.5,
+                    daily_equity: pd.Series | None = None) -> dict:
     """从交易记录计算业绩指标。
 
     Parameters
@@ -73,18 +74,23 @@ def compute_metrics(trades: list, initial_capital: float = 100000.0,
         初始本金。
     total_years : float
         回测区间总年数，用于 CAGR 计算。
+    daily_equity : pd.Series, optional
+        日频权益曲线（index=date）。提供时 Sharpe 和 MDD 使用日频数据
+        计算，比旧版交易序列法更准确。
 
     Returns
     -------
     dict
         业绩指标字典。
     """
+    empty_result = {
+        "总交易": 0, "胜率": 0, "总盈亏": 0,
+        "最大回撤": 0, "盈亏比": 0, "夏普": 0,
+        "平均盈亏": 0, "CAGR": 0,
+    }
+
     if not trades:
-        return {
-            "总交易": 0, "胜率": 0, "总盈亏": 0,
-            "最大回撤": 0, "盈亏比": 0, "夏普": 0,
-            "平均盈亏": 0, "CAGR": 0,
-        }
+        return empty_result
 
     pnls = np.array([t.pnl for t in trades])
     wins = pnls[pnls > 0]
@@ -99,25 +105,37 @@ def compute_metrics(trades: list, initial_capital: float = 100000.0,
     avg_loss = abs(losses.mean()) if len(losses) > 0 else 1
     profit_factor = avg_win / avg_loss if avg_loss != 0 else 0
 
-    # 简化的净值曲线（按交易序列）
-    equity = initial_capital + np.cumsum(pnls)
-    peak = np.maximum.accumulate(equity)
-    drawdown = (peak - equity) / peak
-    max_drawdown = drawdown.max() if len(drawdown) > 0 else 0
-
-    # 年化收益率（基于总回测时长，非交易天数累加）
+    # 年化收益率
     total_return = total_pnl / initial_capital
     cagr = ((1 + total_return) ** (1 / total_years) - 1) if total_pnl > -initial_capital else -1
 
-    # 夏普（基于交易收益率的年化）
-    trade_returns = pnls / initial_capital
-    if trade_returns.std() > 0 and len(trades) > 1:
-        # avg_holding_days ≈ total_trading_days / num_trades
-        avg_holding_days = max(1, total_years * 252 / len(trades))
-        sharpe = (trade_returns.mean() / trade_returns.std()
-                  * np.sqrt(252 / avg_holding_days))
+    # ── S24: 日频净值优先（更准确的 Sharpe 和 MDD） ──
+    if daily_equity is not None and len(daily_equity) > 1:
+        # 日频最大回撤
+        peak = daily_equity.expanding().max()
+        dd = (peak - daily_equity) / peak
+        max_drawdown = float(dd.max()) if not dd.empty else 0.0
+
+        # 日频夏普比率
+        daily_returns = daily_equity.pct_change().dropna()
+        if len(daily_returns) > 1 and daily_returns.std() > 0:
+            sharpe = float((daily_returns.mean() / daily_returns.std()) * np.sqrt(252))
+        else:
+            sharpe = 0.0
     else:
-        sharpe = 0
+        # ── 旧版回退：按交易序列计算 ──
+        equity = initial_capital + np.cumsum(pnls)
+        peak = np.maximum.accumulate(equity)
+        drawdown = (peak - equity) / peak
+        max_drawdown = float(drawdown.max()) if len(drawdown) > 0 else 0.0
+
+        trade_returns = pnls / initial_capital
+        if trade_returns.std() > 0 and len(trades) > 1:
+            avg_holding_days = max(1, total_years * 252 / len(trades))
+            sharpe = float((trade_returns.mean() / trade_returns.std())
+                           * np.sqrt(252 / avg_holding_days))
+        else:
+            sharpe = 0.0
 
     return {
         "总交易": len(trades),
@@ -134,13 +152,16 @@ def compute_metrics(trades: list, initial_capital: float = 100000.0,
 
 
 def print_summary(all_trades: dict[str, list], date_ranges: dict[str, float],
+                  equity_curves: dict[str, pd.Series] | None = None,
                   verbose: bool = False, capital_per_symbol: float = 100000.0):
     """打印汇总表格。"""
+    equity_curves = equity_curves or {}
     rows = []
     for symbol, trades in all_trades.items():
         total_years = date_ranges.get(symbol, 12.5)
+        eq = equity_curves.get(symbol)
         m = compute_metrics(trades, initial_capital=capital_per_symbol,
-                            total_years=total_years)
+                            total_years=total_years, daily_equity=eq)
         rows.append({
             "品种": symbol,
             "交易": m["总交易"],
@@ -168,17 +189,20 @@ def print_summary(all_trades: dict[str, list], date_ranges: dict[str, float],
         print(f"{r['品种']:<12} {r['交易']:>5} {r['胜率']:>6} {r['总盈亏']:>10} {r['最大回撤']:>8} {r['盈亏比']:>6} {r['夏普']:>6} {r['CAGR']:>8}")
     print(sep)
 
-    # 汇总（每品种用独立本金）
+    # 汇总（每品种用独立本金，日频净值优先）
     avg_cagr = np.mean([
-        compute_metrics(trades, initial_capital=capital_per_symbol,
-                        total_years=date_ranges.get(sym, 12.5))["CAGR"]
+        compute_metrics(
+            trades, initial_capital=capital_per_symbol,
+            total_years=date_ranges.get(sym, 12.5),
+            daily_equity=equity_curves.get(sym),
+        )["CAGR"]
         for sym, trades in all_trades.items() if trades
     ])
     total_trades = sum(len(t) for t in all_trades.values())
     print(f"\n📊  合计: {total_trades} 笔交易  |  "
           f"品种数: {len(all_trades)}  |  "
           f"平均 CAGR: {avg_cagr:.1%}  |  "
-          f"全部盈利: {'✅' if all(compute_metrics(t, initial_capital=capital_per_symbol, total_years=date_ranges.get(sym, 12.5))['总盈亏'] > 0 for sym, t in all_trades.items() if t) else '❌'}")
+          f"全部盈利: {'✅' if all(compute_metrics(t, initial_capital=capital_per_symbol, total_years=date_ranges.get(sym, 12.5), daily_equity=equity_curves.get(sym))['总盈亏'] > 0 for sym, t in all_trades.items() if t) else '❌'}")
     print()
 
     if verbose:
@@ -202,23 +226,27 @@ def main():
     parser.add_argument("--end", default="2026-07-09",
                         help="截止日期 (默认: 2026-07-09)")
     parser.add_argument("--window", type=int, default=100,
-                        help="滑动窗口大小 (默认: 100)")
+                        help="滑动窗口大小 (默认: 100, S22调优定型)")
     parser.add_argument("--atr_period", type=int, default=25,
                         help="ATR 周期 (默认: 25)")
-    parser.add_argument("--stop_mult", type=float, default=2.0,
-                        help="初始止损 ATR 倍数 (默认: 2.0)")
+    parser.add_argument("--stop_mult", type=float, default=1.5,
+                        help="初始止损 ATR 倍数 (默认: 1.5, S22调优)")
     parser.add_argument("--trail_mult", type=float, default=5.0,
                         help="跟踪止损 ATR 倍数 (默认: 5.0)")
     parser.add_argument("--add_step", type=float, default=2.0,
                         help="加仓间隔 ATR 倍数 (默认: 2.0)")
-    parser.add_argument("--max_units", type=int, default=4,
-                        help="最大单位数 (默认: 4)")
+    parser.add_argument("--max_units", type=int, default=6,
+                        help="最大单位数 (默认: 6, S22调优)")
     parser.add_argument("--reentries", type=int, default=0,
                         help="再进场次数，0=关闭 (默认: 0)")
-    parser.add_argument("--no_ma5", action="store_true",
-                        help="不使用 MA5 辅助确认")
-    parser.add_argument("--no_ma_trend", action="store_true",
-                        help="不使用趋势均线过滤 (MA250)")
+    parser.add_argument("--ma5", action="store_true",
+                        help="开启 MA5 辅助确认 (默认关闭, S22调优)")
+    parser.add_argument("--ma_trend", action="store_true",
+                        help="开启趋势均线过滤 MA250 (默认关闭, S22调优)")
+    parser.add_argument("--slippage", type=float, default=0.001,
+                        help="成交滑点 (默认: 0.001 = 0.1%%)")
+    parser.add_argument("--commission", type=float, default=0.00015,
+                        help="手续费率 (默认: 0.00015 = 万1.5)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="打印逐笔交易明细")
     parser.add_argument("--diagnose", action="store_true",
@@ -230,8 +258,9 @@ def main():
           f"stop={args.stop_mult}×ATR, trail={args.trail_mult}×ATR, "
           f"add={args.add_step}×ATR, max_u={args.max_units}, "
           f"再进场={re_str}, "
-          f"MA5确认={'OFF' if args.no_ma5 else 'ON'}, "
-          f"趋势过滤={'OFF' if args.no_ma_trend else 'ON'}")
+          f"滑点={args.slippage:.3f}, 费率={args.commission:.4f}, "
+          f"MA5确认={'ON' if args.ma5 else 'OFF'}, "
+          f"趋势过滤={'ON' if args.ma_trend else 'OFF'}")
     print(f"📅  区间: {args.start} ~ {args.end}")
     print(f"📈  品种: {', '.join(args.symbols)}")
 
@@ -244,13 +273,16 @@ def main():
         add_step=args.add_step,
         max_units=args.max_units,
         max_reentries=args.reentries,
-        use_ma5_confirm=not args.no_ma5,
-        ma_trend=0 if args.no_ma_trend else 250,
+        use_ma5_confirm=args.ma5,           # --ma5 开启, 默认关闭
+        ma_trend=250 if args.ma_trend else 0,  # --ma_trend 开启, 默认关闭
         num_symbols=len(args.symbols),
+        slippage_pct=args.slippage,
+        commission_pct=args.commission,
     )
 
     # 逐个品种跑
     all_trades: dict[str, list] = {}
+    all_equity: dict[str, pd.Series] = {}
     date_ranges: dict[str, float] = {}
     for symbol in args.symbols:
         df = load_data(symbol, args.start, args.end)
@@ -264,19 +296,28 @@ def main():
         print(f"\n📥  {symbol}: {len(df)} 条数据 ({df['date'].iloc[0].date()} ~ {df['date'].iloc[-1].date()}, "
               f"{total_years:.1f}年)")
 
-        _, trades = strategy.run(df, symbol=symbol, verbose=args.verbose)
+        _, trades, equity = strategy.run(df, symbol=symbol, verbose=args.verbose)
         all_trades[symbol] = trades
+        all_equity[symbol] = equity
         print(f"    → {len(trades)} 笔交易")
 
     # 输出汇总
     cap_per_sym = strategy.capital_per_symbol
-    print_summary(all_trades, date_ranges, verbose=args.verbose,
-                  capital_per_symbol=cap_per_sym)
+    print_summary(all_trades, date_ranges, equity_curves=all_equity,
+                  verbose=args.verbose, capital_per_symbol=cap_per_sym)
 
     # ── 与成功标准对比 ──
     print("=" * 60)
     print("  📋 实验 S20 成功标准检查")
     print("=" * 60)
+
+    def _get_metric(symbol, key, all_trades, all_equity, date_ranges, cap_per_sym):
+        """获取指定品种的指标，使用日频净值（如果可用）。"""
+        trades = all_trades[symbol]
+        eq = all_equity.get(symbol)
+        return compute_metrics(trades, initial_capital=cap_per_sym,
+                               total_years=date_ranges.get(symbol, 12.5),
+                               daily_equity=eq)[key]
 
     # 检查：所有品种是否满足标准
     all_ok = True
@@ -284,24 +325,21 @@ def main():
         trades = all_trades[symbol]
         if not trades:
             continue
-        m = compute_metrics(trades, initial_capital=cap_per_sym,
-                            total_years=date_ranges.get(symbol, 12.5))
-        if m["总盈亏"] <= 0:
+        m = _get_metric(symbol, "总盈亏", all_trades, all_equity, date_ranges, cap_per_sym)
+        if m <= 0:
             all_ok = False
-            print(f"  ❌ {symbol}: 总收益 {m['总盈亏']:+.0f} ≤ 0")
+            print(f"  ❌ {symbol}: 总收益 {m:+.0f} ≤ 0")
 
     checks = [
         ("总收益 > 0（全部品种）", all_ok, "全部盈利" if all_ok else "有亏损品种"),
         ("总交易笔数 ≥ 20", sum(len(t) for t in all_trades.values()) >= 20,
          f"{sum(len(t) for t in all_trades.values())}"),
-        ("平均胜率 > 25%", np.mean([compute_metrics(t, initial_capital=cap_per_sym,
-         total_years=date_ranges.get(sym, 12.5))["胜率"]
+        ("平均胜率 > 25%", np.mean([_get_metric(sym, "胜率", all_trades, all_equity, date_ranges, cap_per_sym)
          for sym, t in all_trades.items() if t]) > 0.25,
-         f"{np.mean([compute_metrics(t, initial_capital=cap_per_sym)['胜率'] for t in all_trades.values() if t]):.1%}"),
-        ("平均最大回撤 < 30%", np.mean([compute_metrics(t, initial_capital=cap_per_sym,
-         total_years=date_ranges.get(sym, 12.5))["最大回撤"]
+         f"{np.mean([compute_metrics(t, initial_capital=cap_per_sym, daily_equity=all_equity.get(sym))['胜率'] for sym, t in all_trades.items() if t]):.1%}"),
+        ("平均最大回撤 < 30%", np.mean([_get_metric(sym, "最大回撤", all_trades, all_equity, date_ranges, cap_per_sym)
          for sym, t in all_trades.items() if t]) < 0.30,
-         f"{np.mean([compute_metrics(t, initial_capital=cap_per_sym)['最大回撤'] for t in all_trades.values() if t]):.1%}"),
+         f"{np.mean([compute_metrics(t, initial_capital=cap_per_sym, daily_equity=all_equity.get(sym))['最大回撤'] for sym, t in all_trades.items() if t]):.1%}"),
     ]
 
     passed = 0

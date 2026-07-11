@@ -59,6 +59,7 @@ def run_backtest(params: dict, start: str, end: str) -> dict:
     """用给定参数跑回测，返回汇总指标。"""
     strategy = NStructureStrategy(**params)
     all_trades: dict[str, list] = {}
+    all_equity: dict[str, pd.Series] = {}
     date_ranges: dict[str, float] = {}
 
     for symbol in SYMBOLS:
@@ -68,15 +69,17 @@ def run_backtest(params: dict, start: str, end: str) -> dict:
         days = (df['date'].iloc[-1] - df['date'].iloc[0]).days
         total_years = max(1.0, days / 365.25)
         date_ranges[symbol] = total_years
-        _, trades = strategy.run(df, symbol=symbol, verbose=False)
+        _, trades, equity = strategy.run(df, symbol=symbol, verbose=False)
         all_trades[symbol] = trades
+        all_equity[symbol] = equity
 
     # 汇总
     cagrs, sharpes, win_rates, mdds, pnls, trade_counts = [], [], [], [], [], []
     all_profitable = True
     for symbol, trades in all_trades.items():
         years = date_ranges.get(symbol, 6.0)
-        m = compute_metrics(trades, total_years=years)
+        eq = all_equity.get(symbol)
+        m = compute_metrics(trades, total_years=years, daily_equity=eq)
         cagrs.append(m["CAGR"])
         sharpes.append(m["夏普"])
         win_rates.append(m["胜率"])
@@ -104,16 +107,15 @@ def run_backtest(params: dict, start: str, end: str) -> dict:
     }
 
 
-# ── 基线参数 ──
+# ── 基线参数（S22 调优版本） ──
 BASELINE = dict(
     window_size=100,
-    stop_mult=2.0,
+    stop_mult=1.5,
     trail_mult=5.0,
     add_step=2.0,
-    max_units=4,
-    use_ma5_confirm=True,
+    max_units=6,
+    use_ma5_confirm=False,
     num_symbols=6,
-)
 )
 
 # ── 各参数扫描范围 ──

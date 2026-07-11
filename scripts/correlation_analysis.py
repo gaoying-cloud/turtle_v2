@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from src.data_utils import load_data
-from strategies.n_structure import NStructureStrategy
+from strategies.n_structure import NStructureStrategy, find_n_structure_in_window
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -128,12 +128,6 @@ def generate_n_daily_positions() -> dict[str, pd.DataFrame]:
         all_positions[symbol] = pos_df
 
     return all_positions
-
-
-def find_n_structure_in_window(df, end_idx, window_size=100):
-    """快速版 N 字结构检测，复用策略模块的函数。"""
-    from strategies.n_structure import find_n_structure_in_window as find_ns
-    return find_ns(df, end_idx, window_size)
 
 
 def generate_turtle_simple_positions() -> dict[str, pd.DataFrame]:
