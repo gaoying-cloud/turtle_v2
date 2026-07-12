@@ -199,7 +199,7 @@ def find_n_structure_in_window(
     start = max(0, end_idx - window_size)
     last_bar = end_idx - 1  # 最后可用 K 线索引
 
-    if last_bar - start < 30:
+    if last_bar - start < 20:  # S39: 30→20，允许更小窗口
         return None
 
     # 数据切片：start 到 end_idx（不含），全部是已闭合 K 线
