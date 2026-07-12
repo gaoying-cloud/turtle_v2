@@ -288,8 +288,8 @@ def main():
                         help="A→B最大抬升，1.0=关闭 (默认: 1.0)")
     parser.add_argument("--min-ab-advance", type=float, default=0.0,
                         help="最小AB抬高比例，0=关闭 (建议: 0.03)")
-    parser.add_argument("--min-ma-momentum", type=float, default=0.0,
-                        help="最小MA5-MA20差值比，0=关闭 (建议: 0.005)")
+    parser.add_argument("--min-ma-momentum", type=float, default=0.005,
+                        help="最小MA5-MA20差值比，0=关闭 (默认: 0.005)")
     parser.add_argument("--max-ad-bars", type=int, default=0,
                         help="最大A→D K线数，0=关闭 (建议: 40)")
     parser.add_argument("--trail-pre-d", type=float, default=2.5,

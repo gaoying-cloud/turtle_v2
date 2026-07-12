@@ -54,6 +54,8 @@ DEFAULT_PARAMS = dict(
     use_ma_cross=True, max_position_pct=0.25,
     # S37 进场确认
     entry_confirm_bars=2,
+    # S41 入场质量过滤
+    min_ma_momentum=0.005,       # 最小 MA5-MA20 差值比 (0=关闭)
     # S39 出场：先紧后松
     trail_pre_d=2.5,            # D突破前 ATR 跟踪倍数（紧）
     use_ma_exit=True,           # D突破后 MA20 趋势出场（松）
@@ -184,6 +186,16 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
         ma5_val = df_ind.loc[prev, 'ma5']
         ma20_val = df_ind.loc[prev, 'ma20']
         if pd.isna(ma5_val) or pd.isna(ma20_val) or ma5_val <= ma20_val:
+            return None
+
+    # 4c. MA 动量过滤（S41）：短期趋势必须有足够强度
+    if strategy.min_ma_momentum > 0:
+        ma5_val = df_ind.loc[prev, 'ma5']
+        ma20_val = df_ind.loc[prev, 'ma20']
+        if pd.isna(ma5_val) or pd.isna(ma20_val) or ma20_val <= 0:
+            return None
+        momentum = (ma5_val - ma20_val) / ma20_val
+        if momentum < strategy.min_ma_momentum:
             return None
 
     # 5. ATR 有效性

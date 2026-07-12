@@ -413,7 +413,7 @@ class NStructureStrategy:
     max_ab_advance: float = 1.0,           # A→B 最大抬升上限，1.0=关闭（候选）
     # ── S41 入场质量过滤（基于 IS 诊断：初始止损 0% 胜率问题） ──
     min_ab_advance: float = 0.0,           # 最小 AB 抬高比例, 0=关闭 (建议 0.03)
-    min_ma_momentum: float = 0.0,          # 最小 MA5-MA20 差值比, 0=关闭 (建议 0.005)
+    min_ma_momentum: float = 0.005,        # 最小 MA5-MA20 差值比, 0=关闭 (S41: IS诊断推荐0.005)
     max_ad_bars: int = 0,                  # 最大 A→D K 线数, 0=关闭 (建议 40)
     # ── S39 出场逻辑重构 ──
     trail_pre_d: float = 2.5,              # D突破前 ATR 跟踪倍数（S39: 2.0→2.5 减少误杀）

@@ -141,6 +141,8 @@ BASELINE = dict(
     d_exit_floor=0.95,
     # S40 加仓
     add_weights=(0.5, 0.8, 1.5, 0.8),
+    # S41 入场质量
+    min_ma_momentum=0.005,         # MA5-MA20 最小差值比
 )
 
 # ── 各参数扫描范围（S40 扩展） ──
