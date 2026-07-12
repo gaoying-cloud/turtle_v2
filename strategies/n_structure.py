@@ -359,7 +359,7 @@ class NStructureStrategy:
     d_timeout_days: int = 40,      # D点超时：持仓N天未突破D则退出
     add_step: float = 2.0,      # 加仓间隔（ATR 倍数），每 2N 加仓一次
     max_units: int = 6,         # 最大单位数：1 初始 + 5 次加仓（S22 调优）
-    ma_trend: int = 0,          # 0=关闭趋势过滤（S22 调优）
+    ma_trend: int = 50,         # 趋势过滤均线周期，50=MA50（S37 启用）
     ma_confirm: int = 5,
     use_ma5_confirm: bool = False,  # 关闭 MA5 确认（S22 调优）
     initial_capital: float = 100000.0,
@@ -367,7 +367,7 @@ class NStructureStrategy:
     max_reentries: int = 0,     # 0=关闭, N=最多再进场N次
     num_symbols: int = 6,       # 品种数，用于资金分配
     # ── S24 形态识别参数 ──
-    confirm_k: int = 2,              # 极值确认延迟（K线数）
+    confirm_k: int = 3,              # 极值确认延迟（K线数，S37: 2→3 减少假结构）
     min_advance: float = 0.05,       # D > A 的最小幅度
     min_gap_ad: int = 5,             # A→D 最小K线间距
     min_gap_db: int = 3,             # D→B 最小K线间距
@@ -379,12 +379,23 @@ class NStructureStrategy:
     use_dynamic_equity: bool = True,       # 动态权益仓位（复利）
     max_consecutive_losses: int = 5,        # 连续亏损熔断阈值（42%胜率下概率≈6.6%）
     pause_bars: int = 20,                   # 熔断冷却 K 线数
-    # ── S27 止损地板参数 ──
-    stop_floor_pre_break: float = 0.93,    # D点未突破时止损地板（放宽，给横盘呼吸空间）
-    stop_floor_post_break: float = 0.95,   # D点突破后/进场时止损地板（放宽，给趋势留空间）
+    # ── S27/S39 止损地板参数 ──
+    stop_floor_pre_break: float = 0.95,    # D点未突破时止损地板（S39: 0.93→0.95 收紧）
+    stop_floor_post_break: float = 0.95,   # D点突破后/进场时止损地板
     # ── S30 信号过滤 + 仓位管理 ──
     use_ma_cross: bool = True,             # MA5>MA20 金叉过滤（过滤短期下行假突破）
     max_position_pct: float = 0.25,        # 单品种最大仓位上限（价格比例，防 ETF 杠杆过度）
+    # ── S37 进场确认 ──
+    entry_confirm_bars: int = 2,           # 突破 B 点后需连续站稳 K 线数（1=当日确认, 2=需前日也站上）
+    # ── S38 结构质量过滤 ──
+    max_ad_advance: float = 1.0,           # A→D 最大涨幅上限，1.0=关闭（S38 实验后回退）
+    max_ab_advance: float = 1.0,           # A→B 最大抬升上限，1.0=关闭（候选）
+    # ── S39 出场逻辑重构 ──
+    trail_pre_d: float = 2.5,              # D突破前 ATR 跟踪倍数（S39: 2.0→2.5 减少误杀）
+    use_ma_exit: bool = True,              # D突破后启用 MA 趋势出场
+    ma_exit_period: int = 20,              # MA 出场均线周期
+    ma_exit_margin: float = 0.97,          # MA 有效跌破阈值：close < MA × margin（放宽让趋势多跑）
+    d_exit_floor: float = 0.95,            # D突破后硬止损地板：D × floor（防极端回撤）
     ):
         self.window_size = window_size
         self.atr_period = atr_period
@@ -421,6 +432,17 @@ class NStructureStrategy:
         # S30 信号过滤 + 仓位
         self.use_ma_cross = use_ma_cross
         self.max_position_pct = max_position_pct
+        # S37 进场确认
+        self.entry_confirm_bars = entry_confirm_bars
+        # S38 结构质量过滤
+        self.max_ad_advance = max_ad_advance
+        self.max_ab_advance = max_ab_advance
+        # S39 出场逻辑重构
+        self.trail_pre_d = trail_pre_d
+        self.use_ma_exit = use_ma_exit
+        self.ma_exit_period = ma_exit_period
+        self.ma_exit_margin = ma_exit_margin
+        self.d_exit_floor = d_exit_floor
 
     def _buy_price(self, price: float) -> float:
         """买入实际成交价 = 理想价 × (1 + 滑点)。"""
@@ -442,8 +464,8 @@ class NStructureStrategy:
         if self.ma_trend > 0:
             result['ma_trend'] = compute_ma(result['close'], self.ma_trend)
         result['ma5'] = compute_ma(result['close'], self.ma_confirm)
-        if self.use_ma_cross:
-            result['ma20'] = compute_ma(result['close'], 20)
+        if self.use_ma_cross or self.use_ma_exit:
+            result['ma20'] = compute_ma(result['close'], self.ma_exit_period)
         return result
 
     def _calc_shares(self, equity: float, price: float, atr: float) -> int:
@@ -604,18 +626,37 @@ class NStructureStrategy:
         if ns is None:
             return
 
-        # 2. MA5 辅助确认（只用已闭合 K 线）
+        # 2. S38 结构质量过滤：A→D 涨幅过大 → 趋势已耗竭
+        if self.max_ad_advance < 1.0:
+            ad_advance = (ns.d_price - ns.a_price) / ns.a_price
+            if ad_advance > self.max_ad_advance:
+                return
+        if self.max_ab_advance < 1.0:
+            ab_advance = (ns.b_price - ns.a_price) / ns.a_price
+            if ab_advance > self.max_ab_advance:
+                return
+
+        # 3. MA5 辅助确认（只用已闭合 K 线）
         if self.use_ma5_confirm:
             if not ma5_confirm(df, ns, prev):
                 return
 
-        # 3. 进场条件：昨日收盘 > B 且（可选）昨日收盘 > 趋势 MA
+        # 3. 进场条件：连续 N 日收盘 > B，且（可选）收盘 > 趋势 MA
         prev_close = df.loc[prev, 'close']
 
         if prev_close <= ns.b_price:
             return
 
-        # 趋势过滤（ma_trend <= 0 表示关闭）
+        # S37 进场确认延迟：要求连续 entry_confirm_bars 日收盘 > B
+        if self.entry_confirm_bars > 1:
+            for offset in range(1, self.entry_confirm_bars):
+                check_idx = prev - offset
+                if check_idx < 0:
+                    return
+                if df.loc[check_idx, 'close'] <= ns.b_price:
+                    return
+
+        # 趋势过滤（ma_trend <= 0 表示关闭, S37 默认启用 MA50）
         if self.ma_trend > 0:
             prev_ma = df.loc[prev, 'ma_trend']
             if pd.isna(prev_ma) or prev_close <= prev_ma:
@@ -712,12 +753,14 @@ class NStructureStrategy:
 
         total_shares = pos.units * pos.shares_per_unit
 
-        # ── 1. 止损检查（区分 初始止损 / 跟踪止损） ──
-        if low <= pos.stop_loss:
+        # ── 1. 止损检查 ──
+        # S39: D 突破后不再通过 stop_loss 退出（MA20 出场接管）
+        #      D 突破前由初始止损 + trail_pre_d 跟踪管理
+        if not pos.d_broken and low <= pos.stop_loss:
             exit_price = self._sell_price(min(close, pos.stop_loss))
             pos.trade.exit_idx = i
             pos.trade.exit_price = exit_price
-            pos.trade.exit_reason = "跟踪止损" if pos.d_broken else "初始止损"
+            pos.trade.exit_reason = "初始止损"
             avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
             gross_pnl = (exit_price - avg_cost) * total_shares
             commission = (self._commission_cost(avg_cost, total_shares)
@@ -780,34 +823,68 @@ class NStructureStrategy:
                     print(f"  🟡 突破 D [{i}]  价格={close:.3f}  D={pos.d_price:.3f}  "
                           f"止损调整至 {pos.stop_loss:.3f}")
             else:
-                # B点作为止损地板（放宽到 stop_floor_pre_break）
+                # S39: D突破前主动跟踪止损（趋势未确认，亏不起）
+                atr_val = df.loc[i, 'atr']
+                if not pd.isna(atr_val) and atr_val > 0:
+                    trail_stop = close - self.trail_pre_d * atr_val
+                    pos.stop_loss = max(pos.stop_loss, trail_stop)
+                # 地板收紧 0.93→0.95
                 b_floor = pos.b_price * self.stop_floor_pre_break
                 if pos.stop_loss < b_floor:
                     pos.stop_loss = b_floor
             return
 
-        # ── 3. D 突破后：三阶段动态跟踪止损 + 加仓 ──
-        atr = df.loc[i, 'atr']
-        if pd.isna(atr) or atr <= 0:
-            return
+        # ── 3. D 突破后：MA20 趋势出场 + 加仓 ──
+        if self.use_ma_exit:
+            # S39: MA20 趋势出场 + D 点地板（趋势已确认，让利润跑）
+            ma20 = df.loc[i, 'ma20']
+            d_floor = pos.d_price * self.d_exit_floor
+            ma_trigger = not pd.isna(ma20) and close < ma20 * self.ma_exit_margin
+            d_trigger = close < d_floor
 
-        # 计算浮盈比例
-        avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
-        profit_pct = (close - avg_cost) / avg_cost if avg_cost > 0 else 0
-
-        # 三阶段动态跟踪倍数
-        if profit_pct > 0.25:
-            trail_mult = self.trail_mult_tight   # 锁利模式
-        elif held_days > 30 or profit_pct > 0.15:
-            trail_mult = self.trail_mult          # 正常模式
+            if ma_trigger or d_trigger:
+                exit_price = self._sell_price(close)
+                pos.trade.exit_idx = i
+                pos.trade.exit_price = exit_price
+                pos.trade.exit_reason = "MA20出场" if ma_trigger else "D点地板"
+                avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
+                gross_pnl = (exit_price - avg_cost) * total_shares
+                commission = (self._commission_cost(avg_cost, total_shares)
+                              + self._commission_cost(exit_price, total_shares))
+                pos.trade.pnl = gross_pnl - commission
+                pos.trade.units = pos.units
+                trades.append(pos.trade)
+                if verbose:
+                    reason = pos.trade.exit_reason
+                    print(f"  🔵 {reason} [{i}]  价格={exit_price:.3f}  "
+                          f"MA20={ma20:.3f}  D地板={d_floor:.3f}  盈亏={pos.trade.pnl:.0f}")
+                pos.active = False
+                self._setup_reentry(pos)
+                return
         else:
-            trail_mult = self.trail_mult_wide     # 宽止损，让趋势发育
+            # 旧版三阶段 ATR 跟踪止损（use_ma_exit=False 时启用）
+            atr = df.loc[i, 'atr']
+            if pd.isna(atr) or atr <= 0:
+                return
 
-        new_stop = high - trail_mult * atr
-        pos.stop_loss = max(pos.stop_loss, new_stop)
+            avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
+            profit_pct = (close - avg_cost) / avg_cost if avg_cost > 0 else 0
 
-        # 加仓：每 2N 加一个单位
+            if profit_pct > 0.25:
+                trail_mult = self.trail_mult_tight
+            elif held_days > 30 or profit_pct > 0.15:
+                trail_mult = self.trail_mult
+            else:
+                trail_mult = self.trail_mult_wide
+
+            new_stop = high - trail_mult * atr
+            pos.stop_loss = max(pos.stop_loss, new_stop)
+
+        # 加仓：每 2N 加一个单位（两套出场模式共用）
         if pos.units < self.max_units and close >= pos.next_add_level:
+            atr = df.loc[i, 'atr']
+            if pd.isna(atr) or atr <= 0:
+                return
             add_cost = close * pos.shares_per_unit
             if _check_exposure(add_cost):
                 pos.units += 1
@@ -851,6 +928,17 @@ class NStructureStrategy:
         if prev_close <= pos.reentry_b_price:
             pos.reentry_eligible = False
             return
+
+        # S37 进场确认延迟（与正常进场一致）
+        if self.entry_confirm_bars > 1:
+            for offset in range(1, self.entry_confirm_bars):
+                check_idx = prev - offset
+                if check_idx < 0:
+                    pos.reentry_eligible = False
+                    return
+                if df.loc[check_idx, 'close'] <= pos.reentry_b_price:
+                    pos.reentry_eligible = False
+                    return
 
         # 趋势过滤（与进场一致）
         if self.ma_trend > 0:

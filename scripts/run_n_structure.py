@@ -25,6 +25,10 @@ import pandas as pd
 REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_DIR))
 
+# Windows 控制台 UTF-8 编码
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from strategies.n_structure import NStructureStrategy
 
 logging.basicConfig(level=logging.WARNING)
@@ -260,8 +264,10 @@ def main():
                         help="再进场次数，0=关闭 (默认: 0)")
     parser.add_argument("--ma5", action="store_true",
                         help="开启 MA5 辅助确认 (默认关闭, S22调优)")
-    parser.add_argument("--ma_trend", action="store_true",
-                        help="开启趋势均线过滤 MA250 (默认关闭, S22调优)")
+    parser.add_argument("--ma_trend", type=int, default=50,
+                        help="趋势均线周期，0=关闭 (默认: 50 = MA50)")
+    parser.add_argument("--entry-confirm", type=int, default=2,
+                        help="进场确认K线数，需连续站上B点 (默认: 2)")
     parser.add_argument("--slippage", type=float, default=0.001,
                         help="成交滑点 (默认: 0.001 = 0.1%%)")
     parser.add_argument("--commission", type=float, default=0.00015,
@@ -276,18 +282,36 @@ def main():
                         help="关闭 MA5×MA20 金叉过滤")
     parser.add_argument("--max-pos-pct", type=float, default=0.25,
                         help="单品种最大仓位比例 (默认: 0.25 = 25%%)")
+    parser.add_argument("--max-ad", type=float, default=1.0,
+                        help="A→D最大涨幅上限，1.0=关闭 (S38实验)")
+    parser.add_argument("--max-ab", type=float, default=1.0,
+                        help="A→B最大抬升，1.0=关闭 (默认: 1.0)")
+    parser.add_argument("--trail-pre-d", type=float, default=2.5,
+                        help="D突破前ATR跟踪倍数 (默认: 2.5)")
+    parser.add_argument("--no-ma-exit", action="store_true",
+                        help="关闭MA20出场，回退到旧ATR三阶段跟踪止损")
+    parser.add_argument("--ma-exit-period", type=int, default=20,
+                        help="MA出场均线周期 (默认: 20)")
+    parser.add_argument("--ma-exit-margin", type=float, default=0.97,
+                        help="MA有效跌破阈值 (默认: 0.97)")
+    parser.add_argument("--d-exit-floor", type=float, default=0.95,
+                        help="D点硬止损地板比例 (默认: 0.95)")
     parser.add_argument("--diagnose", action="store_true",
                         help="诊断分析：退出原因分布/持仓时长/PnL分解")
     args = parser.parse_args()
 
     re_str = "关闭" if args.reentries == 0 else f"{args.reentries}"
-    print(f"\n🔧  参数: window={args.window}, ATR={args.atr_period}, "
+    print(f"\n[参数] window={args.window}, ATR={args.atr_period}, "
           f"stop={args.stop_mult}×ATR, trail={args.trail_mult}×ATR, "
           f"add={args.add_step}×ATR, max_u={args.max_units}, "
           f"再进场={re_str}, "
           f"滑点={args.slippage:.3f}, 费率={args.commission:.4f}, "
           f"MA5确认={'ON' if args.ma5 else 'OFF'}, "
-          f"趋势过滤={'ON' if args.ma_trend else 'OFF'}")
+          f"趋势MA={args.ma_trend} (0=关), "
+          f"进场确认={args.entry_confirm}K线, "
+          f"AD上限={args.max_ad:.0%}, AB上限={'关' if args.max_ab >= 1.0 else f'{args.max_ab:.0%}'}, "
+          f"MA出场={'OFF' if args.no_ma_exit else 'MA20×'+str(args.ma_exit_margin)}, "
+          f"D前跟踪={args.trail_pre_d}×ATR")
     if args.oos:
         args.start = "2020-01-01"
         args.end = None
@@ -306,7 +330,8 @@ def main():
         max_units=args.max_units,
         max_reentries=args.reentries,
         use_ma5_confirm=args.ma5,           # --ma5 开启, 默认关闭
-        ma_trend=250 if args.ma_trend else 0,  # --ma_trend 开启, 默认关闭
+        ma_trend=args.ma_trend,             # 默认 50=MA50, 0=关闭 (S37)
+        entry_confirm_bars=args.entry_confirm,  # S37 进场确认延迟
         num_symbols=len(args.symbols),
         slippage_pct=args.slippage,
         commission_pct=args.commission,
@@ -315,6 +340,14 @@ def main():
         trail_mult_wide=args.trail_wide,
         trail_mult_tight=args.trail_tight,
         d_timeout_days=args.d_timeout,
+        confirm_k=3,  # S37: B点确认从2→3
+        max_ad_advance=args.max_ad,  # S38: A→D涨幅上限
+        max_ab_advance=args.max_ab,  # S38: A→B抬升上限（候选）
+        trail_pre_d=args.trail_pre_d,           # S39: D突破前跟踪倍数
+        use_ma_exit=not args.no_ma_exit,        # S39: MA20趋势出场
+        ma_exit_period=args.ma_exit_period,     # S39: MA周期
+        ma_exit_margin=args.ma_exit_margin,     # S39: 跌破阈值
+        d_exit_floor=args.d_exit_floor,         # S39: D点硬止损地板
     )
 
     # ── 组合模式 (S26) ──

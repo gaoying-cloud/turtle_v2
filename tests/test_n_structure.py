@@ -355,7 +355,7 @@ class TestStopFloors:
 
     def test_default_floors(self):
         s = NStructureStrategy()
-        assert s.stop_floor_pre_break == 0.93
+        assert s.stop_floor_pre_break == 0.95  # S39: 0.93→0.95
         assert s.stop_floor_post_break == 0.95
 
     def test_custom_floors(self):
