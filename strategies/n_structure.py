@@ -542,7 +542,8 @@ class NStructureStrategy:
 
             # ── 持仓管理 ──
             if pos.active:
-                self._manage_position(df, i, pos, trades, verbose)
+                self._manage_position(df, i, pos, trades, verbose,
+                                     current_equity=float(current_equity))
                 if pos.active:
                     avg_cost = self._avg_entry_price(pos)
                     unrealized = ((df.loc[i, 'close'] - avg_cost)
@@ -816,9 +817,10 @@ class NStructureStrategy:
                     pos.stop_loss = max(pos.stop_loss, new_stop)
                     if pos.units < self.max_units:
                         add_cost = close * pos.shares_per_unit
-                        if _check_exposure(add_cost):
+                        eq = current_equity if current_equity and current_equity > 0 else self.capital_per_symbol
+                        if _check_exposure(add_cost) and pos.total_cost + add_cost <= eq:
                             pos.units += 1
-                            pos.total_cost += close * pos.shares_per_unit
+                            pos.total_cost += add_cost
                             pos.next_add_level = (pos.entry_price
                                                   + pos.units * self.add_step * atr_val)
                             pos.stop_loss = max(pos.stop_loss, close * self.stop_floor_post_break)
@@ -968,9 +970,10 @@ class NStructureStrategy:
             if pd.isna(atr) or atr <= 0:
                 return
             add_cost = close * pos.shares_per_unit
-            if _check_exposure(add_cost):
+            eq = current_equity if current_equity and current_equity > 0 else self.capital_per_symbol
+            if _check_exposure(add_cost) and pos.total_cost + add_cost <= eq:
                 pos.units += 1
-                pos.total_cost += close * pos.shares_per_unit
+                pos.total_cost += add_cost
                 pos.next_add_level = pos.entry_price + pos.units * self.add_step * atr
                 # 加仓后上移止损保护新增仓位
                 pos.stop_loss = max(pos.stop_loss, close * self.stop_floor_pre_break)
