@@ -293,7 +293,11 @@ def main():
     parser.add_argument("--ma-exit-period", type=int, default=20,
                         help="MA出场均线周期 (默认: 20)")
     parser.add_argument("--ma-exit-margin", type=float, default=0.97,
-                        help="MA有效跌破阈值 (默认: 0.97)")
+                        help="MA有效跌破阈值 (默认: 0.97, confirm=0时生效)")
+    parser.add_argument("--ma-exit-confirm", type=int, default=0,
+                        help="MA有效跌破: 0=margin, >0=连续N日, -1=K线实体1/3法 (默认: 0)")
+    parser.add_argument("--no-bearish", action="store_true",
+                        help="关闭MA出场阴线过滤")
     parser.add_argument("--d-exit-floor", type=float, default=0.95,
                         help="D点硬止损地板比例 (默认: 0.95)")
     parser.add_argument("--diagnose", action="store_true",
@@ -310,7 +314,7 @@ def main():
           f"趋势MA={args.ma_trend} (0=关), "
           f"进场确认={args.entry_confirm}K线, "
           f"AD上限={args.max_ad:.0%}, AB上限={'关' if args.max_ab >= 1.0 else f'{args.max_ab:.0%}'}, "
-          f"MA出场={'OFF' if args.no_ma_exit else 'MA20×'+str(args.ma_exit_margin)}, "
+          f"MA出场={'OFF' if args.no_ma_exit else 'MA20实体1/3法' if args.ma_exit_confirm<0 else f'MA20×{args.ma_exit_confirm}日确认' if args.ma_exit_confirm>0 else f'MA20×{args.ma_exit_margin}'}, "
           f"D前跟踪={args.trail_pre_d}×ATR")
     if args.oos:
         args.start = "2020-01-01"
@@ -347,6 +351,8 @@ def main():
         use_ma_exit=not args.no_ma_exit,        # S39: MA20趋势出场
         ma_exit_period=args.ma_exit_period,     # S39: MA周期
         ma_exit_margin=args.ma_exit_margin,     # S39: 跌破阈值
+        ma_exit_confirm=args.ma_exit_confirm,   # S39: 确认天数
+        ma_exit_bearish=not args.no_bearish,     # S39: 阴线过滤
         d_exit_floor=args.d_exit_floor,         # S39: D点硬止损地板
     )
 

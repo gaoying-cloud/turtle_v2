@@ -394,7 +394,9 @@ class NStructureStrategy:
     trail_pre_d: float = 2.5,              # D突破前 ATR 跟踪倍数（S39: 2.0→2.5 减少误杀）
     use_ma_exit: bool = True,              # D突破后启用 MA 趋势出场
     ma_exit_period: int = 20,              # MA 出场均线周期
-    ma_exit_margin: float = 0.97,          # MA 有效跌破阈值：close < MA × margin（放宽让趋势多跑）
+    ma_exit_margin: float = 0.97,          # MA 有效跌破阈值（备用，ma_exit_confirm>0 时以确认天数为主）
+    ma_exit_confirm: int = 0,              # MA 有效跌破：0=margin百分比（S39最优）, -1=实体1/3法, >0=连续N日
+    ma_exit_bearish: bool = True,          # MA 出场要求阴线确认（close < open）
     d_exit_floor: float = 0.95,            # D突破后硬止损地板：D × floor（防极端回撤）
     ):
         self.window_size = window_size
@@ -442,6 +444,8 @@ class NStructureStrategy:
         self.use_ma_exit = use_ma_exit
         self.ma_exit_period = ma_exit_period
         self.ma_exit_margin = ma_exit_margin
+        self.ma_exit_confirm = ma_exit_confirm
+        self.ma_exit_bearish = ma_exit_bearish
         self.d_exit_floor = d_exit_floor
 
     def _buy_price(self, price: float) -> float:
@@ -839,7 +843,39 @@ class NStructureStrategy:
             # S39: MA20 趋势出场 + D 点地板（趋势已确认，让利润跑）
             ma20 = df.loc[i, 'ma20']
             d_floor = pos.d_price * self.d_exit_floor
-            ma_trigger = not pd.isna(ma20) and close < ma20 * self.ma_exit_margin
+            if self.ma_exit_confirm > 0:
+                # 连续 N 日收盘 < MA20 = 有效跌破
+                ma_trigger = not pd.isna(ma20) and close < ma20
+                if ma_trigger and self.ma_exit_confirm > 1:
+                    for offset in range(1, self.ma_exit_confirm):
+                        prev_i = i - offset
+                        if prev_i < 0:
+                            ma_trigger = False
+                            break
+                        prev_ma20 = df.loc[prev_i, 'ma20']
+                        if pd.isna(prev_ma20) or df.loc[prev_i, 'close'] >= prev_ma20:
+                            ma_trigger = False
+                            break
+            elif self.ma_exit_confirm < 0:
+                # K线实体 1/3 法：MA20 穿过实体且 ≥1/3 在 MA20 之下
+                open_i = df.loc[i, 'open']
+                body_low = min(open_i, close)
+                body_high = max(open_i, close)
+                body_range = body_high - body_low
+                if not pd.isna(ma20) and body_range > 0 and body_low < ma20 < body_high:
+                    below_ratio = (ma20 - body_low) / body_range
+                    ma_trigger = below_ratio >= 1.0 / 3.0
+                elif not pd.isna(ma20) and body_range == 0:
+                    ma_trigger = close < ma20  # 十字星，简单判断
+                else:
+                    ma_trigger = False
+            else:
+                ma_trigger = not pd.isna(ma20) and close < ma20 * self.ma_exit_margin
+            # 阴线过滤：收盘 < 开盘（空方主导）才确认有效跌破
+            if ma_trigger and self.ma_exit_bearish:
+                if close >= df.loc[i, 'open']:  # 阳线 → 买方还在，不触发
+                    ma_trigger = False
+
             d_trigger = close < d_floor
 
             if ma_trigger or d_trigger:
