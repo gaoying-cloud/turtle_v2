@@ -242,8 +242,8 @@ def main():
                         help="截止日期 (默认: 2020-01-01, IS 6年)")
     parser.add_argument("--oos", action="store_true",
                         help="OOS 验证模式: 2020-01-01 ~ 数据末尾")
-    parser.add_argument("--window", type=int, default=100,
-                        help="滑动窗口大小 (默认: 100, S22调优定型)")
+    parser.add_argument("--window", type=int, default=60,
+                        help="滑动窗口大小 (默认: 60, S39: 100→60)")
     parser.add_argument("--atr_period", type=int, default=25,
                         help="ATR 周期 (默认: 25)")
     parser.add_argument("--stop_mult", type=float, default=1.5,

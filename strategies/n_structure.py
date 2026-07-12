@@ -152,7 +152,7 @@ def _is_confirmed_high(df: pd.DataFrame, idx: int, confirm_k: int = 2) -> bool:
 def find_n_structure_in_window(
     df: pd.DataFrame,
     end_idx: int,
-    window_size: int = 100,
+    window_size: int = 60,   # S39: 100→60
     *,
     confirm_k: int = 2,
     min_advance: float = 0.05,
@@ -350,7 +350,7 @@ class NStructureStrategy:
 
     def __init__(
         self,
-    window_size: int = 100,
+    window_size: int = 60,   # S39: 100→60
     atr_period: int = 25,
     stop_mult: float = 1.5,
     trail_mult: float = 5.0,    # 跟踪止损 ATR 倍数（中期正常）
