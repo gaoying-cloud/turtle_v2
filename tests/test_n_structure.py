@@ -292,7 +292,7 @@ class TestPositionCost:
         """加权平均：进场10×100 + 加仓12×100 → avg=11。"""
         pos = PositionState(
             entry_price=10.0, units=2, shares_per_unit=100,
-            total_cost=10.0 * 100 + 12.0 * 100,
+            total_shares=200, total_cost=10.0 * 100 + 12.0 * 100,
         )
         avg = NStructureStrategy._avg_entry_price(pos)
         assert avg == 11.0

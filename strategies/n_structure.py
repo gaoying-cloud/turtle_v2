@@ -319,8 +319,10 @@ class PositionState:
     b_price: float = 0.0
     a_price: float = 0.0
     units: int = 1              # 当前加仓单位数
-    shares_per_unit: int = 0    # 每个单位的股数
-    total_cost: float = 0.0     # 累计持仓成本 = Σ(每次fill价格 × 股数)
+    shares_per_unit: int = 0    # 第一单位股数
+    base_shares: int = 0        # 基准股数(=calc_shares, 1%风险)
+    total_shares: int = 0       # 累计总股数(各unit不同权重)
+    total_cost: float = 0.0     # 累计持仓成本
     highest_since_entry: float = 0.0
     next_add_level: float = 0.0
     d_broken: bool = False      # 是否已突破 D 点
@@ -343,7 +345,7 @@ class NStructureStrategy:
     @staticmethod
     def _avg_entry_price(pos: PositionState) -> float:
         """计算加权平均入场价（考虑加仓）。"""
-        total_shares = pos.units * pos.shares_per_unit
+        total_shares = pos.total_shares
         if total_shares > 0 and pos.total_cost > 0:
             return pos.total_cost / total_shares
         return pos.entry_price
@@ -358,7 +360,8 @@ class NStructureStrategy:
     trail_mult_tight: float = 3.0, # 跟踪止损 ATR 倍数（大浮盈锁利）
     d_timeout_days: int = 40,      # D点超时：持仓N天未突破D则退出
     add_step: float = 1.5,      # 加仓间隔（ATR 倍数, S39: 2.0→1.5）
-    max_units: int = 4,         # 最大单位数（S40: 6→4，现金约束下实际到不了6）
+    max_units: int = 4,         # 最大单位数（S40: 6→4）
+    add_weights: tuple = (0.5, 0.8, 1.5, 0.8),  # S40: 前轻后重，U3峰,U4收敛
     ma_trend: int = 50,         # 趋势过滤均线周期，50=MA50（S37 启用）
     ma_confirm: int = 5,
     use_ma5_confirm: bool = False,  # 关闭 MA5 确认（S22 调优）
@@ -409,6 +412,7 @@ class NStructureStrategy:
         self.d_timeout_days = d_timeout_days
         self.add_step = add_step
         self.max_units = max_units
+        self.add_weights = add_weights
         self.ma_trend = ma_trend
         self.ma_confirm = ma_confirm
         self.use_ma5_confirm = use_ma5_confirm
@@ -547,7 +551,7 @@ class NStructureStrategy:
                 if pos.active:
                     avg_cost = self._avg_entry_price(pos)
                     unrealized = ((df.loc[i, 'close'] - avg_cost)
-                                  * pos.units * pos.shares_per_unit)
+                                  * pos.total_shares)
                     equity_arr[i] = current_equity + unrealized
                 else:
                     # 刚平仓：更新已实现权益 + 熔断计数
@@ -581,7 +585,7 @@ class NStructureStrategy:
                     pos.reentry_eligible = False
                     avg_cost = self._avg_entry_price(pos)
                     unrealized = ((df.loc[i, 'close'] - avg_cost)
-                                  * pos.units * pos.shares_per_unit)
+                                  * pos.total_shares)
                     equity_arr[i] = current_equity + unrealized
                     continue
                 pos.reentry_eligible = False
@@ -592,7 +596,7 @@ class NStructureStrategy:
             if pos.active:
                 avg_cost = self._avg_entry_price(pos)
                 unrealized = ((df.loc[i, 'close'] - avg_cost)
-                              * pos.units * pos.shares_per_unit)
+                              * pos.total_shares)
                 equity_arr[i] = current_equity + unrealized
             else:
                 equity_arr[i] = current_equity
@@ -685,11 +689,13 @@ class NStructureStrategy:
         # 初始止损
         stop = min(ns.b_price - self.stop_mult * atr, ns.b_price * self.stop_floor_post_break)
 
-        # 仓位计算 (S25: 使用动态权益)
+        # 仓位计算 (S40: base + add_weights)
         equity_for_sizing = current_equity if self.use_dynamic_equity else self.capital_per_symbol
-        shares_per_unit = self._calc_shares(equity_for_sizing, entry_price, atr)
-        if shares_per_unit <= 0:
+        base_shares = self._calc_shares(equity_for_sizing, entry_price, atr)
+        if base_shares <= 0:
             return
+        w0 = self.add_weights[0] if len(self.add_weights) > 0 else 1.0
+        first_shares = max(100, int(base_shares * w0 / 100) * 100)
 
         pos.active = True
         pos.entry_idx = i
@@ -699,8 +705,10 @@ class NStructureStrategy:
         pos.b_price = ns.b_price
         pos.a_price = ns.a_price
         pos.units = 1
-        pos.shares_per_unit = shares_per_unit
-        pos.total_cost = entry_price * shares_per_unit
+        pos.base_shares = base_shares
+        pos.shares_per_unit = first_shares
+        pos.total_shares = first_shares
+        pos.total_cost = entry_price * first_shares
         pos.highest_since_entry = entry_price
         pos.next_add_level = entry_price + self.add_step * atr
         pos.d_broken = entry_price > ns.d_price
@@ -749,7 +757,7 @@ class NStructureStrategy:
                 return True
             if current_equity <= 0:
                 return False
-            total_pos_value = (pos.units * pos.shares_per_unit * close
+            total_pos_value = (pos.total_shares * close
                                + other_position_value)
             new_exposure = (total_pos_value + add_cost) / current_equity
             return new_exposure <= max_total_exposure
@@ -758,7 +766,7 @@ class NStructureStrategy:
         if close > pos.highest_since_entry:
             pos.highest_since_entry = close
 
-        total_shares = pos.units * pos.shares_per_unit
+        total_shares = pos.total_shares
 
         # ── 1. 止损检查 ──
         # S39: D 突破后不再通过 stop_loss 退出（MA20 出场接管）
@@ -816,17 +824,21 @@ class NStructureStrategy:
                     )
                     pos.stop_loss = max(pos.stop_loss, new_stop)
                     if pos.units < self.max_units:
-                        add_cost = close * pos.shares_per_unit
+                        new_unit_idx = pos.units
+                        w = self.add_weights[new_unit_idx] if new_unit_idx < len(self.add_weights) else 1.0
+                        add_shares = max(100, int(pos.base_shares * w / 100) * 100)
+                        add_cost = close * add_shares
                         eq = current_equity if current_equity and current_equity > 0 else self.capital_per_symbol
                         if _check_exposure(add_cost) and pos.total_cost + add_cost <= eq:
                             pos.units += 1
+                            pos.total_shares += add_shares
                             pos.total_cost += add_cost
                             pos.next_add_level = (pos.entry_price
                                                   + pos.units * self.add_step * atr_val)
                             pos.stop_loss = max(pos.stop_loss, close * self.stop_floor_post_break)
                             if verbose:
                                 print(f"  ➕ D点突破加仓 [{i}]  价格={close:.3f}  "
-                                      f"单位={pos.units}/{self.max_units}")
+                                      f"单位={pos.units}/{self.max_units}  +{add_shares}股")
                 if verbose:
                     print(f"  🟡 突破 D [{i}]  价格={close:.3f}  D={pos.d_price:.3f}  "
                           f"止损调整至 {pos.stop_loss:.3f}")
@@ -969,18 +981,20 @@ class NStructureStrategy:
             atr = df.loc[i, 'atr']
             if pd.isna(atr) or atr <= 0:
                 return
-            add_cost = close * pos.shares_per_unit
+            new_unit_idx = pos.units
+            w = self.add_weights[new_unit_idx] if new_unit_idx < len(self.add_weights) else 1.0
+            add_shares = max(100, int(pos.base_shares * w / 100) * 100)
+            add_cost = close * add_shares
             eq = current_equity if current_equity and current_equity > 0 else self.capital_per_symbol
             if _check_exposure(add_cost) and pos.total_cost + add_cost <= eq:
                 pos.units += 1
+                pos.total_shares += add_shares
                 pos.total_cost += add_cost
                 pos.next_add_level = pos.entry_price + pos.units * self.add_step * atr
-                # 加仓后上移止损保护新增仓位
                 pos.stop_loss = max(pos.stop_loss, close * self.stop_floor_pre_break)
                 if verbose:
                     print(f"  ➕ 加仓 [{i}]  价格={close:.3f}  "
-                          f"单位={pos.units}/{self.max_units}  "
-                          f"股数={pos.units * pos.shares_per_unit}")
+                          f"单位={pos.units}/{self.max_units}  +{add_shares}股")
 
     def _setup_reentry(self, pos: PositionState):
         """在平仓时保存 N 字结构信息，允许再进场。"""
@@ -1051,10 +1065,12 @@ class NStructureStrategy:
                    pos.reentry_b_price * self.stop_floor_post_break)
 
         equity_for_sizing = current_equity if self.use_dynamic_equity else self.capital_per_symbol
-        shares_per_unit = self._calc_shares(equity_for_sizing, entry_price, atr)
-        if shares_per_unit <= 0:
+        base_shares = self._calc_shares(equity_for_sizing, entry_price, atr)
+        if base_shares <= 0:
             pos.reentry_eligible = False
             return
+        w0 = self.add_weights[0] if len(self.add_weights) > 0 else 1.0
+        first_shares = max(100, int(base_shares * w0 / 100) * 100)
 
         # 重置持仓状态（保留再进场计数器）
         pos.active = True
@@ -1065,8 +1081,10 @@ class NStructureStrategy:
         pos.b_price = pos.reentry_b_price
         pos.a_price = pos.reentry_a_price
         pos.units = 1
-        pos.shares_per_unit = shares_per_unit
-        pos.total_cost = entry_price * shares_per_unit
+        pos.base_shares = base_shares
+        pos.shares_per_unit = first_shares
+        pos.total_shares = first_shares
+        pos.total_cost = entry_price * first_shares
         pos.highest_since_entry = entry_price
         pos.next_add_level = entry_price + self.add_step * atr
         pos.d_broken = entry_price > pos.reentry_d_price
@@ -1184,7 +1202,7 @@ class NStructureStrategy:
 
             # ── Step 1: 计算当前权益（持仓管理前） ──
             position_value = sum(
-                pos.units * pos.shares_per_unit * indicators[sym].loc[i, 'close']
+                pos.total_shares * indicators[sym].loc[i, 'close']
                 for sym, pos in positions.items()
             )
             current_equity = total_capital + closed_pnl + position_value
@@ -1230,7 +1248,7 @@ class NStructureStrategy:
 
             # ── 刷新持仓市值和权益（Step 2 中可能加仓，position_value 已过期） ──
             position_value = sum(
-                pos.units * pos.shares_per_unit * indicators[sym].loc[i, 'close']
+                pos.total_shares * indicators[sym].loc[i, 'close']
                 for sym, pos in positions.items()
             )
             current_equity = total_capital + closed_pnl + position_value
@@ -1344,7 +1362,7 @@ class NStructureStrategy:
 
             # ── 记录敞口 ──
             position_value = sum(
-                pos.units * pos.shares_per_unit * indicators[sym].loc[i, 'close']
+                pos.total_shares * indicators[sym].loc[i, 'close']
                 for sym, pos in positions.items()
             )
             daily_exposure[i] = (position_value / portfolio_equity[i]
