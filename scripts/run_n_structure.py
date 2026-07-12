@@ -254,8 +254,8 @@ def main():
                         help="跟踪止损宽倍数 (默认: 8.0, D突破初期)")
     parser.add_argument("--trail-tight", type=float, default=3.0,
                         help="跟踪止损紧倍数 (默认: 3.0, 大浮盈锁利)")
-    parser.add_argument("--d-timeout", type=int, default=40,
-                        help="D点超时天数 (默认: 40)")
+    parser.add_argument("--d-timeout", type=int, default=7,
+                        help="D点超时天数 (默认: 7, S40: 40→7)")
     parser.add_argument("--add_step", type=float, default=1.5,
                         help="加仓间隔 ATR 倍数 (默认: 1.5, S39: 2.0→1.5)")
     parser.add_argument("--max_units", type=int, default=4,

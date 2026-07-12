@@ -358,7 +358,7 @@ class NStructureStrategy:
     trail_mult: float = 5.0,    # 跟踪止损 ATR 倍数（中期正常）
     trail_mult_wide: float = 8.0,  # 跟踪止损 ATR 倍数（D突破初期，宽止损让趋势发育）
     trail_mult_tight: float = 3.0, # 跟踪止损 ATR 倍数（大浮盈锁利）
-    d_timeout_days: int = 40,      # D点超时：持仓N天未突破D则退出
+    d_timeout_days: int = 7,       # D点超时（S40: 40→7，trail_pre_d已接管）
     add_step: float = 1.5,      # 加仓间隔（ATR 倍数, S39: 2.0→1.5）
     max_units: int = 4,         # 最大单位数（S40: 6→4）
     add_weights: tuple = (0.5, 0.8, 1.5, 0.8),  # S40: 前轻后重，U3峰,U4收敛
