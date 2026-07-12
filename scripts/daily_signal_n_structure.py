@@ -65,6 +65,7 @@ DEFAULT_PARAMS = dict(
     ma_exit_bearish=True,       # 要求阴线确认
     exit_channel=0,             # N日最低价通道出场（0=关闭）
     d_exit_floor=0.95,          # D点硬止损地板
+    ma_exit_trend_bars=5,       # MA20趋势确认K线数 (0=关闭)
     # S40 加仓 + 超时
     d_timeout_days=7,           # D点超时（S40: 40→7）
     add_weights=(0.5, 0.8, 1.5, 0.8),  # 加仓权重：前轻后重
@@ -425,6 +426,12 @@ def update_position(df_ind: pd.DataFrame, idx: int,
         if ma_trigger and strategy.ma_exit_bearish:
             if close >= df_ind.loc[idx, 'open']:
                 ma_trigger = False
+
+        # S41: MA20 趋势确认 — 仅当 MA20 上行时才允许 MA20 出场
+        if ma_trigger and strategy.ma_exit_trend_bars > 0 and idx >= strategy.ma_exit_trend_bars:
+            ma20_past = df_ind.loc[idx - strategy.ma_exit_trend_bars, 'ma20']
+            if pd.notna(ma20_past) and pd.notna(ma20) and ma20 <= ma20_past:
+                ma_trigger = False  # MA20 未上行 → 趋势未确认
 
         d_trigger = close < d_floor
 

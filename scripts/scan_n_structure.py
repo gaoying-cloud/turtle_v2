@@ -143,6 +143,8 @@ BASELINE = dict(
     add_weights=(0.5, 0.8, 1.5, 0.8),
     # S41 入场质量
     min_ma_momentum=0.005,         # MA5-MA20 最小差值比
+    # S41 出场趋势确认
+    ma_exit_trend_bars=5,          # MA20 趋势确认K线数
 )
 
 # ── 各参数扫描范围（S40 扩展） ──

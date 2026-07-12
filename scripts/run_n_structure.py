@@ -306,6 +306,8 @@ def main():
                         help="MA有效跌破: 0=margin, >0=连续N日, -1=K线实体1/3法 (默认: 0)")
     parser.add_argument("--no-bearish", action="store_true",
                         help="关闭MA出场阴线过滤")
+    parser.add_argument("--ma-exit-trend-bars", type=int, default=5,
+                        help="MA20趋势确认: >0时 MA20[t]>MA20[t-N] 才启用宽松出场 (0=关闭)")
     parser.add_argument("--d-exit-floor", type=float, default=0.95,
                         help="D点硬止损地板比例 (默认: 0.95)")
     parser.add_argument("--diagnose", action="store_true",
@@ -363,9 +365,10 @@ def main():
         ma_exit_period=args.ma_exit_period,     # S39: MA周期
         ma_exit_margin=args.ma_exit_margin,     # S39: 跌破阈值
         ma_exit_confirm=args.ma_exit_confirm,   # S39: 确认天数
-        ma_exit_bearish=not args.no_bearish,     # S39: 阴线过滤
-        exit_channel=args.exit_channel,          # N日通道出场
-        d_exit_floor=args.d_exit_floor,         # S39: D点硬止损地板
+        ma_exit_bearish=not args.no_bearish,       # S39: 阴线过滤
+        ma_exit_trend_bars=args.ma_exit_trend_bars,# S41: MA20趋势确认
+        exit_channel=args.exit_channel,            # N日通道出场
+        d_exit_floor=args.d_exit_floor,            # S39: D点硬止损地板
     )
 
     # ── 组合模式 (S26) ──

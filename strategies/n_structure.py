@@ -423,6 +423,7 @@ class NStructureStrategy:
     ma_exit_confirm: int = 0,              # MA 有效跌破：0=margin百分比（S39最优）, -1=实体1/3法, >0=连续N日
     ma_exit_bearish: bool = True,          # MA 出场要求阴线确认（close < open）
     exit_channel: int = 0,                 # N日最低价通道出场，>0 替代 MA20（如10=10日最低价）
+    ma_exit_trend_bars: int = 5,           # MA20 趋势确认：>0 时要求 MA20[t] > MA20[t-N] 才启用宽松出场
     d_exit_floor: float = 0.95,            # D突破后硬止损地板：D × floor（防极端回撤）
     ):
         self.window_size = window_size
@@ -479,6 +480,7 @@ class NStructureStrategy:
         self.ma_exit_bearish = ma_exit_bearish
         self.exit_channel = exit_channel
         self.d_exit_floor = d_exit_floor
+        self.ma_exit_trend_bars = ma_exit_trend_bars
 
         # ── 参数校验：防止配置错误引入未来数据 ──
         if self.local_half_window > self.confirm_k:
@@ -989,6 +991,12 @@ class NStructureStrategy:
             if ma_trigger and self.ma_exit_bearish:
                 if close >= df.loc[i, 'open']:  # 阳线 → 买方还在，不触发
                     ma_trigger = False
+
+            # S41: MA20 趋势确认 — 仅当 MA20 上行时才允许 MA20 出场
+            if ma_trigger and self.ma_exit_trend_bars > 0 and i >= self.ma_exit_trend_bars:
+                ma20_past = df.loc[i - self.ma_exit_trend_bars, 'ma20']
+                if pd.notna(ma20_past) and pd.notna(ma20) and ma20 <= ma20_past:
+                    ma_trigger = False  # MA20 未上行 → 趋势未确认，暂不出场
 
             d_trigger = close < d_floor
 
