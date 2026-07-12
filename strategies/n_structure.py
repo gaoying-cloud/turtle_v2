@@ -3,24 +3,42 @@ N字结构策略 — 纯 pandas/numpy 实现
 
 核心逻辑：
   1. 滑动窗口扫描 N 字结构（A 低点 → D 中间高点 → B 更高低点）
-  2. 价格突破 B 点 + MA250 过滤 → C 点进场
-  3. D 点突破确认/止损/加仓管理
+  2. 价格突破 B 点 + MA50 趋势过滤 → 开盘进场
+  3. D 点突破前紧跟踪（trail_pre_d）→ D 突破后 MA20 趋势出场
 
-策略参数（可在实例化时覆盖）：
-    window_size   : int   = 100   — 滑动窗口大小（S22 调优定型）
+策略参数（S40 当前默认值）：
+    window_size   : int   = 60    — 滑动窗口大小（S39: 100→60）
     atr_period    : int   = 25    — ATR 周期
-    stop_mult     : float = 1.5   — 初始止损 ATR 倍数（S22 调优后）
-    trail_mult    : float = 5.0   — 跟踪止损 ATR 倍数
-    add_step      : float = 2.0   — 加仓间隔（ATR 倍数）
-    max_units     : int   = 6     — 最大单位数（S22 调优后）
-    ma_trend      : int   = 0     — 趋势过滤均线周期，0=关闭（S22 调优后）
-    ma_confirm    : int   = 5     — 形态确认均线周期（S22 调优后关闭 use_ma5_confirm）
+    stop_mult     : float = 1.5   — 初始止损 ATR 倍数
+    add_step      : float = 1.5   — 加仓间隔 ATR 倍数（S39: 2.0→1.5）
+    max_units     : int   = 4     — 最大单位数（S40: 6→4）
+    ma_trend      : int   = 50    — 趋势过滤均线周期（S37 启用）
+    entry_confirm_bars: int = 2   — 进场确认 K 线数（S37 新增）
 
-形态识别参数（S24 新增，控制局部极值确认）：
-    confirm_k     : int   = 2     — 极值确认延迟（K 线数）
+出场参数（S39 先紧后松）：
+    trail_pre_d   : float = 2.5   — D突破前 ATR 跟踪倍数（紧）
+    use_ma_exit   : bool  = True  — D突破后启用 MA20 趋势出场（松）
+    ma_exit_period: int   = 20    — MA 出场均线周期
+    ma_exit_margin: float = 0.97  — 有效跌破阈值: close < MA × margin
+    ma_exit_bearish: bool = True  — 要求阴线确认
+    d_timeout_days: int   = 7     — D点超时天数（S40: 40→7）
+    d_exit_floor  : float = 0.95  — D 点硬止损地板
+
+加仓参数（S40）：
+    add_weights   : tuple = (0.5, 0.8, 1.5, 0.8)  — 前轻后重
+
+形态识别参数（S24/S37）：
+    confirm_k     : int   = 3     — 极值确认延迟（S37: 2→3）
     min_advance   : float = 0.05  — D > A 的最小幅度
     min_gap_ad    : int   = 5     — A→D 最小 K 线间距
     min_gap_db    : int   = 3     — D→B 最小 K 线间距
+    local_half_window: int = 2    — 局部极值半窗口（必须 ≤ confirm_k）
+
+已废弃参数（保留向后兼容）：
+    trail_mult    : float = 5.0   — 旧版跟踪止损（S39 后仅在 use_ma_exit=False 时生效）
+    trail_mult_wide: float = 8.0  — 旧版宽止损
+    trail_mult_tight: float = 3.0 — 旧版紧止损
+    use_ma5_confirm: bool = False — 旧版 MA5 确认（S22 关闭）
 """
 
 from __future__ import annotations
@@ -453,6 +471,14 @@ class NStructureStrategy:
         self.ma_exit_bearish = ma_exit_bearish
         self.exit_channel = exit_channel
         self.d_exit_floor = d_exit_floor
+
+        # ── 参数校验：防止配置错误引入未来数据 ──
+        if self.local_half_window > self.confirm_k:
+            raise ValueError(
+                f"local_half_window ({self.local_half_window}) 必须 ≤ confirm_k "
+                f"({self.confirm_k})，否则局部极值搜索范围可能超出确认延迟范围，"
+                f"引入未来数据"
+            )
 
     def _buy_price(self, price: float) -> float:
         """买入实际成交价 = 理想价 × (1 + 滑点)。"""
@@ -957,26 +983,7 @@ class NStructureStrategy:
                 pos.active = False
                 self._setup_reentry(pos)
                 return
-        else:
-            # 旧版三阶段 ATR 跟踪止损（use_ma_exit=False 时启用）
-            atr = df.loc[i, 'atr']
-            if pd.isna(atr) or atr <= 0:
-                return
-
-            avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
-            profit_pct = (close - avg_cost) / avg_cost if avg_cost > 0 else 0
-
-            if profit_pct > 0.25:
-                trail_mult = self.trail_mult_tight
-            elif held_days > 30 or profit_pct > 0.15:
-                trail_mult = self.trail_mult
-            else:
-                trail_mult = self.trail_mult_wide
-
-            new_stop = high - trail_mult * atr
-            pos.stop_loss = max(pos.stop_loss, new_stop)
-
-        # 加仓：每 2N 加一个单位（两套出场模式共用）
+        # ── 加仓：每 2N 加一个单位（两套出场模式共用）──
         if pos.units < self.max_units and close >= pos.next_add_level:
             atr = df.loc[i, 'atr']
             if pd.isna(atr) or atr <= 0:
@@ -1276,6 +1283,20 @@ class NStructureStrategy:
                     prev_close = df_sym.loc[prev, 'close']
                     if prev_close <= ns.b_price:
                         continue
+                    # S37: 进场确认延迟
+                    if self.entry_confirm_bars > 1:
+                        ok = True
+                        for offset in range(1, self.entry_confirm_bars):
+                            check_idx = prev - offset
+                            if check_idx < 0 or df_sym.loc[check_idx, 'close'] <= ns.b_price:
+                                ok = False
+                                break
+                        if not ok:
+                            continue
+                    # S22: MA5 辅助确认（默认关闭）
+                    if self.use_ma5_confirm:
+                        if not ma5_confirm(df_sym, ns, prev):
+                            continue
                     if self.ma_trend > 0:
                         prev_ma = df_sym.loc[prev, 'ma_trend']
                         if pd.isna(prev_ma) or prev_close <= prev_ma:

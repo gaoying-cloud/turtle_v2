@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """
-N字结构策略 · 每日信号扫描 (S28)
+N字结构策略 · 每日信号扫描 (S40)
 
 独立于 Backtrader，纯 pandas 实现。
 与海龟的 daily_signal.py 架构对齐，共用 state.json 模式。
-**所有信号逻辑与回测 n_structure.py 完全一致。**
+**所有信号逻辑与回测 n_structure.py S40 完全一致。**
 
 用法：
     py scripts/daily_signal_n_structure.py              # 扫描今日信号
@@ -37,22 +37,37 @@ logger = logging.getLogger(__name__)
 DATA_DIR = REPO / "data" / "etf_daily"
 DEFAULT_STATE_FILE = REPO / "data" / "state_ns.json"
 
-# S27 定型参数（与回测完全一致）
+# S40 定型参数（与回测 NStructureStrategy.__init__ 完全一致）
 DEFAULT_PARAMS = dict(
-    window_size=100, atr_period=25, stop_mult=1.5, trail_mult=5.0,
-    add_step=2.0, max_units=6, ma_trend=0, use_ma5_confirm=False,
+    # 核心
+    window_size=60, atr_period=25, stop_mult=1.5,
+    add_step=1.5, max_units=4, ma_trend=50, use_ma5_confirm=False,
     initial_capital=100_000, risk_per_trade=0.01, num_symbols=6,
     slippage_pct=0.001, commission_pct=0.00015,
     use_dynamic_equity=True, max_consecutive_losses=5, pause_bars=20,
-    # S24 形态识别参数
-    confirm_k=2, min_advance=0.05, min_gap_ad=5, min_gap_db=3,
+    # S24 形态识别
+    confirm_k=3, min_advance=0.05, min_gap_ad=5, min_gap_db=3,
     local_half_window=2,
-    # S27 止损地板参数
-    stop_floor_pre_break=0.93, stop_floor_post_break=0.95,
-    # S30 信号过滤 + 仓位管理
+    # S27 止损地板
+    stop_floor_pre_break=0.95, stop_floor_post_break=0.95,
+    # S30 信号过滤
     use_ma_cross=True, max_position_pct=0.25,
-    # S31 动态跟踪止损
-    trail_mult_wide=8.0, trail_mult_tight=3.0, d_timeout_days=40,
+    # S37 进场确认
+    entry_confirm_bars=2,
+    # S39 出场：先紧后松
+    trail_pre_d=2.5,            # D突破前 ATR 跟踪倍数（紧）
+    use_ma_exit=True,           # D突破后 MA20 趋势出场（松）
+    ma_exit_period=20,          # MA 出场均线周期
+    ma_exit_margin=0.97,        # 有效跌破: close < MA × margin
+    ma_exit_confirm=0,          # 0=margin, -1=实体1/3法, >0=连续N日
+    ma_exit_bearish=True,       # 要求阴线确认
+    exit_channel=0,             # N日最低价通道出场（0=关闭）
+    d_exit_floor=0.95,          # D点硬止损地板
+    # S40 加仓 + 超时
+    d_timeout_days=7,           # D点超时（S40: 40→7）
+    add_weights=(0.5, 0.8, 1.5, 0.8),  # 加仓权重：前轻后重
+    # 已废弃参数（保留向后兼容）
+    trail_mult=5.0, trail_mult_wide=8.0, trail_mult_tight=3.0,
 )
 
 
@@ -149,6 +164,15 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
     if prev_close <= ns.b_price:
         return None
 
+    # 3b. 进场确认延迟（S37）：连续 N 日收盘 > B
+    if strategy.entry_confirm_bars > 1:
+        for offset in range(1, strategy.entry_confirm_bars):
+            check_idx = prev - offset
+            if check_idx < 0:
+                return None
+            if df_ind.loc[check_idx, 'close'] <= ns.b_price:
+                return None
+
     # 4. 趋势过滤
     if strategy.ma_trend > 0:
         prev_ma = df_ind.loc[prev, 'ma_trend']
@@ -167,7 +191,7 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
     if pd.isna(atr) or atr <= 0:
         return None
 
-    # 6. 计算入场价（含滑点）、止损、仓位
+    # 6. 计算入场价（含滑点）、止损、仓位（S40: add_weights[0] 加权首发）
     entry_price = strategy._buy_price(df_ind.loc[idx, 'open'])
     stop = min(ns.b_price - strategy.stop_mult * atr,
                ns.b_price * strategy.stop_floor_post_break)
@@ -177,13 +201,16 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
     else:
         equity = float(state.get("equity", strategy.initial_capital))
         equity_for_sizing = equity if strategy.use_dynamic_equity else strategy.capital_per_symbol
-    shares = strategy._calc_shares(equity_for_sizing, entry_price, atr)
+    base_shares = strategy._calc_shares(equity_for_sizing, entry_price, atr)
+    w0 = strategy.add_weights[0] if len(strategy.add_weights) > 0 else 1.0
+    shares = max(100, int(base_shares * w0 / 100) * 100)
 
     return {
         "symbol": "",
         "entry_price": round(entry_price, 3),
         "stop_loss": round(stop, 3),
         "shares": shares,
+        "base_shares": base_shares,
         "total_cost": round(entry_price * shares, 2),
         "a_price": round(float(ns.a_price), 3),
         "d_price": round(float(ns.d_price), 3),
@@ -194,7 +221,8 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
 
 
 def update_position(df_ind: pd.DataFrame, idx: int,
-                    pos: dict, strategy: NStructureStrategy) -> dict:
+                    pos: dict, strategy: NStructureStrategy,
+                    target_date: date | None = None) -> dict:
     """统一持仓管理：止损→退出→D突破→加仓（对齐 _manage_position 全部逻辑）。
 
     直接修改 pos dict（更新止损/d_broken/units/total_cost），
@@ -218,18 +246,20 @@ def update_position(df_ind: pd.DataFrame, idx: int,
     units = pos.get("units", 1)
     entry_price = pos.get("entry_price", 0)
     shares_per_unit = pos.get("shares_per_unit", 0)
+    base_shares = pos.get("base_shares", shares_per_unit)  # S40: 基准股数（加仓权重基准）
     total_cost = pos.get("total_cost", 0)
+    total_shares_acc = pos.get("total_shares", units * shares_per_unit)  # S40: 加权累加
 
-    # ── 1. 止损检查 ──
-    if low <= stop_loss:
+    # ── 1. 止损检查（仅在 D 突破前，D 突破后由 MA20 接管）──
+    if not d_broken and low <= stop_loss:
         exit_price = strategy._sell_price(min(close, stop_loss))
-        total_shares = units * shares_per_unit
+        total_shares = total_shares_acc
         avg_cost = total_cost / total_shares if total_shares > 0 else entry_price
         gross_pnl = (exit_price - avg_cost) * total_shares
         entry_comm = strategy._commission_cost(avg_cost, total_shares)
         exit_comm = strategy._commission_cost(exit_price, total_shares)
         pnl = gross_pnl - entry_comm - exit_comm
-        reason = "跟踪止损" if d_broken else "初始止损"
+        reason = "初始止损"
         pos["_exit"] = {
             "exit_price": round(exit_price, 3),
             "pnl": round(pnl, 2),
@@ -238,12 +268,20 @@ def update_position(df_ind: pd.DataFrame, idx: int,
         return {"action": "exit", "detail": {"reason": reason, "pnl": round(pnl, 2)}}
 
     # ── 2. D 点突破前 ──
-    held_days = idx - pos.get("entry_idx", idx)
+    # 跨日状态用 entry_date 计算持仓天数（idx 是相对窗口位置，不可跨日持久化）
+    entry_date_str = pos.get("entry_date")
+    if entry_date_str:
+        entry_d = datetime.strptime(entry_date_str, "%Y-%m-%d").date()
+        ref_d = target_date or date.today()
+        held_calendar_days = (ref_d - entry_d).days
+        held_days = int(held_calendar_days * 5 / 7)  # 自然日→交易日估算
+    else:
+        held_days = idx - pos.get("entry_idx", idx)
     if not d_broken:
         # D 点超时退出（S31）
         if held_days > strategy.d_timeout_days:
             exit_price = strategy._sell_price(close)
-            total_shares = units * shares_per_unit
+            total_shares = total_shares_acc
             avg_cost = total_cost / total_shares if total_shares > 0 else entry_price
             gross_pnl = (exit_price - avg_cost) * total_shares
             entry_comm = strategy._commission_cost(avg_cost, total_shares)
@@ -267,53 +305,145 @@ def update_position(df_ind: pd.DataFrame, idx: int,
                 )
                 pos["stop_loss"] = round(new_stop, 3)
                 if units < strategy.max_units:
+                    new_unit_idx = units  # S40: 新单位的索引
+                    w = strategy.add_weights[new_unit_idx] if new_unit_idx < len(strategy.add_weights) else 1.0
+                    add_shares = max(100, int(base_shares * w / 100) * 100)
+                    add_cost = close * add_shares
                     pos["units"] = units + 1
-                    pos["total_cost"] = round(total_cost + close * shares_per_unit, 2)
+                    pos["total_cost"] = round(total_cost + add_cost, 2)
+                    pos["total_shares"] = total_shares_acc + add_shares
                     pos["stop_loss"] = round(
                         max(pos["stop_loss"], close * strategy.stop_floor_post_break), 3)
-                    add_cost = round(close * shares_per_unit, 2)
                     return {"action": "d_break_add",
                             "detail": {"type": "D点突破加仓", "price": round(close, 3),
                                        "new_units": units + 1,
                                        "new_stop": pos["stop_loss"],
-                                       "add_cost": add_cost}}
+                                       "add_cost": round(add_cost, 2)}}
                 return {"action": "hold",
                         "detail": {"d_broken": True, "new_stop": pos["stop_loss"]}}
             # ATR 无效时仅标记 d_broken，不更新止损
             return {"action": "hold", "detail": {"d_broken": True}}
         else:
-            # B 点止损地板：上移止损
+            # S39: D突破前主动跟踪止损（趋势未确认，亏不起）
             b_floor = round(b_price * strategy.stop_floor_pre_break, 3)
+            if not pd.isna(atr) and atr > 0:
+                trail_stop = close - strategy.trail_pre_d * atr
+                if trail_stop > stop_loss:
+                    pos["stop_loss"] = round(trail_stop, 3)
+                    stop_loss = pos["stop_loss"]
+            # B 点止损地板：上移止损
             if stop_loss < b_floor:
                 pos["stop_loss"] = b_floor
         return {"action": "hold", "detail": {}}
 
-    # ── 3. D 突破后：三阶段动态跟踪止损 + 金字塔加仓 ──
-    if not pd.isna(atr) and atr > 0:
-        # 计算浮盈比例
-        total_shares = units * shares_per_unit
-        avg_cost = total_cost / total_shares if total_shares > 0 else entry_price
-        profit_pct = (close - avg_cost) / avg_cost if avg_cost > 0 else 0
+    # ── 3. D 突破后：MA20趋势出场 / 通道出场 + 金字塔加仓 ──
+    total_shares = total_shares_acc
+    avg_cost = total_cost / total_shares if total_shares > 0 else entry_price
 
-        # 三阶段动态跟踪倍数
-        if profit_pct > 0.25:
-            trail_mult = strategy.trail_mult_tight   # 锁利
-        elif held_days > 30 or profit_pct > 0.15:
-            trail_mult = strategy.trail_mult          # 正常
+    # S39: exit_channel 模式
+    if strategy.exit_channel > 0:
+        lookback = strategy.exit_channel
+        if idx < lookback:
+            channel_low = float('inf')  # 不足 lookback 时不触发
         else:
-            trail_mult = strategy.trail_mult_wide     # 宽止损
+            channel_low = df_ind['low'].iloc[idx - lookback:idx].min()
+        if close < channel_low:
+            exit_price = strategy._sell_price(close)
+            gross_pnl = (exit_price - avg_cost) * total_shares
+            entry_comm = strategy._commission_cost(avg_cost, total_shares)
+            exit_comm = strategy._commission_cost(exit_price, total_shares)
+            pnl = gross_pnl - entry_comm - exit_comm
+            pos["_exit"] = {
+                "exit_price": round(exit_price, 3),
+                "pnl": round(pnl, 2),
+                "reason": f"{lookback}日低点出场",
+            }
+            return {"action": "exit",
+                    "detail": {"reason": f"{lookback}日低点出场", "pnl": round(pnl, 2)}}
+        # D点硬地板
+        d_floor = d_price * strategy.d_exit_floor
+        if close < d_floor:
+            exit_price = strategy._sell_price(close)
+            gross_pnl = (exit_price - avg_cost) * total_shares
+            entry_comm = strategy._commission_cost(avg_cost, total_shares)
+            exit_comm = strategy._commission_cost(exit_price, total_shares)
+            pnl = gross_pnl - entry_comm - exit_comm
+            pos["_exit"] = {
+                "exit_price": round(exit_price, 3),
+                "pnl": round(pnl, 2),
+                "reason": "D点地板",
+            }
+            return {"action": "exit",
+                    "detail": {"reason": "D点地板", "pnl": round(pnl, 2)}}
 
-        new_stop = round(high - trail_mult * atr, 3)
-        pos["stop_loss"] = round(max(stop_loss, new_stop), 3)
+    elif strategy.use_ma_exit:
+        # S39: MA20 趋势出场（趋势已确认，让利润跑）
+        ma20 = df_ind.loc[idx, 'ma20']
+        d_floor = d_price * strategy.d_exit_floor
 
+        # 判断有效跌破 MA20
+        if strategy.ma_exit_confirm > 0:
+            ma_trigger = not pd.isna(ma20) and close < ma20
+            if ma_trigger and strategy.ma_exit_confirm > 1:
+                for offset in range(1, strategy.ma_exit_confirm):
+                    prev_i = idx - offset
+                    if prev_i < 0:
+                        ma_trigger = False
+                        break
+                    prev_ma20 = df_ind.loc[prev_i, 'ma20']
+                    if pd.isna(prev_ma20) or df_ind.loc[prev_i, 'close'] >= prev_ma20:
+                        ma_trigger = False
+                        break
+        elif strategy.ma_exit_confirm < 0:
+            open_i = df_ind.loc[idx, 'open']
+            body_low = min(open_i, close)
+            body_high = max(open_i, close)
+            body_range = body_high - body_low
+            if not pd.isna(ma20) and body_range > 0 and body_low < ma20 < body_high:
+                below_ratio = (ma20 - body_low) / body_range
+                ma_trigger = below_ratio >= 1.0 / 3.0
+            elif not pd.isna(ma20) and body_range == 0:
+                ma_trigger = close < ma20
+            else:
+                ma_trigger = False
+        else:
+            ma_trigger = not pd.isna(ma20) and close < ma20 * strategy.ma_exit_margin
+
+        # 阴线过滤：收盘 < 开盘（空方主导）
+        if ma_trigger and strategy.ma_exit_bearish:
+            if close >= df_ind.loc[idx, 'open']:
+                ma_trigger = False
+
+        d_trigger = close < d_floor
+
+        if ma_trigger or d_trigger:
+            exit_price = strategy._sell_price(close)
+            gross_pnl = (exit_price - avg_cost) * total_shares
+            entry_comm = strategy._commission_cost(avg_cost, total_shares)
+            exit_comm = strategy._commission_cost(exit_price, total_shares)
+            pnl = gross_pnl - entry_comm - exit_comm
+            reason = "MA20出场" if ma_trigger else "D点地板"
+            pos["_exit"] = {
+                "exit_price": round(exit_price, 3),
+                "pnl": round(pnl, 2),
+                "reason": reason,
+            }
+            return {"action": "exit",
+                    "detail": {"reason": reason, "pnl": round(pnl, 2)}}
+
+    # ── 金字塔加仓（S40: add_weights 加权，基于 base_shares）──
     if units < strategy.max_units:
         next_level = entry_price + units * strategy.add_step * atr
-        if close >= next_level:  # 对齐回测：用 close 而非 high
+        if close >= next_level:
+            new_unit_idx = units  # S40: 新单位的索引
+            w = strategy.add_weights[new_unit_idx] if new_unit_idx < len(strategy.add_weights) else 1.0
+            add_shares = max(100, int(base_shares * w / 100) * 100)
             pos["units"] = units + 1
-            pos["total_cost"] = round(total_cost + close * shares_per_unit, 2)
+            pos["total_cost"] = round(total_cost + close * add_shares, 2)
+            pos["total_shares"] = total_shares_acc + add_shares
             pos["stop_loss"] = round(
                 max(pos["stop_loss"], close * strategy.stop_floor_pre_break), 3)
-            add_cost = round(close * shares_per_unit, 2)
+            add_cost = round(close * add_shares, 2)
             return {"action": "pyramid_add",
                     "detail": {"type": "金字塔加仓", "price": round(close, 3),
                                "new_units": units + 1,
@@ -359,6 +489,7 @@ def scan_signals(symbols: list[str], state: dict,
         if sym in positions and not is_paused:
             pos_action = update_position(
                 df_ind, target_idx, positions[sym], strategy,
+                target_date=target_date,
             )
             # 退出：更新权益和连续亏损计数
             if pos_action["action"] == "exit":
@@ -401,12 +532,15 @@ def scan_signals(symbols: list[str], state: dict,
                 "entry_price": float(entry_info["entry_price"]),
                 "stop_loss": float(entry_info["stop_loss"]),
                 "shares_per_unit": int(entry_info["shares"]),
+                "base_shares": int(entry_info["base_shares"]),
+                "total_shares": int(entry_info["shares"]),
                 "total_cost": float(entry_info["total_cost"]),
                 "units": 1,
                 "d_broken": bool(entry_info["entry_price"] > entry_info["d_price"]),
                 "b_price": float(entry_info["b_price"]),
                 "d_price": float(entry_info["d_price"]),
                 "a_price": float(entry_info["a_price"]),
+                "entry_date": (target_date or date.today()).isoformat(),
             }
             state["positions"] = positions
 

@@ -108,33 +108,59 @@ def run_backtest(params: dict, start: str, end: str) -> dict:
     }
 
 
-# ── 基线参数（S22 调优版本） ──
+# ── 基线参数（S40 当前版本） ──
 BASELINE = dict(
-    window_size=100,
+    window_size=60,                # S39: 100→60
     stop_mult=1.5,
-    trail_mult=5.0,
-    add_step=2.0,
-    max_units=6,
+    add_step=1.5,                  # S39: 2.0→1.5
+    max_units=4,                   # S40: 6→4
     use_ma5_confirm=False,
     num_symbols=6,
     slippage_pct=0.001,
     commission_pct=0.00015,
     use_ma_cross=True,
     max_position_pct=0.25,
-    trail_mult_wide=8.0,
-    trail_mult_tight=3.0,
-    d_timeout_days=40,
-    stop_floor_pre_break=0.93,
+    trail_mult=5.0,                # deprecated (S39 后 use_ma_exit=True 默认)
+    trail_mult_wide=8.0,           # deprecated
+    trail_mult_tight=3.0,          # deprecated
+    d_timeout_days=7,              # S40: 40→7
+    stop_floor_pre_break=0.95,     # S39: 0.93→0.95
+    stop_floor_post_break=0.95,
+    # S37
+    ma_trend=50,                   # MA50 趋势过滤
+    entry_confirm_bars=2,          # 进场确认延迟
+    confirm_k=3,                   # 极值确认（S37: 2→3）
+    # S39 出场
+    trail_pre_d=2.5,               # D突破前 ATR 跟踪
+    use_ma_exit=True,              # D突破后 MA20 趋势出场
+    ma_exit_period=20,
+    ma_exit_margin=0.97,
+    ma_exit_confirm=0,
+    ma_exit_bearish=True,
+    exit_channel=0,
+    d_exit_floor=0.95,
+    # S40 加仓
+    add_weights=(0.5, 0.8, 1.5, 0.8),
 )
 
-# ── 各参数扫描范围 ──
+# ── 各参数扫描范围（S40 扩展） ──
 SCAN_RANGES: dict[str, list] = {
+    # 原有轴
     "trail_mult":       [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0],
     "add_step":         [1.0, 1.5, 2.0, 2.5, 3.0],
     "stop_mult":        [1.5, 2.0, 2.5, 3.0, 3.5],
-    "window_size":      [60, 80, 100, 120, 150],
-    "max_units":        [3, 4, 5, 6],
+    "window_size":      [40, 60, 80, 100, 120],
+    "max_units":        [3, 4, 5],
     "use_ma5_confirm":  [True, False],
+    # S37 新增
+    "ma_trend":         [0, 20, 50, 100, 200],
+    "confirm_k":        [1, 2, 3, 5],
+    "entry_confirm_bars": [0, 1, 2, 3, 5],
+    # S39 新增
+    "trail_pre_d":      [1.5, 2.0, 2.5, 3.0, 4.0],
+    "ma_exit_margin":   [0.95, 0.97, 0.98, 0.99, 1.0],
+    # S40 新增
+    "d_timeout_days":   [5, 7, 10, 14, 21],
 }
 
 

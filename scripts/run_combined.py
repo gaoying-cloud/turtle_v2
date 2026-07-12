@@ -52,7 +52,7 @@ def run_n_portfolio() -> tuple[pd.Series, float]:
         window_size=100, atr_period=25,
         stop_mult=2.0, trail_mult=5.0,
         add_step=0.5, max_units=5,
-        profit_protect_mult=15, max_reentries=1,
+        max_reentries=1,
         use_ma5_confirm=False,
     )
 

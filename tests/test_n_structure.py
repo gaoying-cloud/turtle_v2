@@ -139,7 +139,7 @@ class TestFindNStructure:
 class TestStrategy:
     def test_run_produces_trades(self):
         df = _make_df(300)
-        s = NStructureStrategy(confirm_k=1, min_advance=0.02,
+        s = NStructureStrategy(confirm_k=1, local_half_window=1, min_advance=0.02,
                                use_dynamic_equity=False)
         _, trades, _ = s.run(df, symbol='TEST', verbose=False)
         # May not always trigger trades on short synthetic data

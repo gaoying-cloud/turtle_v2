@@ -45,7 +45,7 @@ def run_n_daily_equity(symbol: str, capital: float = 50000) -> pd.DataFrame:
         window_size=100, atr_period=25,
         stop_mult=2.0, trail_mult=5.0,
         add_step=0.5, max_units=5,
-        profit_protect_mult=15, max_reentries=1,
+        max_reentries=1,
         use_ma5_confirm=False,
         initial_capital=capital,
     )
@@ -99,14 +99,6 @@ def run_n_daily_equity(symbol: str, capital: float = 50000) -> pd.DataFrame:
                         shares = pos.units * pos.shares_per_unit
                         pos.next_add_level = (pos.entry_price
                                               + pos.units * 0.5 * atr_v)
-
-                    # 利润保护
-                    if (not pos.profit_protected and pos.units > 1
-                            and (close - pos.entry_price) / atr_v > 15):
-                        exit_u = max(1, pos.units // 2)
-                        cash += exit_u * pos.shares_per_unit * close
-                        pos.units -= exit_u
-                        pos.profit_protected = True
 
             # 当日净值
             shares = pos.units * pos.shares_per_unit
