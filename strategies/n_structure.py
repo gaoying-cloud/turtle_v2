@@ -358,7 +358,7 @@ class NStructureStrategy:
     trail_mult_tight: float = 3.0, # 跟踪止损 ATR 倍数（大浮盈锁利）
     d_timeout_days: int = 40,      # D点超时：持仓N天未突破D则退出
     add_step: float = 1.5,      # 加仓间隔（ATR 倍数, S39: 2.0→1.5）
-    max_units: int = 6,         # 最大单位数：1 初始 + 5 次加仓（S22 调优）
+    max_units: int = 4,         # 最大单位数（S40: 6→4，现金约束下实际到不了6）
     ma_trend: int = 50,         # 趋势过滤均线周期，50=MA50（S37 启用）
     ma_confirm: int = 5,
     use_ma5_confirm: bool = False,  # 关闭 MA5 确认（S22 调优）

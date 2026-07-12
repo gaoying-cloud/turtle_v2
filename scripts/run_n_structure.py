@@ -258,8 +258,8 @@ def main():
                         help="D点超时天数 (默认: 40)")
     parser.add_argument("--add_step", type=float, default=1.5,
                         help="加仓间隔 ATR 倍数 (默认: 1.5, S39: 2.0→1.5)")
-    parser.add_argument("--max_units", type=int, default=6,
-                        help="最大单位数 (默认: 6, S22调优)")
+    parser.add_argument("--max_units", type=int, default=4,
+                        help="最大单位数 (默认: 4, S40: 6→4)")
     parser.add_argument("--reentries", type=int, default=0,
                         help="再进场次数，0=关闭 (默认: 0)")
     parser.add_argument("--ma5", action="store_true",
