@@ -286,6 +286,12 @@ def main():
                         help="A→D最大涨幅上限，1.0=关闭 (S38实验)")
     parser.add_argument("--max-ab", type=float, default=1.0,
                         help="A→B最大抬升，1.0=关闭 (默认: 1.0)")
+    parser.add_argument("--min-ab-advance", type=float, default=0.0,
+                        help="最小AB抬高比例，0=关闭 (建议: 0.03)")
+    parser.add_argument("--min-ma-momentum", type=float, default=0.0,
+                        help="最小MA5-MA20差值比，0=关闭 (建议: 0.005)")
+    parser.add_argument("--max-ad-bars", type=int, default=0,
+                        help="最大A→D K线数，0=关闭 (建议: 40)")
     parser.add_argument("--trail-pre-d", type=float, default=2.5,
                         help="D突破前ATR跟踪倍数 (默认: 2.5)")
     parser.add_argument("--no-ma-exit", action="store_true",
@@ -349,6 +355,9 @@ def main():
         confirm_k=3,  # S37: B点确认从2→3
         max_ad_advance=args.max_ad,  # S38: A→D涨幅上限
         max_ab_advance=args.max_ab,  # S38: A→B抬升上限（候选）
+        min_ab_advance=args.min_ab_advance,     # S41: 最小AB抬高
+        min_ma_momentum=args.min_ma_momentum,   # S41: 最小MA动量
+        max_ad_bars=args.max_ad_bars,           # S41: 最大AD跨度
         trail_pre_d=args.trail_pre_d,           # S39: D突破前跟踪倍数
         use_ma_exit=not args.no_ma_exit,        # S39: MA20趋势出场
         ma_exit_period=args.ma_exit_period,     # S39: MA周期

@@ -411,6 +411,10 @@ class NStructureStrategy:
     # ── S38 结构质量过滤 ──
     max_ad_advance: float = 1.0,           # A→D 最大涨幅上限，1.0=关闭（S38 实验后回退）
     max_ab_advance: float = 1.0,           # A→B 最大抬升上限，1.0=关闭（候选）
+    # ── S41 入场质量过滤（基于 IS 诊断：初始止损 0% 胜率问题） ──
+    min_ab_advance: float = 0.0,           # 最小 AB 抬高比例, 0=关闭 (建议 0.03)
+    min_ma_momentum: float = 0.0,          # 最小 MA5-MA20 差值比, 0=关闭 (建议 0.005)
+    max_ad_bars: int = 0,                  # 最大 A→D K 线数, 0=关闭 (建议 40)
     # ── S39 出场逻辑重构 ──
     trail_pre_d: float = 2.5,              # D突破前 ATR 跟踪倍数（S39: 2.0→2.5 减少误杀）
     use_ma_exit: bool = True,              # D突破后启用 MA 趋势出场
@@ -462,6 +466,10 @@ class NStructureStrategy:
         # S38 结构质量过滤
         self.max_ad_advance = max_ad_advance
         self.max_ab_advance = max_ab_advance
+        # S41 入场质量过滤
+        self.min_ab_advance = min_ab_advance
+        self.min_ma_momentum = min_ma_momentum
+        self.max_ad_bars = max_ad_bars
         # S39 出场逻辑重构
         self.trail_pre_d = trail_pre_d
         self.use_ma_exit = use_ma_exit
@@ -673,6 +681,16 @@ class NStructureStrategy:
             if ab_advance > self.max_ab_advance:
                 return
 
+        # 2b. S41 入场质量过滤：基于 IS 诊断的假突破过滤
+        if self.min_ab_advance > 0:
+            ab_advance = (ns.b_price - ns.a_price) / ns.a_price
+            if ab_advance < self.min_ab_advance:
+                return  # B点抬高不足，更高低点结构弱
+        if self.max_ad_bars > 0:
+            ad_bars = ns.d_idx - ns.a_idx
+            if ad_bars > self.max_ad_bars:
+                return  # A→D 耗时过长，趋势可能已耗尽
+
         # 3. MA5 辅助确认（只用已闭合 K 线）
         if self.use_ma5_confirm:
             if not ma5_confirm(df, ns, prev):
@@ -704,6 +722,16 @@ class NStructureStrategy:
             ma5_val = df.loc[prev, 'ma5']
             ma20_val = df.loc[prev, 'ma20']
             if pd.isna(ma5_val) or pd.isna(ma20_val) or ma5_val <= ma20_val:
+                return
+
+        # S41: MA 动量过滤 — 短期趋势必须有足够强度
+        if self.min_ma_momentum > 0:
+            ma5_val = df.loc[prev, 'ma5']
+            ma20_val = df.loc[prev, 'ma20']
+            if pd.isna(ma5_val) or pd.isna(ma20_val) or ma20_val <= 0:
+                return
+            momentum = (ma5_val - ma20_val) / ma20_val
+            if momentum < self.min_ma_momentum:
                 return
 
         # ── 信号触发 → 今日开盘进场 ──

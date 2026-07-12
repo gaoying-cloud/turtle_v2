@@ -195,23 +195,28 @@ def main():
     args = parser.parse_args()
 
     strategy = NStructureStrategy(
-        window_size=100, atr_period=25,
-        stop_mult=1.5, trail_mult=5.0,
-        trail_mult_wide=8.0, trail_mult_tight=3.0,
-        d_timeout_days=40,
-        add_step=2.0, max_units=6,
-        ma_trend=50, use_ma5_confirm=False,       # S37: MA50 趋势过滤
+        window_size=60, atr_period=25,             # S39
+        stop_mult=1.5,
+        d_timeout_days=7,                          # S40: 40→7
+        add_step=1.5, max_units=4,                 # S39/S40
+        add_weights=(0.5, 0.8, 1.5, 0.8),         # S40
+        ma_trend=50, use_ma5_confirm=False,
         initial_capital=100000, risk_per_trade=0.01,
         max_reentries=0, num_symbols=6,
-        confirm_k=3, min_advance=0.05,            # S37: confirm_k 2→3
+        confirm_k=3, min_advance=0.05,
         min_gap_ad=5, min_gap_db=3, local_half_window=2,
         slippage_pct=0.001, commission_pct=0.00015,
         use_dynamic_equity=True,
         max_consecutive_losses=5, pause_bars=20,
-        stop_floor_pre_break=0.93,
+        stop_floor_pre_break=0.95,                 # S39: 0.93→0.95
         stop_floor_post_break=0.95,
         use_ma_cross=True, max_position_pct=0.25,
-        entry_confirm_bars=2,                     # S37: 进场确认延迟
+        entry_confirm_bars=2,
+        trail_pre_d=2.5,                           # S39
+        use_ma_exit=True,                          # S39
+        ma_exit_period=20, ma_exit_margin=0.97,    # S39
+        ma_exit_bearish=True,                      # S39
+        d_exit_floor=0.95,                         # S39
     )
 
     all_rows = []
