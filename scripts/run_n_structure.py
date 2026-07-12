@@ -256,8 +256,8 @@ def main():
                         help="跟踪止损紧倍数 (默认: 3.0, 大浮盈锁利)")
     parser.add_argument("--d-timeout", type=int, default=40,
                         help="D点超时天数 (默认: 40)")
-    parser.add_argument("--add_step", type=float, default=2.0,
-                        help="加仓间隔 ATR 倍数 (默认: 2.0)")
+    parser.add_argument("--add_step", type=float, default=1.5,
+                        help="加仓间隔 ATR 倍数 (默认: 1.5, S39: 2.0→1.5)")
     parser.add_argument("--max_units", type=int, default=6,
                         help="最大单位数 (默认: 6, S22调优)")
     parser.add_argument("--reentries", type=int, default=0,
@@ -290,6 +290,8 @@ def main():
                         help="D突破前ATR跟踪倍数 (默认: 2.5)")
     parser.add_argument("--no-ma-exit", action="store_true",
                         help="关闭MA20出场，回退到旧ATR三阶段跟踪止损")
+    parser.add_argument("--exit-channel", type=int, default=0,
+                        help="N日最低价通道出场，>0替代MA20 (如: 10)")
     parser.add_argument("--ma-exit-period", type=int, default=20,
                         help="MA出场均线周期 (默认: 20)")
     parser.add_argument("--ma-exit-margin", type=float, default=0.97,
@@ -353,6 +355,7 @@ def main():
         ma_exit_margin=args.ma_exit_margin,     # S39: 跌破阈值
         ma_exit_confirm=args.ma_exit_confirm,   # S39: 确认天数
         ma_exit_bearish=not args.no_bearish,     # S39: 阴线过滤
+        exit_channel=args.exit_channel,          # N日通道出场
         d_exit_floor=args.d_exit_floor,         # S39: D点硬止损地板
     )
 

@@ -357,7 +357,7 @@ class NStructureStrategy:
     trail_mult_wide: float = 8.0,  # 跟踪止损 ATR 倍数（D突破初期，宽止损让趋势发育）
     trail_mult_tight: float = 3.0, # 跟踪止损 ATR 倍数（大浮盈锁利）
     d_timeout_days: int = 40,      # D点超时：持仓N天未突破D则退出
-    add_step: float = 2.0,      # 加仓间隔（ATR 倍数），每 2N 加仓一次
+    add_step: float = 1.5,      # 加仓间隔（ATR 倍数, S39: 2.0→1.5）
     max_units: int = 6,         # 最大单位数：1 初始 + 5 次加仓（S22 调优）
     ma_trend: int = 50,         # 趋势过滤均线周期，50=MA50（S37 启用）
     ma_confirm: int = 5,
@@ -397,6 +397,7 @@ class NStructureStrategy:
     ma_exit_margin: float = 0.97,          # MA 有效跌破阈值（备用，ma_exit_confirm>0 时以确认天数为主）
     ma_exit_confirm: int = 0,              # MA 有效跌破：0=margin百分比（S39最优）, -1=实体1/3法, >0=连续N日
     ma_exit_bearish: bool = True,          # MA 出场要求阴线确认（close < open）
+    exit_channel: int = 0,                 # N日最低价通道出场，>0 替代 MA20（如10=10日最低价）
     d_exit_floor: float = 0.95,            # D突破后硬止损地板：D × floor（防极端回撤）
     ):
         self.window_size = window_size
@@ -446,6 +447,7 @@ class NStructureStrategy:
         self.ma_exit_margin = ma_exit_margin
         self.ma_exit_confirm = ma_exit_confirm
         self.ma_exit_bearish = ma_exit_bearish
+        self.exit_channel = exit_channel
         self.d_exit_floor = d_exit_floor
 
     def _buy_price(self, price: float) -> float:
@@ -838,8 +840,52 @@ class NStructureStrategy:
                     pos.stop_loss = b_floor
             return
 
-        # ── 3. D 突破后：MA20 趋势出场 + 加仓 ──
-        if self.use_ma_exit:
+        # ── 3. D 突破后：趋势出场 + 加仓 ──
+        if self.exit_channel > 0:
+            # 通道出场：close < N日最低价 → 趋势结构破位
+            lookback = self.exit_channel
+            if i >= lookback:
+                channel_low = df['low'].iloc[i - lookback:i].min()
+                if close < channel_low:
+                    exit_price = self._sell_price(close)
+                    pos.trade.exit_idx = i
+                    pos.trade.exit_price = exit_price
+                    pos.trade.exit_reason = f"{lookback}日低点出场"
+                    avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
+                    gross_pnl = (exit_price - avg_cost) * total_shares
+                    commission = (self._commission_cost(avg_cost, total_shares)
+                                  + self._commission_cost(exit_price, total_shares))
+                    pos.trade.pnl = gross_pnl - commission
+                    pos.trade.units = pos.units
+                    trades.append(pos.trade)
+                    if verbose:
+                        print(f"  🔵 {lookback}日低点出场 [{i}]  价格={exit_price:.3f}  "
+                              f"通道低={channel_low:.3f}  盈亏={pos.trade.pnl:.0f}")
+                    pos.active = False
+                    self._setup_reentry(pos)
+                    return
+            # D点硬地板
+            d_floor = pos.d_price * self.d_exit_floor
+            if close < d_floor:
+                exit_price = self._sell_price(close)
+                pos.trade.exit_idx = i
+                pos.trade.exit_price = exit_price
+                pos.trade.exit_reason = "D点地板"
+                avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
+                gross_pnl = (exit_price - avg_cost) * total_shares
+                commission = (self._commission_cost(avg_cost, total_shares)
+                              + self._commission_cost(exit_price, total_shares))
+                pos.trade.pnl = gross_pnl - commission
+                pos.trade.units = pos.units
+                trades.append(pos.trade)
+                if verbose:
+                    print(f"  🔵 D点地板 [{i}]  价格={exit_price:.3f}  "
+                          f"D={pos.d_price:.3f}  盈亏={pos.trade.pnl:.0f}")
+                pos.active = False
+                self._setup_reentry(pos)
+                return
+
+        elif self.use_ma_exit:
             # S39: MA20 趋势出场 + D 点地板（趋势已确认，让利润跑）
             ma20 = df.loc[i, 'ma20']
             d_floor = pos.d_price * self.d_exit_floor
