@@ -376,7 +376,7 @@ class TurtleStrategy(bt.Strategy):
                     reasons.append(f"磨损③({n_trades}笔{detail}亏{loss_pct:.1%}本金)")
 
             # ── 规则①：沉默型（最后触发）──
-            n_bars = len(self._signals.get(code, {}).get("n", []))
+            n_bars = len(self)  # 当前已处理 bar 数，非完整预计算序列长度
             years = n_bars / 252
             annual_sig = sig / years if years > 0 else 0
             if years >= 2 and annual_sig < annual_min:
@@ -645,9 +645,9 @@ class TurtleStrategy(bt.Strategy):
 
             # ⑤ 成交量确认
             if self.params.vol_threshold > 0:
-                # 取近 21 个 bar 的 volume 序列
-                vol_count = min(21, len(data.volume.array))
-                vol_series = pd.Series(data.volume.array[-vol_count:])
+                # 取近 21 个 bar 的 volume 序列（用 idx 定位当前 bar，避免 array[-N:] 偷看未来）
+                vol_count = min(21, idx + 1)
+                vol_series = pd.Series(data.volume.array[idx - vol_count + 1 : idx + 1])
                 vol_pass = volume_confirmation(
                     data.volume[0], vol_series,
                     threshold=self.params.vol_threshold,

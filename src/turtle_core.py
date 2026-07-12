@@ -647,7 +647,7 @@ class TurtleSignals:
             "ma5": close.rolling(5).mean(),      # MA5（双模式入场用）
             "ma10": close.rolling(10).mean(),    # MA10（金叉判断用）
             "hurst_252": self._rolling_hurst(close),
-            "trend_duration_median": pd.Series(trend_duration_median(close, 20), index=close.index),
+            "trend_duration_median": _rolling_trend_duration_median(close, 20),
             "rsi_14": self._rsi(close, 14),
             "bb_upper_20": close.rolling(20).mean() + 2 * close.rolling(20).std(),
             "bb_lower_20": close.rolling(20).mean() - 2 * close.rolling(20).std(),
@@ -1037,6 +1037,9 @@ def hurst_exponent(price: np.ndarray, max_lag: int = 100) -> float:
 def trend_duration_median(close: pd.Series, ma_period: int = 20) -> float:
     """连续高于/低于均线天数的中位数。
     值 < 5 → 趋势太短，不适合20日突破系统。
+
+    注意：此函数使用传入的全部 close 序列计算统计量。
+    回测中应仅传入截至当前 bar 的数据（通过 _rolling_trend_duration_median 调用）。
     """
     ma = close.rolling(ma_period, min_periods=ma_period).mean().dropna()
     above = (close.reindex(ma.index) > ma).astype(int)
@@ -1049,3 +1052,36 @@ def trend_duration_median(close: pd.Series, ma_period: int = 20) -> float:
         cur = cur + 1 if not v else (streaks.append(cur) or 0 if cur else 0)
     if cur: streaks.append(cur)
     return float(np.median(streaks)) if streaks else 0.0
+
+
+def _rolling_trend_duration_median(
+    close: pd.Series, ma_period: int = 20, min_window: int = 252
+) -> pd.Series:
+    """滚动窗口 trend_duration_median — 每个 bar 仅用截至当前的数据。
+
+    与旧版 trend_duration_median 的关键区别：
+        旧版对整个序列计算一个全局中位数然后广播到所有 bar（未来函数）。
+        本函数对每个 bar i ≥ min_window 仅用 close[:i+1] 计算，杜绝前瞻偏差。
+
+    Parameters
+    ----------
+    close : pd.Series
+        完整收盘价序列。
+    ma_period : int
+        均线周期，默认 20。
+    min_window : int
+        最小窗口大小（不足时不计算），默认 252。
+
+    Returns
+    -------
+    pd.Series
+        每个 bar 对应的滚动 trend_duration_median，早期 bar 为 NaN。
+    """
+    n = len(close)
+    result = pd.Series(np.nan, index=close.index, dtype=float)
+    for i in range(min_window, n):
+        try:
+            result.iloc[i] = trend_duration_median(close.iloc[:i + 1], ma_period)
+        except Exception:
+            result.iloc[i] = np.nan
+    return result

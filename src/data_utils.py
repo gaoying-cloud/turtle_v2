@@ -181,7 +181,8 @@ def df_to_feed(df: pd.DataFrame, symbol: str,
 
     if common_dates is not None:
         feed_df = feed_df.set_index("date").reindex(common_dates)
-        feed_df = feed_df.ffill().bfill()
+        feed_df = feed_df.ffill()
+        # 仅前向填充（ffill），不再使用 bfill() 避免未来数据回填前导 NaN
         # keep DatetimeIndex for Backtrader
     else:
         feed_df.set_index("date", inplace=True)
