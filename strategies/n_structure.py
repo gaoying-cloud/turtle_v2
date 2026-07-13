@@ -784,7 +784,7 @@ class NStructureStrategy:
                   f"价格={entry_price:.3f}  B={ns.b_price:.3f}  "
                   f"D={ns.d_price:.3f}  A={ns.a_price:.3f}  "
                   f"{ma_label}  止损={stop:.3f}  "
-                  f"股数={shares_per_unit}")
+                  f"股数={first_shares}")
 
     def _is_ma20_uptrend(self, df: pd.DataFrame, i: int) -> bool:
         """检查 MA20 是否处于上行趋势（已确认）。
@@ -1327,7 +1327,7 @@ class NStructureStrategy:
                 df_sym = indicators[sym]
                 # 实时计算其他品种持仓市值（反映本轮已处理品种的加仓）
                 other_value = sum(
-                    p.units * p.shares_per_unit * indicators[s].loc[i, 'close']
+                    p.total_shares * indicators[s].loc[i, 'close']
                     for s, p in positions.items() if s != sym
                 )
                 self._manage_position(
@@ -1445,6 +1445,9 @@ class NStructureStrategy:
                     if shares <= 0:
                         available_candidates -= 1
                         continue
+                    # S42 fix: 应用 add_weights[0] 权重（与单品种 _check_entry_from_prev 一致）
+                    w0 = self.add_weights[0] if len(self.add_weights) > 0 else 1.0
+                    shares = max(100, int(shares * w0 / 100) * 100)
 
                     cost = shares * entry_price
                     # 总敞口检查
@@ -1468,6 +1471,8 @@ class NStructureStrategy:
                     pos.a_price = ns.a_price
                     pos.units = 1
                     pos.shares_per_unit = shares
+                    pos.total_shares = shares
+                    pos.base_shares = shares
                     pos.total_cost = entry_price * shares
                     pos.highest_since_entry = entry_price
                     pos.next_add_level = entry_price + self.add_step * atr_val
