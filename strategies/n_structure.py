@@ -784,7 +784,23 @@ class NStructureStrategy:
                   f"价格={entry_price:.3f}  B={ns.b_price:.3f}  "
                   f"D={ns.d_price:.3f}  A={ns.a_price:.3f}  "
                   f"{ma_label}  止损={stop:.3f}  "
-                  f"股数={shares_per_unit}")
+                  f"股数={first_shares}")
+
+    def _is_ma20_uptrend(self, df: pd.DataFrame, i: int) -> bool:
+        """检查 MA20 是否处于上行趋势（已确认）。
+
+        与 _manage_position 中 S41 的趋势确认逻辑一致：
+        MA20[t] > MA20[t - ma_exit_trend_bars] 才算确认。
+        """
+        if self.ma_exit_trend_bars <= 0:
+            return True  # 未启用趋势确认 → 总是"已确认"
+        if i < self.ma_exit_trend_bars:
+            return False  # 历史数据不足 → 未确认
+        ma20 = df.loc[i, 'ma20']
+        ma20_past = df.loc[i - self.ma_exit_trend_bars, 'ma20']
+        if pd.isna(ma20) or pd.isna(ma20_past):
+            return False
+        return bool(ma20 > ma20_past)
 
     def _manage_position(self, df: pd.DataFrame, i: int,
                          pos: PositionState, trades: list[Trade],
@@ -879,7 +895,11 @@ class NStructureStrategy:
                         pos.b_price * self.stop_floor_post_break
                     )
                     pos.stop_loss = max(pos.stop_loss, new_stop)
-                    if pos.units < self.max_units:
+                    # S42: MA20 趋势未确认 → 不加仓，不扩大风险
+                    _allow_add = True
+                    if self.use_ma_exit and self.ma_exit_trend_bars > 0:
+                        _allow_add = self._is_ma20_uptrend(df, i)
+                    if pos.units < self.max_units and _allow_add:
                         new_unit_idx = pos.units
                         w = self.add_weights[new_unit_idx] if new_unit_idx < len(self.add_weights) else 1.0
                         add_shares = max(100, int(pos.base_shares * w / 100) * 100)
@@ -911,6 +931,56 @@ class NStructureStrategy:
             return
 
         # ── 3. D 突破后：趋势出场 + 加仓 ──
+
+        # S42: MA20 趋势未确认 → 继续紧止损（trail_pre_d），不加仓不放松
+        # 本质：趋势不确认就不放松。等 MA20 确认上行后，才切换到宽松出场。
+        if self.use_ma_exit and not self._is_ma20_uptrend(df, i):
+            # 紧止损跟踪（与 Stage 1 逻辑一致）
+            atr_val = df.loc[i, 'atr']
+            if not pd.isna(atr_val) and atr_val > 0:
+                trail_stop = close - self.trail_pre_d * atr_val
+                pos.stop_loss = max(pos.stop_loss, trail_stop)
+            # 检查紧止损
+            if low <= pos.stop_loss:
+                exit_price = self._sell_price(min(close, pos.stop_loss))
+                pos.trade.exit_idx = i
+                pos.trade.exit_price = exit_price
+                pos.trade.exit_reason = "跟踪止损(趋势未确认)"
+                avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
+                gross_pnl = (exit_price - avg_cost) * total_shares
+                commission = (self._commission_cost(avg_cost, total_shares)
+                              + self._commission_cost(exit_price, total_shares))
+                pos.trade.pnl = gross_pnl - commission
+                pos.trade.units = pos.units
+                trades.append(pos.trade)
+                if verbose:
+                    print(f"  🟠 {pos.trade.exit_reason} [{i}]  价格={exit_price:.3f}  "
+                          f"止损={pos.stop_loss:.3f}  盈亏={pos.trade.pnl:.0f}")
+                pos.active = False
+                self._setup_reentry(pos)
+                return
+            # D点地板仍做最后防线（防单日暴跌穿透止损）
+            d_floor = pos.d_price * self.d_exit_floor
+            if close < d_floor:
+                exit_price = self._sell_price(close)
+                pos.trade.exit_idx = i
+                pos.trade.exit_price = exit_price
+                pos.trade.exit_reason = "D点地板"
+                avg_cost = pos.total_cost / total_shares if total_shares > 0 else pos.entry_price
+                gross_pnl = (exit_price - avg_cost) * total_shares
+                commission = (self._commission_cost(avg_cost, total_shares)
+                              + self._commission_cost(exit_price, total_shares))
+                pos.trade.pnl = gross_pnl - commission
+                pos.trade.units = pos.units
+                trades.append(pos.trade)
+                if verbose:
+                    print(f"  🔵 D点地板 [{i}]  价格={exit_price:.3f}  "
+                          f"D={pos.d_price:.3f}  盈亏={pos.trade.pnl:.0f}")
+                pos.active = False
+                self._setup_reentry(pos)
+                return
+            return  # 趋势未确认，不加仓、不切换宽松出场
+
         if self.exit_channel > 0:
             # 通道出场：close < N日最低价 → 趋势结构破位
             lookback = self.exit_channel
@@ -1257,7 +1327,7 @@ class NStructureStrategy:
                 df_sym = indicators[sym]
                 # 实时计算其他品种持仓市值（反映本轮已处理品种的加仓）
                 other_value = sum(
-                    p.units * p.shares_per_unit * indicators[s].loc[i, 'close']
+                    p.total_shares * indicators[s].loc[i, 'close']
                     for s, p in positions.items() if s != sym
                 )
                 self._manage_position(
@@ -1375,6 +1445,9 @@ class NStructureStrategy:
                     if shares <= 0:
                         available_candidates -= 1
                         continue
+                    # S42 fix: 应用 add_weights[0] 权重（与单品种 _check_entry_from_prev 一致）
+                    w0 = self.add_weights[0] if len(self.add_weights) > 0 else 1.0
+                    shares = max(100, int(shares * w0 / 100) * 100)
 
                     cost = shares * entry_price
                     # 总敞口检查
@@ -1398,6 +1471,8 @@ class NStructureStrategy:
                     pos.a_price = ns.a_price
                     pos.units = 1
                     pos.shares_per_unit = shares
+                    pos.total_shares = shares
+                    pos.base_shares = shares
                     pos.total_cost = entry_price * shares
                     pos.highest_since_entry = entry_price
                     pos.next_add_level = entry_price + self.add_step * atr_val
