@@ -353,6 +353,45 @@ def update_position(df_ind: pd.DataFrame, idx: int,
     total_shares = total_shares_acc
     avg_cost = total_cost / total_shares if total_shares > 0 else entry_price
 
+    # S42: MA20 趋势未确认 → 继续紧止损（trail_pre_d），不加仓不放松
+    # 本质：趋势不确认就不放松。等 MA20 确认上行后，才切换到宽松出场。
+    if strategy.use_ma_exit and not strategy._is_ma20_uptrend(df_ind, idx):
+        # 紧止损跟踪（与 Stage 1 逻辑一致）
+        if not pd.isna(atr) and atr > 0:
+            trail_stop = close - strategy.trail_pre_d * atr
+            if trail_stop > pos["stop_loss"]:
+                pos["stop_loss"] = round(trail_stop, 3)
+        # 检查紧止损
+        if low <= pos["stop_loss"]:
+            exit_price = strategy._sell_price(min(close, pos["stop_loss"]))
+            gross_pnl = (exit_price - avg_cost) * total_shares
+            entry_comm = strategy._commission_cost(avg_cost, total_shares)
+            exit_comm = strategy._commission_cost(exit_price, total_shares)
+            pnl = gross_pnl - entry_comm - exit_comm
+            pos["_exit"] = {
+                "exit_price": round(exit_price, 3),
+                "pnl": round(pnl, 2),
+                "reason": "跟踪止损(趋势未确认)",
+            }
+            return {"action": "exit",
+                    "detail": {"reason": "跟踪止损(趋势未确认)", "pnl": round(pnl, 2)}}
+        # D点地板仍做最后防线（防单日暴跌穿透止损）
+        d_floor = d_price * strategy.d_exit_floor
+        if close < d_floor:
+            exit_price = strategy._sell_price(close)
+            gross_pnl = (exit_price - avg_cost) * total_shares
+            entry_comm = strategy._commission_cost(avg_cost, total_shares)
+            exit_comm = strategy._commission_cost(exit_price, total_shares)
+            pnl = gross_pnl - entry_comm - exit_comm
+            pos["_exit"] = {
+                "exit_price": round(exit_price, 3),
+                "pnl": round(pnl, 2),
+                "reason": "D点地板",
+            }
+            return {"action": "exit",
+                    "detail": {"reason": "D点地板", "pnl": round(pnl, 2)}}
+        return {"action": "hold", "detail": {}}  # 趋势未确认，不加仓、不切换宽松出场
+
     # S39: exit_channel 模式
     if strategy.exit_channel > 0:
         lookback = strategy.exit_channel
