@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **海龟策略**（`strategies/turtle_trading.py`）：基于 Backtrader 的海龟交易法则，含仓位管理/加仓/移动止损/品种退化检测
 - **N字结构策略**（`strategies/n_structure.py`）：纯 pandas/numpy 实现的 N 字形态识别策略，独立资金池运行
 
-**当前绩效**：CAGR 17.23%, MDD 13.84%, 夏普 1.10, 270+ tests passed
+**当前绩效**：海龟 CAGR 17.23%, MDD 13.84%, 夏普 1.10 | N字结构 S42 OOS CAGR 6.1%, MDD 18.7%, 289 tests passed
 
 ## 命令速查
 
@@ -72,17 +72,20 @@ py scripts/check_consistency.py            # 文档一致性校验
 │   ├── run_comparison.py         #   基准对比
 │   ├── gen_report.py             #   综合报告生成
 │   └── ...
-├── tests/                        #  pytest 测试（283 个函数）
+├── tests/                        #  pytest 测试（289 个函数）
 │   ├── test_turtle_core.py       #   海龟核心计算测试
 │   ├── test_turtle_strategy.py   #   TurtleStrategy 集成测试
-│   ├── test_n_structure.py       #   N字结构策略测试（25个）
+│   ├── test_n_structure.py       #   N字结构策略测试（44个）
 │   ├── test_risk_parity.py       #   风险平价测试
 │   ├── test_data_pipeline.py     #   数据管道测试
 │   └── ...
 ├── data/etf_daily/               # Parquet 缓存（每个品种独立文件）
 ├── results/                      # 回测输出（report/comparison/grid_search/diagnostics/etc.）
 └── docs/                         # 技术文档与实验记录
-    └── architecture.md           # 模块依赖全景与架构描述
+    ├── architecture.md           #   模块依赖全景与架构描述
+    └── experiments/              #   实验记录（S10-S45）
+        ├── S43_combo_roadmap.md  #   双策略组合路线图（S43-S45 三阶段）
+        └── BASELINE.md (项目根)  #   N 字结构策略基线记录（S42 为当前版本）
 ```
 
 ## 架构层级
