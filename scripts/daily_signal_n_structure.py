@@ -157,6 +157,26 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
     if ns is None:
         return None
 
+    # 1b. S38 结构质量过滤：A→D 涨幅过大 → 趋势已耗竭
+    if strategy.max_ad_advance < 1.0:
+        ad_advance = (ns.d_price - ns.a_price) / ns.a_price
+        if ad_advance > strategy.max_ad_advance:
+            return None
+    if strategy.max_ab_advance < 1.0:
+        ab_advance = (ns.b_price - ns.a_price) / ns.a_price
+        if ab_advance > strategy.max_ab_advance:
+            return None
+
+    # 1c. S41 入场质量过滤：基于 IS 诊断的假突破过滤
+    if strategy.min_ab_advance > 0:
+        ab_advance = (ns.b_price - ns.a_price) / ns.a_price
+        if ab_advance < strategy.min_ab_advance:
+            return None  # B点抬高不足，更高低点结构弱
+    if strategy.max_ad_bars > 0:
+        ad_bars = ns.d_idx - ns.a_idx
+        if ad_bars > strategy.max_ad_bars:
+            return None  # A→D 耗时过长，趋势可能已耗尽
+
     # 2. MA5 辅助确认
     if strategy.use_ma5_confirm:
         if not ma5_confirm(df_ind, ns, prev):
@@ -235,11 +255,17 @@ def check_entry_signal(df_ind: pd.DataFrame, idx: int,
 
 def update_position(df_ind: pd.DataFrame, idx: int,
                     pos: dict, strategy: NStructureStrategy,
-                    target_date: date | None = None) -> dict:
+                    target_date: date | None = None,
+                    per_symbol_equity: float | None = None) -> dict:
     """统一持仓管理：止损→退出→D突破→加仓（对齐 _manage_position 全部逻辑）。
 
     直接修改 pos dict（更新止损/d_broken/units/total_cost），
     返回触发的操作摘要。
+
+    Parameters
+    ----------
+    per_symbol_equity : float | None
+        单品种权益上限，用于加仓时的资金检查。None 时跳过检查（向后兼容）。
 
     Returns
     -------
@@ -281,15 +307,19 @@ def update_position(df_ind: pd.DataFrame, idx: int,
         return {"action": "exit", "detail": {"reason": reason, "pnl": round(pnl, 2)}}
 
     # ── 2. D 点突破前 ──
-    # 跨日状态用 entry_date 计算持仓天数（idx 是相对窗口位置，不可跨日持久化）
-    entry_date_str = pos.get("entry_date")
-    if entry_date_str:
-        entry_d = datetime.strptime(entry_date_str, "%Y-%m-%d").date()
-        ref_d = target_date or date.today()
-        held_calendar_days = (ref_d - entry_d).days
-        held_days = int(held_calendar_days * 5 / 7)  # 自然日→交易日估算
+    # 优先用 bar-index 差（对齐回测），legacy 状态用自然日估算回退
+    entry_idx_stored = pos.get("entry_idx")
+    if entry_idx_stored is not None:
+        held_days = idx - entry_idx_stored  # 对齐回测：bar-index 差
     else:
-        held_days = idx - pos.get("entry_idx", idx)
+        entry_date_str = pos.get("entry_date")
+        if entry_date_str:
+            entry_d = datetime.strptime(entry_date_str, "%Y-%m-%d").date()
+            ref_d = target_date or date.today()
+            held_calendar_days = (ref_d - entry_d).days
+            held_days = max(1, int(held_calendar_days * 5 / 7))  # 自然日→交易日估算（回退）
+        else:
+            held_days = 1
     if not d_broken:
         # D 点超时退出（S31）
         if held_days > strategy.d_timeout_days:
@@ -317,21 +347,27 @@ def update_position(df_ind: pd.DataFrame, idx: int,
                         b_price * strategy.stop_floor_post_break)
                 )
                 pos["stop_loss"] = round(new_stop, 3)
-                if units < strategy.max_units:
+                # S42: MA20 趋势未确认 → 不加仓，不扩大风险
+                _allow_add = True
+                if strategy.use_ma_exit and strategy.ma_exit_trend_bars > 0:
+                    _allow_add = strategy._is_ma20_uptrend(df_ind, idx)
+                if units < strategy.max_units and _allow_add:
                     new_unit_idx = units  # S40: 新单位的索引
                     w = strategy.add_weights[new_unit_idx] if new_unit_idx < len(strategy.add_weights) else 1.0
                     add_shares = max(100, int(base_shares * w / 100) * 100)
                     add_cost = close * add_shares
-                    pos["units"] = units + 1
-                    pos["total_cost"] = round(total_cost + add_cost, 2)
-                    pos["total_shares"] = total_shares_acc + add_shares
-                    pos["stop_loss"] = round(
-                        max(pos["stop_loss"], close * strategy.stop_floor_post_break), 3)
-                    return {"action": "d_break_add",
-                            "detail": {"type": "D点突破加仓", "price": round(close, 3),
-                                       "new_units": units + 1,
-                                       "new_stop": pos["stop_loss"],
-                                       "add_cost": round(add_cost, 2)}}
+                    eq = per_symbol_equity if per_symbol_equity and per_symbol_equity > 0 else strategy.capital_per_symbol
+                    if total_cost + add_cost <= eq:
+                        pos["units"] = units + 1
+                        pos["total_cost"] = round(total_cost + add_cost, 2)
+                        pos["total_shares"] = total_shares_acc + add_shares
+                        pos["stop_loss"] = round(
+                            max(pos["stop_loss"], close * strategy.stop_floor_post_break), 3)
+                        return {"action": "d_break_add",
+                                "detail": {"type": "D点突破加仓", "price": round(close, 3),
+                                           "new_units": units + 1,
+                                           "new_stop": pos["stop_loss"],
+                                           "add_cost": round(add_cost, 2)}}
                 return {"action": "hold",
                         "detail": {"d_broken": True, "new_stop": pos["stop_loss"]}}
             # ATR 无效时仅标记 d_broken，不更新止损
@@ -496,17 +532,19 @@ def update_position(df_ind: pd.DataFrame, idx: int,
             new_unit_idx = units  # S40: 新单位的索引
             w = strategy.add_weights[new_unit_idx] if new_unit_idx < len(strategy.add_weights) else 1.0
             add_shares = max(100, int(base_shares * w / 100) * 100)
-            pos["units"] = units + 1
-            pos["total_cost"] = round(total_cost + close * add_shares, 2)
-            pos["total_shares"] = total_shares_acc + add_shares
-            pos["stop_loss"] = round(
-                max(pos["stop_loss"], close * strategy.stop_floor_pre_break), 3)
-            add_cost = round(close * add_shares, 2)
-            return {"action": "pyramid_add",
-                    "detail": {"type": "金字塔加仓", "price": round(close, 3),
-                               "new_units": units + 1,
-                               "new_stop": pos["stop_loss"],
-                               "add_cost": add_cost}}
+            eq = per_symbol_equity if per_symbol_equity and per_symbol_equity > 0 else strategy.capital_per_symbol
+            if total_cost + close * add_shares <= eq:
+                pos["units"] = units + 1
+                pos["total_cost"] = round(total_cost + close * add_shares, 2)
+                pos["total_shares"] = total_shares_acc + add_shares
+                pos["stop_loss"] = round(
+                    max(pos["stop_loss"], close * strategy.stop_floor_pre_break), 3)
+                add_cost = round(close * add_shares, 2)
+                return {"action": "pyramid_add",
+                        "detail": {"type": "金字塔加仓", "price": round(close, 3),
+                                   "new_units": units + 1,
+                                   "new_stop": pos["stop_loss"],
+                                   "add_cost": add_cost}}
 
     return {"action": "hold", "detail": {}}
 
@@ -545,9 +583,11 @@ def scan_signals(symbols: list[str], state: dict,
         positions = state.get("positions", {})
         pos_action = {"action": "hold", "detail": {}}
         if sym in positions and not is_paused:
+            per_sym_eq = float(state.get("equity", strategy.initial_capital)) / max(1, len(symbols))
             pos_action = update_position(
                 df_ind, target_idx, positions[sym], strategy,
                 target_date=target_date,
+                per_symbol_equity=per_sym_eq,
             )
             # 退出：更新权益和连续亏损计数
             if pos_action["action"] == "exit":
@@ -598,6 +638,7 @@ def scan_signals(symbols: list[str], state: dict,
                 "b_price": float(entry_info["b_price"]),
                 "d_price": float(entry_info["d_price"]),
                 "a_price": float(entry_info["a_price"]),
+                "entry_idx": target_idx,  # S42: 用于 held_days 对齐回测 bar-index 差
                 "entry_date": (target_date or date.today()).isoformat(),
             }
             state["positions"] = positions
