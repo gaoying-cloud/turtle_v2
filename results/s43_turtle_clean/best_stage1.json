@@ -1,0 +1,11 @@
+{
+  "atr_period": 25,
+  "breakout_period": 20,
+  "stop_period": 8,
+  "stop_atr_multiple": 1.5,
+  "pyramid_step": 0.5,
+  "alpha": 0.05,
+  "atr_pct_threshold": "off",
+  "max_consecutive_losses": 5,
+  "max_cumulative_loss_pct": 0.15
+}

@@ -168,7 +168,10 @@ def df_to_feed(df: pd.DataFrame, symbol: str,
     feed_df = df[["date", "open", "high", "low", "close", "volume"]].copy()
     feed_df["date"] = pd.to_datetime(feed_df["date"])
     if common_dates is not None:
-        feed_df = feed_df.set_index("date").reindex(common_dates).ffill().bfill()
+        # [S43修复] 仅 ffill，删除 bfill —— bfill 会将上市较晚品种（豆粕2019/日经2019）
+        # 的未来价格回填到 2014-2018 的 NaN 中，造成前视偏差（look-ahead bias）。
+        # 上游 align_to_common_dates 已对 OHLC 做了 ffill，此处只需对齐索引即可。
+        feed_df = feed_df.set_index("date").reindex(common_dates).ffill()
     else:
         feed_df.set_index("date", inplace=True)
     return bt.feeds.PandasData(
@@ -211,6 +214,10 @@ def run_single_backtest(
     slippage = config["slippage_pct"]
     cerebro.broker.setcommission(commission=commission + slippage)
 
+    # ── turtle_params：核心参数来自扫描 params，其余从 config 读取 ──
+    # [S43] pyramid_step 支持从 params 覆盖（扫描用），否则回退 config
+    _pyramid_step = float(params.get("pyramid_step",
+                        config["turtle"].get("pyramid_step", 2.0)))
     turtle_params = {
         "atr_period": params["atr_period"],
         "breakout_period": params["breakout_period"],
@@ -221,6 +228,7 @@ def run_single_backtest(
         "unit_step": config["turtle"]["unit_step"],
         "use_55_filter": (mode == "B"),
         "exit_period": config["turtle"]["exit_period"],
+        "pyramid_step": _pyramid_step,
     }
 
     # 构建品种级权重倍率（从 params 中的 weight_* 键转换）
@@ -248,6 +256,19 @@ def run_single_backtest(
         shortable_symbols=get_shortable_symbols(config),
         t_plus_one_symbols=get_t_plus_one_symbols(config),
         weight_multipliers=weight_multipliers,
+        # ── [S43] 以下参数优先从 params 读取（扫描覆盖），否则回退 config ──
+        # atr_pct_threshold 在 params 中为 "off" 时关闭过滤，为数值时启用
+        use_atr_pct_filter=(
+            False if params.get("atr_pct_threshold") == "off"
+            else True if isinstance(params.get("atr_pct_threshold"), (int, float))
+            else bool(config["turtle"].get("atr_pct_filter", False))
+        ),
+        atr_pct_threshold=float(
+            params["atr_pct_threshold"] if isinstance(params.get("atr_pct_threshold"), (int, float))
+            else config["turtle"].get("atr_pct_threshold", 0.75)
+        ),
+        pyramid_step=_pyramid_step,
+        single_max_risk=float(config["risk"].get("single_max_risk", 0.04)),
     )
 
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, annualize=True)
@@ -321,6 +342,10 @@ def run_single_backtest(
     for key, val in params.items():
         if key.startswith("weight_"):
             result[key] = float(val) if isinstance(val, (int, float)) else val
+    # [S43] 补充新扫描参数的输出列，使 scan_s43_turtle.py 的 Stage 2 可查询
+    result["pyramid_step"] = params.get("pyramid_step", _pyramid_step)
+    result["atr_pct_threshold"] = params.get("atr_pct_threshold",
+        config.get("turtle", {}).get("atr_pct_threshold", "off"))
     return result
 
 # ════════════════════════════════════════════════════════════

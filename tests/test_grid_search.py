@@ -277,6 +277,7 @@ class TestRunSingleBacktestSmoke:
             "total_return", "cagr", "sharpe", "max_drawdown",
             "win_rate", "profit_factor", "total_trades",
             "annual_vol", "calmar", "final_value", "date_range",
+            "pyramid_step", "atr_pct_threshold",  # [S43] 新增扫描参数输出列
         }
         assert set(result.keys()) == expected_keys, f"缺失 key: {expected_keys - set(result.keys())}"
 

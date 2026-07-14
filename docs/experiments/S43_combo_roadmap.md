@@ -2,8 +2,8 @@
 
 ## 元数据
 - 提出: 2026-07-14
-- 分支: 分阶段独立分支
-- 状态: 📦 待启动
+- 分支: `exp/S43_turtle_clean`
+- 状态: ✅ Phase 1 完成 → Phase 2 待启动（海龟干净基线 14.9% OOS CAGR）
 - 前置: S42 (N字D点地板修复, 每日信号同步)
 
 ## 背景
@@ -66,7 +66,45 @@ py scripts/run_comparison.py --save                               # B1-B4 基准
 - 疑似污染参数列表（参数名 / 当前值 / 回退保守值）
 - IS-only 扫描参数候选集（≤ 8 个核心参数）
 
+#### 1c-pre. 网格搜索代码验证 🔴 P0（S43 前置修复确认）
+
+**目标**: 在正式启动 IS 扫描前，确认 `run_grid_search.py` 的两个 P0 修复已生效，扫描基础设施正确。
+
+**背景**:
+- P0-1: 原 `df_to_feed` 使用 `.bfill()` 对上市较晚品种（豆粕2019/日经2019）造成前视偏差
+- P0-2: 原 `run_single_backtest` 未传递 `use_atr_pct_filter` 等参数，导致扫描的策略配置与 `run_backtest.py` 不一致
+
+**验证步骤**:
+
+```bash
+# 1. 快速抽样扫描（10 组 × 2 模式 = 20 次回测），确认不崩溃
+py scripts/run_grid_search.py --quick --workers 1
+# 预期: 20/20 完成，results/grid_search/ 产出 3 个 CSV
+
+# 2. 确认 ATR 百分位过滤在扫描中生效（对比修复前后的日志差异）
+py scripts/run_grid_search.py --quick --workers 1 --verbose 2>&1 | grep -c "ATR百分位"
+# 预期: 有匹配行（修复前为 0）
+
+# 3. 对比单次回测 vs 单次网格扫描结果一致性（同参数、同区间）
+#    运行基线回测:
+py scripts/run_backtest.py --start 2014-01-01 --end 2020-01-01
+#    记录 CAGR/Sharpe/MDD，后续第一次 --quick 扫描的对应参数行应与之一致（允许 ±0.5% 误差）
+```
+
+**产出**:
+- 验证通过的确认记录
+- 若失败，回退到 `exp/S43_turtle_clean` 分支排查
+
+**通过标准**:
+| 检查项 | 门槛 |
+|:--|:--:|
+| --quick 20 次回测全部完成 | ✅ |
+| ATR 过滤日志有输出 | ≥ 1 条 |
+| 单次回测 vs 扫描同参数结果一致 | ±0.5% |
+
 #### 1c. IS-only 网格搜索 🔴 P0
+
+**前置**: 1c-pre 全部通过
 
 **目标**: 在 IS 区间 (2014-2020) 上独立扫描，找到最优组合
 
