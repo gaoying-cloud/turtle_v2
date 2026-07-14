@@ -162,6 +162,29 @@ def build_param_grid(use_two_stage: bool = False) -> List[dict]:
 # ════════════════════════════════════════════════════════════
 # 2. 单次回测运行
 # ════════════════════════════════════════════════════════════
+
+def _resolve_atr_pct_filter(params: dict, config: dict) -> Tuple[bool, float]:
+    """解析 ATR 百分位过滤参数。
+
+    - params["atr_pct_threshold"] == "off" → 关闭过滤
+    - params["atr_pct_threshold"] 为数值   → 启用该阈值
+    - 缺省                               → 回退 config
+
+    Returns
+    -------
+    (use_filter: bool, threshold: float)
+    """
+    raw = params.get("atr_pct_threshold", None)
+    if raw is not None and str(raw).lower() == "off":
+        return False, float(config["turtle"].get("atr_pct_threshold", 0.75))
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return True, float(raw)
+    # 缺省：回退 config
+    use = bool(config["turtle"].get("atr_pct_filter", False))
+    thr = float(config["turtle"].get("atr_pct_threshold", 0.75))
+    return use, thr
+
+
 def df_to_feed(df: pd.DataFrame, symbol: str,
                common_dates: pd.DatetimeIndex | None = None) -> bt.feeds.PandasData:
     """将 pandas DataFrame 转换为 Backtrader PandasData feed。"""
@@ -238,6 +261,9 @@ def run_single_backtest(
             symbol_code = key[len("weight_"):].replace("_", ".")
             weight_multipliers[symbol_code] = float(val)
 
+    # [S43] 解析 ATR 百分位过滤参数
+    _use_filter, _atr_pct_thr = _resolve_atr_pct_filter(params, config)
+
     cerebro.addstrategy(
         TurtleStrategy,
         turtle_params=turtle_params,
@@ -256,17 +282,9 @@ def run_single_backtest(
         shortable_symbols=get_shortable_symbols(config),
         t_plus_one_symbols=get_t_plus_one_symbols(config),
         weight_multipliers=weight_multipliers,
-        # ── [S43] 以下参数优先从 params 读取（扫描覆盖），否则回退 config ──
-        # atr_pct_threshold 在 params 中为 "off" 时关闭过滤，为数值时启用
-        use_atr_pct_filter=(
-            False if params.get("atr_pct_threshold") == "off"
-            else True if isinstance(params.get("atr_pct_threshold"), (int, float))
-            else bool(config["turtle"].get("atr_pct_filter", False))
-        ),
-        atr_pct_threshold=float(
-            params["atr_pct_threshold"] if isinstance(params.get("atr_pct_threshold"), (int, float))
-            else config["turtle"].get("atr_pct_threshold", 0.75)
-        ),
+        # ── [S43] ATR 百分位过滤：辅助函数解析 params / config 优先级 ──
+        use_atr_pct_filter=_use_filter,
+        atr_pct_threshold=_atr_pct_thr,
         pyramid_step=_pyramid_step,
         single_max_risk=float(config["risk"].get("single_max_risk", 0.04)),
     )
@@ -515,7 +533,7 @@ def evaluate_results(df: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
         df_valid = df.copy()
         all_sharpe_nan = True
 
-    scaler = _robust_scaler
+    scaler = robust_scaler
     if all_sharpe_nan:
         df_valid["_cagr_score"] = scaler(df_valid["cagr"].astype(float))
         df_valid["_trade_score"] = scaler(np.log1p(df_valid["total_trades"].astype(float)))
@@ -551,7 +569,7 @@ def evaluate_results(df: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
 
     return df_best
 
-def _robust_scaler(series: pd.Series) -> pd.Series:
+def robust_scaler(series: pd.Series) -> pd.Series:
     med = series.median()
     iqr = series.quantile(0.75) - series.quantile(0.25)
     if iqr == 0 or np.isnan(iqr):

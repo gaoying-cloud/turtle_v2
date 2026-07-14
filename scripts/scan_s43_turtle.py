@@ -143,13 +143,47 @@ def build_stage2_tasks(
 
 
 # ════════════════════════════════════════════════════════════
-#  结果评估（简化版：以 Sharpe 为主要排序指标）
+#  结果评估（综合评分：Sharpe×0.5 + CAGR×0.3 − MDD×0.2）
 # ════════════════════════════════════════════════════════════
+
+def _add_score_column(df: pd.DataFrame) -> pd.DataFrame:
+    """为扫描结果 DataFrame 添加综合评分列 `_score`。
+
+    排序优先级：Sharpe > CAGR > MDD（趋势跟踪策略 Sharpe 最反映风险调整收益）。
+    当所有 Sharpe 为 NaN 时回退为 CAGR 排序。
+
+    Returns
+    -------
+    pd.DataFrame
+        新增 `_score` 列的副本（其余列不变）。
+    """
+    if df.empty:
+        return df.copy()
+
+    df_valid = df.dropna(subset=["sharpe"]).copy()
+    if df_valid.empty:
+        # 全部 Sharpe 为 NaN，回退到 CAGR
+        df_valid = df.copy()
+        df_valid["_score"] = df_valid["cagr"].astype(float)
+    else:
+        # 综合评分：Sharpe 为主（0.5），CAGR（0.3），MDD 惩罚（0.2）
+        from scripts.run_grid_search import robust_scaler
+        df_valid["_sharpe_s"] = robust_scaler(df_valid["sharpe"].astype(float))
+        df_valid["_cagr_s"] = robust_scaler(df_valid["cagr"].astype(float))
+        df_valid["_dd_s"] = robust_scaler(-df_valid["max_drawdown"].astype(float))
+        df_valid["_score"] = (
+            0.5 * df_valid["_sharpe_s"] +
+            0.3 * df_valid["_cagr_s"] +
+            0.2 * df_valid["_dd_s"]
+        )
+
+    return df_valid
+
 
 def select_best(df: pd.DataFrame) -> dict:
     """从扫描结果 DataFrame 中选出最优参数组合。
 
-    排序优先级：Sharpe > CAGR > MDD（趋势跟踪策略 Sharpe 最反映风险调整收益）。
+    使用 _add_score_column 的综合评分选择最优行。
 
     Returns
     -------
@@ -159,25 +193,9 @@ def select_best(df: pd.DataFrame) -> dict:
     if df.empty:
         return {}
 
-    df_valid = df.dropna(subset=["sharpe"]).copy()
-    if df_valid.empty:
-        # 全部 Sharpe 为 NaN，回退到 CAGR
-        df_valid = df.copy()
-        df_valid["_score"] = df_valid["cagr"].astype(float)
-    else:
-        # 综合评分：Sharpe 为主（0.5），CAGR（0.3），MDD 惩罚（0.2）
-        from scripts.run_grid_search import _robust_scaler
-        df_valid["_sharpe_s"] = _robust_scaler(df_valid["sharpe"].astype(float))
-        df_valid["_cagr_s"] = _robust_scaler(df_valid["cagr"].astype(float))
-        df_valid["_dd_s"] = _robust_scaler(-df_valid["max_drawdown"].astype(float))
-        df_valid["_score"] = (
-            0.5 * df_valid["_sharpe_s"] +
-            0.3 * df_valid["_cagr_s"] +
-            0.2 * df_valid["_dd_s"]
-        )
-
-    best_idx = df_valid["_score"].idxmax()
-    best_row = df_valid.loc[best_idx]
+    df_scored = _add_score_column(df)
+    best_idx = df_scored["_score"].idxmax()
+    best_row = df_scored.loc[best_idx]
 
     # 提取参数字典（仅保留扫描参数 + 固定参数）
     param_keys = list(STAGE1_GRID.keys()) + list(STAGE2_PARAMS.keys()) + list(STAGE1_FIXED.keys())
@@ -191,7 +209,8 @@ def select_best(df: pd.DataFrame) -> dict:
             elif k in ("stop_atr_multiple", "alpha", "pyramid_step", "max_cumulative_loss_pct"):
                 best_params[k] = float(val)
             elif k == "atr_pct_threshold":
-                best_params[k] = val if val == "off" else float(val)
+                # 防御性：Excel 重新保存可能将 "off" 转为 NaN/空字符串
+                best_params[k] = val if str(val).lower() == "off" else float(val)
             else:
                 best_params[k] = val
 
@@ -199,16 +218,21 @@ def select_best(df: pd.DataFrame) -> dict:
 
 
 def print_param_table(df: pd.DataFrame, title: str, top_n: int = 10):
-    """打印参数扫描结果表格。"""
+    """打印参数扫描结果表格。
+
+    排序标准与 select_best 一致：综合评分（Sharpe×0.5 + CAGR×0.3 − MDD×0.2）。
+    """
     if df.empty:
         print(f"\n  {title}: (无结果)")
         return
 
-    print(f"\n  {title} (Top-{min(top_n, len(df))})")
-    print(f"  {'Rank':<5} {'atr':<5} {'brk':<5} {'stop':<5} {'mult':<6} {'pyr':<5} {'α':<6} {'ATR%':<6} {'loss':<5} {'Sharpe':<8} {'CAGR':<8} {'MDD':<8} {'交易':<5}")
-    print(f"  {'-' * 80}")
+    df_scored = _add_score_column(df)
+    df_disp = df_scored.nlargest(top_n, "_score")
 
-    df_disp = df.dropna(subset=["sharpe"]).nlargest(top_n, "sharpe") if "sharpe" in df.columns else df.head(top_n)
+    print(f"\n  {title} (Top-{min(top_n, len(df_disp))}，按综合评分排序)")
+    print(f"  {'Rank':<5} {'atr':<5} {'brk':<5} {'stop':<5} {'mult':<6} {'pyr':<5} {'α':<6} {'ATR%':<6} {'loss':<5} {'Sharpe':<8} {'CAGR':<8} {'MDD':<8} {'评分':<7} {'交易':<5}")
+    print(f"  {'-' * 85}")
+
     for rank, (_, row) in enumerate(df_disp.iterrows(), 1):
         print(f"  {rank:<5} "
               f"{int(row.get('atr_period',0)):<5} "
@@ -222,6 +246,7 @@ def print_param_table(df: pd.DataFrame, title: str, top_n: int = 10):
               f"{float(row.get('sharpe',0)):<8.4f} "
               f"{float(row.get('cagr',0)):<8.2f}% "
               f"{float(row.get('max_drawdown',0)):<8.2f}% "
+              f"{float(row.get('_score',0)):<7.4f} "
               f"{int(row.get('total_trades',0)):<5}")
 
 

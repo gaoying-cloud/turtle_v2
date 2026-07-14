@@ -29,7 +29,7 @@ from scripts.run_grid_search import (
     PARAM_GRID,
     MODES,
     evaluate_results,
-    _robust_scaler,
+    robust_scaler,
     _save_best_params_json,
 )
 
@@ -151,7 +151,7 @@ class TestEvaluateResults:
 
 
 # ════════════════════════════════════════════════════════════
-#  _robust_scaler
+#  robust_scaler
 # ════════════════════════════════════════════════════════════
 
 class TestRobustScaler:
@@ -159,18 +159,18 @@ class TestRobustScaler:
 
     def test_standard_case(self):
         arr = pd.Series([1, 2, 3, 4, 5])
-        scaled = _robust_scaler(arr)
+        scaled = robust_scaler(arr)
         assert abs(scaled.median()) < 1e-10  # 中位数 ≈ 0
         assert scaled.std() > 0
 
     def test_constant_series_returns_zero(self):
         arr = pd.Series([3, 3, 3, 3])
-        scaled = _robust_scaler(arr)
+        scaled = robust_scaler(arr)
         assert (scaled == 0).all()
 
     def test_single_element(self):
         arr = pd.Series([42])
-        scaled = _robust_scaler(arr)
+        scaled = robust_scaler(arr)
         assert scaled.iloc[0] == 0
 
 

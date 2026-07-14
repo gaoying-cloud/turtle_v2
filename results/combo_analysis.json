@@ -1,0 +1,51 @@
+{
+  "oos_period": {
+    "start": "2020-01-03",
+    "end": "2026-07-09",
+    "years": 6.51,
+    "trading_days": 1577
+  },
+  "correlation": {
+    "pearson": -0.0201,
+    "spearman": -0.0495,
+    "low_corr_ratio": 1.0
+  },
+  "drawdown_overlap": {
+    "overlap_ratio": 0.0011,
+    "extreme_both_days": 0
+  },
+  "yearly": {
+    "dual_positive": 6,
+    "dual_negative": 0,
+    "total": 7
+  },
+  "metrics": {
+    "n_structure": {
+      "cum_ret": 0.6523,
+      "cagr": 0.0801,
+      "vol": 0.1411,
+      "sharpe": 0.5682,
+      "mdd": -0.1778,
+      "calmar": 0.4508
+    },
+    "turtle": {
+      "cum_ret": 2.0666,
+      "cagr": 0.1877,
+      "vol": 0.1505,
+      "sharpe": 1.2474,
+      "mdd": -0.1845,
+      "calmar": 1.0174
+    },
+    "equal_weight": {
+      "cum_ret": 1.3288,
+      "cagr": 0.1386,
+      "vol": 0.1021,
+      "sharpe": 1.3574,
+      "mdd": -0.0953,
+      "calmar": 1.4539
+    }
+  },
+  "diversification_ratio": 0.2997,
+  "combo_score": 11,
+  "verdict": "强烈推荐组合 [OK]"
+}
