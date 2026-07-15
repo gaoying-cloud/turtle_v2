@@ -415,6 +415,7 @@ class NStructureStrategy:
     use_concentration_fade: bool = False,   # 集中度衰减: 持仓品种越多→新仓位风险预算越低
     max_portfolio_drawdown: float = 0.0,   # 组合净值回撤熔断阈值, 0=关闭, 建议0.10(10%)
     drawdown_pause_bars: int = 20,         # 回撤熔断冷却K线数
+    max_portfolio_positions: int = 0,      # 组合最大同时持仓品种数, 0=不限制(默认), 辅助模式建议2
     # ── S37 进场确认 ──
     entry_confirm_bars: int = 2,           # 突破 B 点后需连续站稳 K 线数（1=当日确认, 2=需前日也站上）
     # ── S38 结构质量过滤 ──
@@ -477,6 +478,7 @@ class NStructureStrategy:
         self.use_concentration_fade = use_concentration_fade
         self.max_portfolio_drawdown = max_portfolio_drawdown
         self.drawdown_pause_bars = drawdown_pause_bars
+        self.max_portfolio_positions = max_portfolio_positions
         # S37 进场确认
         self.entry_confirm_bars = entry_confirm_bars
         # S38 结构质量过滤
@@ -1459,8 +1461,11 @@ class NStructureStrategy:
             # ── 可用资金 = 当前权益 - 已占用市值 ──
             available_cash = current_equity - position_value
 
-            # ── Step 3: 扫描入场信号（熔断中跳过） ──
-            if i >= max(paused_until_bar, drawdown_paused_until):
+            # ── Step 3: 扫描入场信号（熔断中跳过 / 持仓上限） ──
+            can_enter = (i >= max(paused_until_bar, drawdown_paused_until)
+                         and not (self.max_portfolio_positions > 0
+                                  and len(positions) >= self.max_portfolio_positions))
+            if can_enter:
                 entry_candidates = []
                 for sym in symbols:
                     if sym in positions:
