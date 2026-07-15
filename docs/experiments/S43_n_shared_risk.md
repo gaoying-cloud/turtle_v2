@@ -1,0 +1,160 @@
+# 实验: N字策略共享资金池 + 风险控制 (S43 分支探索)
+
+## 元数据
+- 提出: 2026-07-15
+- 分支: `exp/S43_n_shared_risk`（从 `exp/S43_turtle_clean` 分出）
+- 状态: 🟡 C 组已实现（风控机制生效，但阈值需 N 字专项校准）
+- 定位: **独立探索分支，不改动主线基线**
+
+## 背景
+
+将 N 字策略从"逐品种独立 10 万"改为"6 品种共享 10 万"，目的是：
+1. 与海龟策略资金规模对齐（都是 10 万初始）
+2. 为双策略组合提供更一致的资本基准
+
+但裸共享池回测显示 MDD 从 −21.9% 膨胀到 −70.5%，原因是 N 字共享池缺少海龟的关键风控层：
+- 无全账户风险上限（N-risk budget）
+- 无单品种风险上限
+- 无集中度衰减
+- 敞口仅用市值度量（不感知波动率）
+
+## 对照实验设计
+
+### 变量控制
+
+| 组 | 资金模式 | 品种数 | 权益模式 | 风控层 |
+|:--|------|:--:|------|------|
+| **A (基准)** | 独立池 10万×6 | 6 | 动态 | 无（单品种自然隔离） |
+| **B (裸共享)** | 共享池 10万 | 6 | 动态 | 仅市值敞口≤150% |
+| **C (+风险上限)** | 共享池 10万 | 6 | 动态 | B + 全账户≤15% + 单品种≤4% |
+| **D (+集中度)** | 共享池 10万 | 6 | 动态 | C + 集中度衰减 |
+| **E (+固定权益)** | 共享池 10万 | 6 | 固定 | D + use_dynamic_equity=False |
+
+### 风控层具体实现
+
+#### ① 全账户风险上限（参照海龟 max_portfolio_risk=0.20，N字用0.15）
+
+```python
+existing_risk = sum(
+    pos.total_shares * stop_mult * pos.atr_at_entry
+    for pos in positions.values()
+)
+new_risk = shares * stop_mult * atr_val
+if (existing_risk + new_risk) / current_equity > 0.15:
+    continue  # 拒绝入场
+```
+
+需要在 PositionState 中增加 `atr_at_entry` 字段记录入场时 ATR。
+
+#### ② 单品种风险上限（参照海龟 single_max_risk=0.04）
+
+```python
+symbol_existing_risk = pos.total_shares * stop_mult * pos.atr_at_entry
+symbol_new_risk = shares * stop_mult * atr_val
+if (symbol_existing_risk + symbol_new_risk) / current_equity > 0.04:
+    continue
+```
+
+#### ③ 集中度衰减（参照海龟 P1 fade_table）
+
+```python
+fade_table = {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.85, 4: 0.7, 5: 0.6}
+fade = fade_table.get(len(positions), 0.5)
+effective_risk_pct = base_risk_pct * fade
+```
+
+### 评估矩阵
+
+| 指标 | 目标 | 最低可接受 |
+|------|------|:--:|
+| 所有品种有交易 | 6/6 | 4/6 |
+| IS CAGR | — | ≥ 15% |
+| OOS CAGR | — | ≥ 10% |
+| IS MDD | < −40% | < −50% |
+| OOS MDD | < −35% | < −45% |
+| IS Sharpe | > 0.8 | > 0.6 |
+| OOS Sharpe | > 0.7 | > 0.5 |
+
+### 成功标准
+
+- C 组（仅加风险上限）MDD 应从 −70.5% 显著降低
+- D 组（加集中度衰减）应进一步改善 Sharpe
+- 如果能达到 OOS MDD < −35% 且 CAGR > 10%，则具有实用价值
+
+### 回退条件
+
+- 加风控后 OOS 交易笔数 < 50（过度限制）
+- 加风控后 IS MDD 仍 > −50%（风控无效）
+- C/D/E 任一组 IS+OOS 双双弱于 A 组基准（共享池无优势）
+
+## 实施步骤
+
+1. **准备**：在 `exp/S43_n_shared_risk` 分支上工作
+2. **C 组**：在 `run_portfolio()` 入场循环中加全账户+单品种风险上限
+3. **D 组**：在 C 组基础上加集中度衰减
+4. **E 组**：在 D 组基础上关闭动态权益
+5. **每组**：分别跑 IS(2014-2020 4品种) 和 OOS(2020-2026 6品种)
+6. **输出**：五组对比表 + 结论
+
+## 已知约束
+
+- IS 区间豆粕(159985)和日经(513520)数据不足，需用 4 品种
+- OOS 区间 6 品种数据完整
+- `run_portfolio()` 取所有品种日期交集，跨品种数据起止不一致会导致可用区间大幅缩短
+
+## 修改范围
+
+仅涉及 `strategies/n_structure.py` 的 `run_portfolio()` 方法：
+- `PositionState` 增加 `atr_at_entry` 字段
+- 入场循环增加风险预算检查
+- 可选：`_calc_shares` 增加集中度衰减参数
+
+不动 `run()`（单品种模式）、不动 `ComboEngine`、不动海龟策略。
+
+## C 组实施记录 (2026-07-15)
+
+### 代码修改
+
+1. **`PositionState` 新增 `atr_at_entry` 字段**：记录入场时的 ATR，用于风险预算计算
+2. **`NStructureStrategy.__init__` 新增参数**：
+   - `max_portfolio_risk: float = 0.0` — 全账户风险上限（权益%），0=关闭
+   - `single_max_risk: float = 0.0` — 单品种风险上限（权益%），0=关闭
+3. **三处入场点设置 `atr_at_entry`**：`_check_entry_from_prev`、`_execute_reentry`、`run_portfolio` Step 4
+4. **`run_portfolio` 入场循环**：敞口检查后增加全账户+单品种风险预算检查
+5. **`_manage_position` 加仓逻辑**：两处加仓点（D突破加仓 + 普通加仓）均增加风险预算检查
+6. **`_manage_position` 签名扩展**：增加 `max_portfolio_risk`/`single_max_risk`/`all_positions` 参数
+
+### 实验结果
+
+| 组 | 参数 | OOS CAGR | OOS MDD | OOS 夏普 | IS CAGR | IS MDD | 交易 |
+|:--|------|------|------|------|------|------|------|
+| A (独立) | 10万×6 | 6.5% | 5.0% | 1.07 | 7.6% | 17.6% | 94 |
+| B (裸共享) | 10万 | **39.2%** | **68.3%** | 0.87 | 26.1% | 68.3% | 116 |
+| C (0.15/0.04) | 共享+风控 | 39.2% | 68.3% | 0.87 | 26.1% | 68.3% | 116 |
+| C (0.02/0.01) | 共享+风控 | 32.7% | 66.0% | 0.81 | 25.2% | 68.4% | 115 |
+
+### 关键发现
+
+**15%/4% 阈值完全未触发**。原因分析：
+
+- N字每笔交易 `risk_per_trade=1%`，首单元 `add_weights[0]=0.5`
+- 实际首单元风险 = `shares × stop_mult × atr` ≈ `equity × 1% × 0.5` = **0.5% 权益**
+- 单品种 4% 上限需要 ≥8 个单位，但 `max_units=4`
+- 全账户 15% 上限需要 ≥30 个首单元同时持仓，但仅 6 个品种
+- **N字仓位规模天然远低于海龟式的风险预算限额**
+
+风控机制本身正确生效：`pf=0.02/sym=0.01` 时交易从 149→133，CAGR 从 39.2%→32.7%。
+
+### 结论与后续
+
+- C 组按实验设计阈值（0.15/0.04）**等价于 B 组（裸共享）**，未提供额外风控价值
+- 若要使风险上限成为有效约束，阈值须按 N 字仓位规模重新校准（建议 0.03–0.05 全账户、0.01–0.02 单品种）
+- 共享池高 MDD 的根因不在单笔风险暴露，而在于**多品种同向持仓的尾部相关性**——这是市值敞口和集中度衰减要解决的问题（D/E 组）
+- **建议**：跳过 C 组原阈值，直接用校准后阈值进入 D 组（+集中度衰减）
+
+## 参考
+
+- 海龟风控分析：见当前会话对话历史
+- 裸共享池数据：IS CAGR 44.6% MDD −74.8%, OOS CAGR 41.3% MDD −70.5%
+- 独立池基线：IS CAGR 9.3% MDD −21.9%
+- 路线图：`docs/experiments/S43_combo_roadmap.md`

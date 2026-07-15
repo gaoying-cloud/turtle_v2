@@ -345,6 +345,9 @@ class PositionState:
     next_add_level: float = 0.0
     d_broken: bool = False      # 是否已突破 D 点
 
+    # 风控：入场时 ATR（用于风险预算计算）
+    atr_at_entry: float = 0.0        # 入场时的 ATR 值
+
     # 再进场
     reentry_eligible: bool = False   # 是否允许再进场
     reentry_b_price: float = 0.0     # 再进场的 B 点参考价
@@ -406,6 +409,9 @@ class NStructureStrategy:
     # ── S30 信号过滤 + 仓位管理 ──
     use_ma_cross: bool = True,             # MA5>MA20 金叉过滤（过滤短期下行假突破）
     max_position_pct: float = 0.25,        # 单品种最大仓位上限（价格比例，防 ETF 杠杆过度）
+    # ── S43 组合风控参数（N字共享池风险预算） ──
+    max_portfolio_risk: float = 0.0,       # 全账户风险上限(权益%), 0=关闭, 参照海龟用0.15
+    single_max_risk: float = 0.0,          # 单品种风险上限(权益%), 0=关闭, 参照海龟用0.04
     # ── S37 进场确认 ──
     entry_confirm_bars: int = 2,           # 突破 B 点后需连续站稳 K 线数（1=当日确认, 2=需前日也站上）
     # ── S38 结构质量过滤 ──
@@ -462,6 +468,9 @@ class NStructureStrategy:
         # S30 信号过滤 + 仓位
         self.use_ma_cross = use_ma_cross
         self.max_position_pct = max_position_pct
+        # S43 组合风控
+        self.max_portfolio_risk = max_portfolio_risk
+        self.single_max_risk = single_max_risk
         # S37 进场确认
         self.entry_confirm_bars = entry_confirm_bars
         # S38 结构质量过滤
@@ -768,6 +777,7 @@ class NStructureStrategy:
         pos.highest_since_entry = entry_price
         pos.next_add_level = entry_price + self.add_step * atr
         pos.d_broken = entry_price > ns.d_price
+        pos.atr_at_entry = atr
         pos.trade = Trade(
             symbol=symbol,
             entry_idx=i,
@@ -807,7 +817,10 @@ class NStructureStrategy:
                          verbose: bool,
                          max_total_exposure: float | None = None,
                          current_equity: float | None = None,
-                         other_position_value: float = 0.0):
+                         other_position_value: float = 0.0,
+                         max_portfolio_risk: float = 0.0,
+                         single_max_risk: float = 0.0,
+                         all_positions: dict | None = None):
         """管理已有持仓：止损 / D 点突破 / 加仓 / 跟踪止损。
 
         Parameters
@@ -818,6 +831,12 @@ class NStructureStrategy:
             组合当前总权益，用于敞口计算。
         other_position_value : float
             其他品种的持仓市值。
+        max_portfolio_risk : float
+            全账户风险上限（权益%），0=关闭。
+        single_max_risk : float
+            单品种风险上限（权益%），0=关闭。
+        all_positions : dict | None
+            所有品种的持仓状态，用于全账户风险计算。
         """
         low = df.loc[i, 'low']
         high = df.loc[i, 'high']
@@ -906,15 +925,32 @@ class NStructureStrategy:
                         add_cost = close * add_shares
                         eq = current_equity if current_equity and current_equity > 0 else self.capital_per_symbol
                         if _check_exposure(add_cost) and pos.total_cost + add_cost <= eq:
-                            pos.units += 1
-                            pos.total_shares += add_shares
-                            pos.total_cost += add_cost
-                            pos.next_add_level = (pos.entry_price
-                                                  + pos.units * self.add_step * atr_val)
-                            pos.stop_loss = max(pos.stop_loss, close * self.stop_floor_post_break)
-                            if verbose:
-                                print(f"  ➕ D点突破加仓 [{i}]  价格={close:.3f}  "
-                                      f"单位={pos.units}/{self.max_units}  +{add_shares}股")
+                            # S43 加仓风险预算检查
+                            _add_ok = True
+                            if (max_portfolio_risk > 0 or single_max_risk > 0) and current_equity and current_equity > 0:
+                                per_share_risk = self.stop_mult * atr_val
+                                add_risk = add_shares * per_share_risk
+                                if single_max_risk > 0:
+                                    sym_existing_risk = pos.total_shares * self.stop_mult * pos.atr_at_entry
+                                    if (sym_existing_risk + add_risk) / current_equity > single_max_risk:
+                                        _add_ok = False
+                                if _add_ok and max_portfolio_risk > 0 and all_positions:
+                                    existing_risk = sum(
+                                        p.total_shares * self.stop_mult * p.atr_at_entry
+                                        for p in all_positions.values()
+                                    )
+                                    if (existing_risk + add_risk) / current_equity > max_portfolio_risk:
+                                        _add_ok = False
+                            if _add_ok:
+                                pos.units += 1
+                                pos.total_shares += add_shares
+                                pos.total_cost += add_cost
+                                pos.next_add_level = (pos.entry_price
+                                                      + pos.units * self.add_step * atr_val)
+                                pos.stop_loss = max(pos.stop_loss, close * self.stop_floor_post_break)
+                                if verbose:
+                                    print(f"  ➕ D点突破加仓 [{i}]  价格={close:.3f}  "
+                                          f"单位={pos.units}/{self.max_units}  +{add_shares}股")
                 if verbose:
                     print(f"  🟡 突破 D [{i}]  价格={close:.3f}  D={pos.d_price:.3f}  "
                           f"止损调整至 {pos.stop_loss:.3f}")
@@ -1100,14 +1136,31 @@ class NStructureStrategy:
             add_cost = close * add_shares
             eq = current_equity if current_equity and current_equity > 0 else self.capital_per_symbol
             if _check_exposure(add_cost) and pos.total_cost + add_cost <= eq:
-                pos.units += 1
-                pos.total_shares += add_shares
-                pos.total_cost += add_cost
-                pos.next_add_level = pos.entry_price + pos.units * self.add_step * atr
-                pos.stop_loss = max(pos.stop_loss, close * self.stop_floor_pre_break)
-                if verbose:
-                    print(f"  ➕ 加仓 [{i}]  价格={close:.3f}  "
-                          f"单位={pos.units}/{self.max_units}  +{add_shares}股")
+                # S43 加仓风险预算检查
+                _add_ok = True
+                if (max_portfolio_risk > 0 or single_max_risk > 0) and current_equity and current_equity > 0:
+                    per_share_risk = self.stop_mult * atr
+                    add_risk = add_shares * per_share_risk
+                    if single_max_risk > 0:
+                        sym_existing_risk = pos.total_shares * self.stop_mult * pos.atr_at_entry
+                        if (sym_existing_risk + add_risk) / current_equity > single_max_risk:
+                            _add_ok = False
+                    if _add_ok and max_portfolio_risk > 0 and all_positions:
+                        existing_risk = sum(
+                            p.total_shares * self.stop_mult * p.atr_at_entry
+                            for p in all_positions.values()
+                        )
+                        if (existing_risk + add_risk) / current_equity > max_portfolio_risk:
+                            _add_ok = False
+                if _add_ok:
+                    pos.units += 1
+                    pos.total_shares += add_shares
+                    pos.total_cost += add_cost
+                    pos.next_add_level = pos.entry_price + pos.units * self.add_step * atr
+                    pos.stop_loss = max(pos.stop_loss, close * self.stop_floor_pre_break)
+                    if verbose:
+                        print(f"  ➕ 加仓 [{i}]  价格={close:.3f}  "
+                              f"单位={pos.units}/{self.max_units}  +{add_shares}股")
 
     def _setup_reentry(self, pos: PositionState):
         """在平仓时保存 N 字结构信息，允许再进场。"""
@@ -1201,6 +1254,7 @@ class NStructureStrategy:
         pos.highest_since_entry = entry_price
         pos.next_add_level = entry_price + self.add_step * atr
         pos.d_broken = entry_price > pos.reentry_d_price
+        pos.atr_at_entry = atr
         pos.trade = Trade(
             symbol=symbol,
             entry_idx=i,
@@ -1335,6 +1389,9 @@ class NStructureStrategy:
                     max_total_exposure=max_total_exposure,
                     current_equity=current_equity,
                     other_position_value=other_value,
+                    max_portfolio_risk=self.max_portfolio_risk,
+                    single_max_risk=self.single_max_risk,
+                    all_positions=positions,
                 )
                 if not pos.active:
                     closed_symbols.append(sym)
@@ -1458,6 +1515,34 @@ class NStructureStrategy:
                         available_candidates -= 1
                         continue
 
+                    # ── S43 风险预算检查（全账户 + 单品种风险上限） ──
+                    if self.max_portfolio_risk > 0 or self.single_max_risk > 0:
+                        per_share_risk = self.stop_mult * atr_val
+                        new_risk = shares * per_share_risk
+
+                        # 单品种风险上限（新入场品种无既有风险敞口）
+                        if self.single_max_risk > 0:
+                            if new_risk / current_equity > self.single_max_risk:
+                                if verbose:
+                                    print(f"  ⚠️ [{today.date()}] {sym} 单品种风险超限 "
+                                          f"({new_risk/current_equity*100:.1f}% > {self.single_max_risk*100:.0f}%)")
+                                available_candidates -= 1
+                                continue
+
+                        # 全账户风险上限
+                        if self.max_portfolio_risk > 0:
+                            existing_risk = sum(
+                                p.total_shares * self.stop_mult * p.atr_at_entry
+                                for p in positions.values()
+                            )
+                            total_risk_pct = (existing_risk + new_risk) / current_equity
+                            if total_risk_pct > self.max_portfolio_risk:
+                                if verbose:
+                                    print(f"  ⚠️ [{today.date()}] {sym} 全账户风险超限 "
+                                          f"({total_risk_pct*100:.1f}% > {self.max_portfolio_risk*100:.0f}%)")
+                                available_candidates -= 1
+                                continue
+
                     # ── 执行入场 ──
                     stop = min(ns.b_price - self.stop_mult * atr_val,
                               ns.b_price * self.stop_floor_post_break)
@@ -1477,6 +1562,7 @@ class NStructureStrategy:
                     pos.highest_since_entry = entry_price
                     pos.next_add_level = entry_price + self.add_step * atr_val
                     pos.d_broken = entry_price > ns.d_price
+                    pos.atr_at_entry = atr_val
                     pos.trade = Trade(
                         symbol=sym, entry_idx=i, entry_price=entry_price,
                         units=1, a_price=ns.a_price, b_price=ns.b_price,
