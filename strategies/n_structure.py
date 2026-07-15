@@ -412,6 +412,9 @@ class NStructureStrategy:
     # ── S43 组合风控参数（N字共享池风险预算） ──
     max_portfolio_risk: float = 0.0,       # 全账户风险上限(权益%), 0=关闭, 参照海龟用0.15
     single_max_risk: float = 0.0,          # 单品种风险上限(权益%), 0=关闭, 参照海龟用0.04
+    use_concentration_fade: bool = False,   # 集中度衰减: 持仓品种越多→新仓位风险预算越低
+    max_portfolio_drawdown: float = 0.0,   # 组合净值回撤熔断阈值, 0=关闭, 建议0.10(10%)
+    drawdown_pause_bars: int = 20,         # 回撤熔断冷却K线数
     # ── S37 进场确认 ──
     entry_confirm_bars: int = 2,           # 突破 B 点后需连续站稳 K 线数（1=当日确认, 2=需前日也站上）
     # ── S38 结构质量过滤 ──
@@ -471,6 +474,9 @@ class NStructureStrategy:
         # S43 组合风控
         self.max_portfolio_risk = max_portfolio_risk
         self.single_max_risk = single_max_risk
+        self.use_concentration_fade = use_concentration_fade
+        self.max_portfolio_drawdown = max_portfolio_drawdown
+        self.drawdown_pause_bars = drawdown_pause_bars
         # S37 进场确认
         self.entry_confirm_bars = entry_confirm_bars
         # S38 结构质量过滤
@@ -1354,6 +1360,13 @@ class NStructureStrategy:
         consecutive_losses = 0
         paused_until_bar = -1
 
+        # S43 组合回撤熔断
+        peak_equity = total_capital
+        drawdown_paused_until = -1
+
+        # S43 集中度衰减表（6品种池，参照海龟 P1）
+        fade_table = {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.85, 4: 0.7, 5: 0.6, 6: 0.5}
+
         # 日频敞口追踪
         daily_exposure = np.zeros(n)
 
@@ -1366,6 +1379,11 @@ class NStructureStrategy:
             # ── 熔断恢复 ──
             if i >= paused_until_bar and paused_until_bar >= 0:
                 paused_until_bar = -1
+            if i >= drawdown_paused_until and drawdown_paused_until >= 0:
+                if verbose:
+                    print(f"  🟢 [{today.date()}] 回撤熔断恢复")
+                drawdown_paused_until = -1
+                peak_equity = total_capital + closed_pnl  # 重置峰值为当前已实现权益
 
             # ── Step 1: 计算当前权益（持仓管理前） ──
             position_value = sum(
@@ -1374,6 +1392,20 @@ class NStructureStrategy:
             )
             current_equity = total_capital + closed_pnl + position_value
             portfolio_equity[i] = current_equity
+
+            # ── S43 组合回撤熔断 ──
+            effective_pause = max(paused_until_bar, drawdown_paused_until)
+            if i >= effective_pause and self.max_portfolio_drawdown > 0:
+                if current_equity > peak_equity:
+                    peak_equity = current_equity
+                else:
+                    dd = 1.0 - current_equity / peak_equity if peak_equity > 0 else 0.0
+                    if dd >= self.max_portfolio_drawdown:
+                        drawdown_paused_until = i + self.drawdown_pause_bars
+                        if verbose:
+                            print(f"  🔴 [{today.date()}] 组合回撤 {dd*100:.1f}% ≥ "
+                                  f"{self.max_portfolio_drawdown*100:.0f}% → 熔断 "
+                                  f"{self.drawdown_pause_bars} 根 K 线")
 
             # ── Step 2: 管理现有持仓 ──
             closed_symbols = []
@@ -1428,7 +1460,7 @@ class NStructureStrategy:
             available_cash = current_equity - position_value
 
             # ── Step 3: 扫描入场信号（熔断中跳过） ──
-            if i >= paused_until_bar:
+            if i >= max(paused_until_bar, drawdown_paused_until):
                 entry_candidates = []
                 for sym in symbols:
                     if sym in positions:
@@ -1505,6 +1537,11 @@ class NStructureStrategy:
                     # S42 fix: 应用 add_weights[0] 权重（与单品种 _check_entry_from_prev 一致）
                     w0 = self.add_weights[0] if len(self.add_weights) > 0 else 1.0
                     shares = max(100, int(shares * w0 / 100) * 100)
+
+                    # S43 集中度衰减：持仓品种越多 → 新仓位规模递减
+                    if self.use_concentration_fade:
+                        fade = fade_table.get(len(positions), 0.5)
+                        shares = max(100, int(shares * fade / 100) * 100)
 
                     cost = shares * entry_price
                     # 总敞口检查
