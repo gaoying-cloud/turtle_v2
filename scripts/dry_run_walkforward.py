@@ -80,8 +80,7 @@ from scripts.daily_signal import (
 
 FAST_OVERRIDES = {
     "breakout_period": 10,       # 20→10, ~2x 入场信号
-    "stop_period": 5,            # 8→5, 更紧止损→更快释放资金→更多再入场
-    "exit_period": 5,            # 对齐 stop_period
+    "stop_period": 5,            # 8→5, 更紧止损→更快释放资金→更多再入场（exit 通道由 stop_period 控制）
     "pyramid_step": 1.0,         # 2.0→1.0, 更容易触发加仓
     "atr_pct_filter": False,     # 不跳过波动期
     "atr_pct_threshold": 0.90,   # 放宽 ATR 百分位阈值（仅当 filter=True 时生效）
@@ -153,7 +152,9 @@ def load_all_data(start_date: Optional[date] = None,
     aligned = {}
     for sym, df in raw_dfs.items():
         df = df.set_index("date").reindex(all_dates)
-        df = df.ffill().bfill()
+        # 仅向前填充（不用 bfill 避免前视偏差）：对于品种上市前的日期保留 NaN，
+        # 信号提取时 NaN → None，主循环中 sig_cache[sym] is None 会跳过该品种
+        df = df.ffill()
         df = df.reset_index().rename(columns={"index": "date"})
         aligned[sym] = df
 
@@ -260,6 +261,9 @@ def simulate_execution(state: dict, data_cache: dict,
             continue
 
         add_shares = aa["shares"]
+        # 现金检查：防止同日加仓+入场导致现金为负
+        if state["cash"] < add_shares * exec_price:
+            continue
         pos["shares"] += add_shares
         pos["units"] += 1
         state["cash"] -= add_shares * exec_price
@@ -597,7 +601,7 @@ def run_walkforward(start_date: Optional[str] = None,
     total_half_exits = 0
     total_days_with_action = 0
     daily_log = []
-    daily_equities = []  # B2 修复：每日记录权益，用于准确的夏普/MDD
+    daily_equities = []
 
     for i, trading_date in enumerate(all_dates):
         today_str = trading_date.strftime("%Y-%m-%d")
@@ -680,7 +684,19 @@ def run_walkforward(start_date: Optional[str] = None,
                         "units": pos["units"] + 1, "price": close,
                     })
 
+        # 扣除 pending 加仓的预估现金（防止同日入场+加仓导致现金为负）
+        for aa in add_actions:
+            sim_cash -= aa["shares"] * aa["price"]
+
         # ── 3. 入场检查 ──
+        # 临时调整持仓股数以反映 pending 加仓的风险（修复风控低估）
+        _add_backup = {}
+        for aa in add_actions:
+            pos = next((p for p in state["positions"] if p["code"] == aa["symbol"]), None)
+            if pos:
+                _add_backup[aa["symbol"]] = pos["shares"]
+                pos["shares"] += aa["shares"]
+
         entry_actions = []
         for sym in ETFS:
             if sym not in data_cache:
@@ -716,6 +732,12 @@ def run_walkforward(start_date: Optional[str] = None,
                     "n_at_entry": n,
                     "price": close,
                 })
+
+        # 恢复持仓股数（撤销 pending 加仓的临时调整）
+        for sym, orig_shares in _add_backup.items():
+            pos = next((p for p in state["positions"] if p["code"] == sym), None)
+            if pos:
+                pos["shares"] = orig_shares
 
         # ── 4. 模拟执行 ──
         day_has_action = bool(exit_signals or add_actions or entry_actions)
@@ -780,9 +802,14 @@ if __name__ == "__main__":
                         help="逐日打印有动作的日期")
     args = parser.parse_args()
 
-    run_walkforward(
-        start_date=args.start,
-        end_date=args.end,
-        verbose=args.verbose,
-        fast=args.fast,
-    )
+    try:
+        run_walkforward(
+            start_date=args.start,
+            end_date=args.end,
+            verbose=args.verbose,
+            fast=args.fast,
+        )
+    finally:
+        # 确保 fast 模式参数在任何情况下都被恢复（包括 Ctrl+C / 异常）
+        if args.fast:
+            restore_normal_mode()
