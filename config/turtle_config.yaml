@@ -99,6 +99,7 @@ risk:
   max_consecutive_losses: 8
   max_cumulative_loss_pct: 0.15
   pause_days: 5
+  max_5day_drawdown_pct: 0.10    # 5日滚动回撤阈值，超阈值全局暂停交易5天
   correlation_warning: 0.6
   correlation_lookback: 60
   degradation:

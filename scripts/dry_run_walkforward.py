@@ -593,6 +593,8 @@ def run_walkforward(start_date: Optional[str] = None,
         "buy_today": {},
         "last_signal_date": "",
         "half_exit_events": [],
+        "paused_until": {},
+        "equity_5day": [],
     }
 
     total_entries = 0
@@ -674,9 +676,9 @@ def run_walkforward(start_date: Optional[str] = None,
             ohlc = _get_ohlc(data_cache, sym, trading_date)
             if ohlc is None:
                 continue
-            close = ohlc[3]
+            high = ohlc[1]
 
-            if should_add(sym, close, n, pos):
+            if should_add(sym, high, n, pos):
                 shares = pos.get("shares_per_unit", pos["shares"])
                 if shares > 0:
                     add_actions.append({
