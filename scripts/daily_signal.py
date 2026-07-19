@@ -70,6 +70,9 @@ ETFS = get_trading_symbols(CONFIG)
 RISK = CONFIG.get("risk", {})
 SINGLE_MAX_RISK = float(RISK.get("single_max_risk", 0.04))       # 单品种风险上限 4%
 MAX_PORTFOLIO_RISK = float(RISK.get("max_portfolio_risk", 0.20)) # 全账户风险上限 20%
+MAX_CONSECUTIVE_LOSSES = int(RISK.get("max_consecutive_losses", 8))  # 连续亏损暂停阈值
+PAUSE_DAYS = int(RISK.get("pause_days", 5))                          # 暂停天数
+MAX_5DAY_DRAWDOWN = float(RISK.get("max_5day_drawdown_pct", 0.10))   # 5日回撤暂停阈值
 
 # S14: 品种权重倍率，与 config.weighting.weight_multipliers 对齐
 WEIGHT_MULTIPLIERS = CONFIG.get("weighting", {}).get("weight_multipliers", {})
@@ -90,6 +93,8 @@ def _default_state() -> dict:
         "buy_today": {},
         "last_signal_date": "",          # V5.16: 用于跨日清空 buy_today
         "half_exit_events": [],
+        "paused_until": {},              # S45: 按品种暂停 {symbol: "YYYY-MM-DD"}
+        "equity_5day": [],               # S45: 最近5日权益快照 [{date, equity}]
     }
 
 
@@ -100,6 +105,8 @@ def load_state() -> dict:
         # V5.16: 向后兼容旧 state（无 last_signal_date / shares_per_unit / half_exit_events）
         s.setdefault("last_signal_date", "")
         s.setdefault("half_exit_events", [])
+        s.setdefault("paused_until", {})     # S45: 按品种暂停
+        s.setdefault("equity_5day", [])      # S45: 5日权益快照
         for pos in s.get("positions", []):
             if "shares_per_unit" not in pos:
                 pos["shares_per_unit"] = pos.get("shares", 0)
@@ -226,7 +233,7 @@ def should_enter(symbol: str, close: float, signals: dict, state: dict, today: d
     # ── S17：ATR 百分位过滤（高波动期不进场，对齐 strategy._check_entry） ──
     atr_pct = signals.get("atr_pct_252")
     threshold = TURTLE.get("atr_pct_threshold", 0.75)
-    if TURTLE.get("atr_pct_filter", False) and atr_pct is not None and atr_pct > threshold:
+    if TURTLE.get("atr_pct_filter", True) and atr_pct is not None and atr_pct > threshold:
         logging.getLogger("signal").debug(
             "[入场] %s ATR百分位=%.3f > %.2f，高波动跳过", symbol, atr_pct, threshold)
         return False
@@ -294,12 +301,15 @@ def check_exit(symbol: str, low: float, close: float, signals: dict, state: dict
 
 
 
-def should_add(symbol: str, close: float, n: float, pos: dict) -> bool:
-    """加仓条件：价格 >= entry_price + units * PYRAMID_STEP * n_at_entry（对齐策略核心）。"""
+def should_add(symbol: str, price: float, n: float, pos: dict) -> bool:
+    """加仓条件：price >= entry_price + units * PYRAMID_STEP * n_at_entry（对齐策略核心）。
+
+    使用当日最高价(high)判断加仓，与 Backtrader 回测对齐——盘中冲高触及加仓价即触发。
+    """
     if pos["units"] >= MAX_UNITS:
         return False
     threshold = pos["entry_price"] + pos["units"] * PYRAMID_STEP * pos["n_at_entry"]
-    return close >= threshold
+    return price >= threshold
 
 
 # ════════════════════════════════════════════════════════════
@@ -433,6 +443,47 @@ def record_trade_result(state: dict, sym: str, was_win: bool):
 
 
 # ════════════════════════════════════════════════════════════
+#  S45: 暂停逻辑（对齐 turtle_trading.py 的风控机制）
+# ════════════════════════════════════════════════════════════
+
+def _is_symbol_paused(state: dict, sym: str, today: date) -> bool:
+    """检查品种是否在暂停期内。"""
+    paused_until = state.get("paused_until", {}).get(sym, "")
+    if not paused_until:
+        return False
+    return today <= date.fromisoformat(paused_until)
+
+
+def _check_5day_drawdown_pause(state: dict, today_equity: float) -> bool:
+    """检查5日滚动回撤是否触发全局暂停。返回 True 表示触发暂停。"""
+    snapshots = state.get("equity_5day", [])
+    if len(snapshots) >= 5:
+        peak_5d = max(s["equity"] for s in snapshots[-5:])
+        if peak_5d > 0:
+            dd = (peak_5d - today_equity) / peak_5d
+            if dd >= MAX_5DAY_DRAWDOWN:
+                return True
+    return False
+
+
+def _update_equity_snapshot(state: dict, today_str: str, equity: float):
+    """更新5日权益快照。"""
+    snapshots = state.get("equity_5day", [])
+    snapshots.append({"date": today_str, "equity": equity})
+    if len(snapshots) > 5:
+        snapshots = snapshots[-5:]
+    state["equity_5day"] = snapshots
+
+
+def _enter_pause_for_symbol(state: dict, sym: str, today: date):
+    """品种触发连续亏损暂停。"""
+    from datetime import timedelta
+    paused_date = today + timedelta(days=PAUSE_DAYS)
+    state.setdefault("paused_until", {})[sym] = paused_date.isoformat()
+    print(f"  [风控] {sym} 连续亏损达{MAX_CONSECUTIVE_LOSSES}次，暂停至 {paused_date.isoformat()}")
+
+
+# ════════════════════════════════════════════════════════════
 #  主流程
 # ════════════════════════════════════════════════════════════
 
@@ -558,8 +609,8 @@ def run():
         n = sig.get("n")
         if n is None or n <= 0:
             continue
-        close = df["close"].iloc[-1]
-        if should_add(sym, close, n, pos):
+        high = df["high"].iloc[-1]
+        if should_add(sym, high, n, pos):
             # V5.16: 加仓股数复用初始 shares_per_unit（对齐策略核心 pos.shares_per_unit）
             shares = pos.get("shares_per_unit", pos["shares"])
             if shares <= 0:
@@ -572,6 +623,16 @@ def run():
             add_actions.append({"symbol": sym, "shares": shares, "units": pos["units"], "price": close})
 
     # ══════════════════════════════════════════════════════
+    # S45: 5日回撤全局暂停检查（对齐 turtle_trading._check_5day_drawdown）
+    # ══════════════════════════════════════════════════════
+    _update_equity_snapshot(state, today_str, state["equity"])
+    global_paused = _check_5day_drawdown_pause(state, state["equity"])
+    if global_paused:
+        print(f"  [风控] 5日回撤超{MAX_5DAY_DRAWDOWN*100:.0f}%，全局暂停交易")
+        save_state(state)
+        return
+
+    # ══════════════════════════════════════════════════════
     # 入场检查
     # ══════════════════════════════════════════════════════
     entry_actions = []
@@ -580,6 +641,9 @@ def run():
             continue
         # 已有持仓
         if any(p["code"] == sym for p in state["positions"]):
+            continue
+        # S45: 品种暂停检查（对齐 turtle_trading._check_entry pause 逻辑）
+        if _is_symbol_paused(state, sym, today):
             continue
         df = data_cache[sym]
         sig = sig_cache[sym]
@@ -779,6 +843,9 @@ def cmd_settle(state: dict, settle_str: str):
                 state["consecutive_losses"][sym] = 0
             else:
                 state["consecutive_losses"][sym] = cl + 1
+                # S45: 连续亏损暂停（对齐 turtle_trading._enter_pause）
+                if cl + 1 >= MAX_CONSECUTIVE_LOSSES:
+                    _enter_pause_for_symbol(state, sym, date.today())
             state["cash"] += pos["shares"] * exit_price * (1 - COMMISSION - SLIPPAGE)
             state["trade_history"].append({
                 "symbol": sym, "direction": "long",
