@@ -178,6 +178,11 @@ def _fetch_dailybasic_paginated(
         seg_end_year = min(seg_start_year + PAGINATION_SEGMENT_YEARS - 1, end_year)
         seg_start = f"{seg_start_year}0101"
         seg_end = f"{seg_end_year}1231"
+        # 裁剪到调用方请求的日期范围，避免拉取无关数据
+        if seg_start_year == start_year:
+            seg_start = max(seg_start, start_date)
+        if seg_end_year == end_year:
+            seg_end = min(seg_end, end_date)
 
         logger.debug(
             "[%s] 分段 %s ~ %s", ts_code, seg_start, seg_end,
@@ -205,28 +210,13 @@ def _fetch_dailybasic_paginated(
     return result
 
 
-def _fetch_index_daily_raw(
+def _fetch_index_daily_segment(
+    pro: Any,
     ts_code: str,
     start_date: str,
     end_date: str,
 ) -> pd.DataFrame:
-    """拉取指数日线行情原始数据（未清洗）。
-
-    Parameters
-    ----------
-    ts_code : str
-        指数代码。
-    start_date : str
-        起始日期 "YYYYMMDD"。
-    end_date : str
-        截止日期 "YYYYMMDD"。
-
-    Returns
-    -------
-    pd.DataFrame
-        含 INDEX_DAILY_FIELDS 列，失败时为空 DataFrame。
-    """
-    pro = _create_tushare_pro()
+    """拉取单段 index_daily 数据（含重试）。"""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             df = pro.index_daily(
@@ -257,6 +247,55 @@ def _fetch_index_daily_raw(
 
     logger.error("[%s] index_daily 已耗尽重试次数", ts_code)
     return pd.DataFrame()
+
+
+def _fetch_index_daily_raw(
+    ts_code: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """分页拉取 index_daily 行情数据（含重试 + 防截断）。
+
+    与 _fetch_dailybasic_paginated 对称：按 PAGINATION_SEGMENT_YEARS 年切段，
+    每段独立调用 _fetch_index_daily_segment()，最后拼接去重。
+    """
+    pro = _create_tushare_pro()
+
+    start_year = int(start_date[:4])
+    end_year = int(end_date[:4]) if end_date else date.today().year
+
+    all_segments: list[pd.DataFrame] = []
+    for seg_start_year in range(start_year, end_year + 1, PAGINATION_SEGMENT_YEARS):
+        seg_end_year = min(seg_start_year + PAGINATION_SEGMENT_YEARS - 1, end_year)
+        seg_start = f"{seg_start_year}0101"
+        seg_end = f"{seg_end_year}1231"
+        # 裁剪到调用方请求的日期范围
+        if seg_start_year == start_year:
+            seg_start = max(seg_start, start_date)
+        if seg_end_year == end_year:
+            seg_end = min(seg_end, end_date)
+
+        logger.debug("[%s] 分段 %s ~ %s", ts_code, seg_start, seg_end)
+        df = _fetch_index_daily_segment(pro, ts_code, seg_start, seg_end)
+        if not df.empty:
+            all_segments.append(df)
+
+    if not all_segments:
+        logger.warning("[%s] index_daily 所有分段均无数据", ts_code)
+        return pd.DataFrame()
+
+    result = pd.concat(all_segments, ignore_index=True)
+    result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d")
+    result = result.drop_duplicates(subset=["trade_date"], keep="last")
+    result = result.sort_values("trade_date").reset_index(drop=True)
+
+    logger.info(
+        "[%s] index_daily 分页完成: %d 段 → %d 行 (%s ~ %s)",
+        ts_code, len(all_segments), len(result),
+        result["trade_date"].min().strftime("%Y-%m-%d"),
+        result["trade_date"].max().strftime("%Y-%m-%d"),
+    )
+    return result
 
 
 # ════════════════════════════════════════════════════════════
@@ -382,66 +421,118 @@ def fetch_index_valuation(
     results: dict[str, pd.DataFrame] = {}
 
     for code in ts_codes:
-        cache_path = _valuation_cache_path(code)
+        try:
+            cache_path = _valuation_cache_path(code)
 
-        # ── 缓存全覆盖 → 直接返回切片 ──
-        if not force_update:
-            cached = _read_valuation_cache(code)
-            if not cached.empty and "date" in cached.columns:
-                cached["date"] = pd.to_datetime(cached["date"])
-                cached_min = cached["date"].min().strftime("%Y%m%d")
-                cached_max = cached["date"].max().strftime("%Y%m%d")
-                if cached_min <= start_norm and cached_max >= end_norm:
+            # ── 缓存全覆盖 → 直接返回切片 ──
+            if not force_update:
+                cached = _read_valuation_cache(code)
+                if not cached.empty and "date" in cached.columns:
+                    cached["date"] = pd.to_datetime(cached["date"])
+                    cached_min = cached["date"].min().strftime("%Y%m%d")
+                    cached_max = cached["date"].max().strftime("%Y%m%d")
+                    if cached_min <= start_norm and cached_max >= end_norm:
+                        mask = (cached["date"] >= start_ts) & (cached["date"] <= end_ts)
+                        results[code] = cached[mask].reset_index(drop=True)
+                        logger.info(
+                            "[%s] 缓存全覆盖 %s~%s，直接返回 %d 行",
+                            code, start_norm, end_norm, len(results[code]),
+                        )
+                        continue
+
+            # ── 拉取估值数据（分页突破 3000 行限制） ──
+            logger.info("[%s] 拉取 index_dailybasic %s~%s ...", code, start_norm, end_norm)
+            df_basic_raw = _fetch_dailybasic_paginated(code, start_norm, end_norm)
+
+            # ── 拉取行情数据 ──
+            logger.info("[%s] 拉取 index_daily %s~%s ...", code, start_norm, end_norm)
+            df_daily_raw = _fetch_index_daily_raw(code, start_norm, end_norm)
+
+            # ── API 空返回 → 缓存回退 ──
+            if df_basic_raw.empty or df_daily_raw.empty:
+                which = "dailybasic" if df_basic_raw.empty else "index_daily"
+                logger.warning("[%s] %s API 返回空，尝试缓存回退", code, which)
+                cached = _read_valuation_cache(code)
+                if not cached.empty and "date" in cached.columns:
+                    cached["date"] = pd.to_datetime(cached["date"])
                     mask = (cached["date"] >= start_ts) & (cached["date"] <= end_ts)
-                    results[code] = cached[mask].reset_index(drop=True)
-                    logger.info(
-                        "[%s] 缓存全覆盖 %s~%s，直接返回 %d 行",
-                        code, start_norm, end_norm, len(results[code]),
-                    )
-                    continue
+                    fallback = cached[mask].reset_index(drop=True)
+                    if not fallback.empty:
+                        results[code] = fallback
+                        logger.info(
+                            "[%s] 缓存回退成功 %s~%s: %d 行",
+                            code, start_norm, end_norm, len(fallback),
+                        )
+                    else:
+                        logger.warning("[%s] 缓存回退区间为空，跳过", code)
+                else:
+                    logger.warning("[%s] 无可用缓存，跳过", code)
+                continue
 
-        # ── 拉取估值数据（分页突破 3000 行限制） ──
-        logger.info("[%s] 拉取 index_dailybasic %s~%s ...", code, start_norm, end_norm)
-        df_basic_raw = _fetch_dailybasic_paginated(code, start_norm, end_norm)
-        if df_basic_raw.empty:
-            logger.warning("[%s] index_dailybasic 无数据，跳过", code)
-            continue
+            # ── 清洗（复用 data_pipeline 的 _clean_raw_ohlc） ──
+            # _clean_raw_ohlc 做：trade_date → date、OHLC列类型转换、排序、去重
+            df_basic = _clean_raw_ohlc(df_basic_raw)
+            df_daily = _clean_raw_ohlc(df_daily_raw)
 
-        # ── 拉取行情数据 ──
-        logger.info("[%s] 拉取 index_daily %s~%s ...", code, start_norm, end_norm)
-        df_daily_raw = _fetch_index_daily_raw(code, start_norm, end_norm)
-        if df_daily_raw.empty:
-            logger.warning("[%s] index_daily 无数据，跳过", code)
-            continue
+            if df_basic.empty or df_daily.empty:
+                logger.warning("[%s] 清洗后为空，跳过", code)
+                continue
 
-        # ── 清洗（复用 data_pipeline 的 _clean_raw_ohlc） ──
-        # _clean_raw_ohlc 做：trade_date → date、类型转换、排序、去重
-        df_basic = _clean_raw_ohlc(df_basic_raw)
-        df_daily = _clean_raw_ohlc(df_daily_raw)
+            # ── 估值列数值类型转换（_clean_raw_ohlc 不处理非 OHLC 列） ──
+            _valuation_numeric_cols = [
+                "pe_ttm", "pb", "total_mv", "float_mv",
+                "turnover_rate", "turnover_rate_f", "pe",
+                "total_share", "float_share",
+            ]
+            for col in _valuation_numeric_cols:
+                if col in df_basic.columns:
+                    df_basic[col] = pd.to_numeric(df_basic[col], errors="coerce")
 
-        if df_basic.empty or df_daily.empty:
-            logger.warning("[%s] 清洗后为空，跳过", code)
-            continue
+            # ── 合并估值 + 行情 ──
+            df_merged = _merge_valuation_and_price(df_basic, df_daily)
+            if df_merged.empty:
+                logger.warning("[%s] 合并后为空，跳过", code)
+                continue
 
-        # ── 合并估值 + 行情 ──
-        df_merged = _merge_valuation_and_price(df_basic, df_daily)
-        if df_merged.empty:
-            logger.warning("[%s] 合并后为空，跳过", code)
-            continue
+            # ── 核心列校验（防止 Tushare 字段变更导致静默缺列） ──
+            _required_cols = ["pe_ttm", "pb", "total_mv", "close"]
+            _missing = [c for c in _required_cols if c not in df_merged.columns]
+            if _missing:
+                logger.error(
+                    "[%s] 合并后缺少核心列: %s，跳过（可能 Tushare 字段变更）",
+                    code, _missing,
+                )
+                continue
 
-        # ── 缓存落盘（复用 data_pipeline 的 _merge_into_cache） ──
-        _merge_into_cache(cache_path, df_merged)
-        logger.info(
-            "[%s] 已缓存 %d 行 → %s",
-            code, len(df_merged), cache_path,
-        )
+            # ── 缓存落盘（复用 _merge_into_cache，使用返回值避免重复读盘） ──
+            cached_all = _merge_into_cache(cache_path, df_merged)
+            logger.info(
+                "[%s] 已缓存 %d 行 → %s",
+                code, len(cached_all), cache_path,
+            )
 
-        # ── 返回请求区间切片 ──
-        cached_all = pd.read_parquet(cache_path)
-        if "date" in cached_all.columns:
-            cached_all["date"] = pd.to_datetime(cached_all["date"])
-        mask = (cached_all["date"] >= start_ts) & (cached_all["date"] <= end_ts)
-        results[code] = cached_all[mask].reset_index(drop=True)
+            # ── 返回请求区间切片 ──
+            if "date" in cached_all.columns:
+                cached_all["date"] = pd.to_datetime(cached_all["date"])
+                mask = (cached_all["date"] >= start_ts) & (cached_all["date"] <= end_ts)
+                results[code] = cached_all[mask].reset_index(drop=True)
+            else:
+                logger.error("[%s] 缓存后缺少 date 列，无法返回", code)
+
+        except Exception as e:
+            logger.error("[%s] 拉取异常: %s，跳过该指数", code, e, exc_info=True)
+            # 尝试缓存回退
+            try:
+                cached = _read_valuation_cache(code)
+                if not cached.empty and "date" in cached.columns:
+                    cached["date"] = pd.to_datetime(cached["date"])
+                    mask = (cached["date"] >= start_ts) & (cached["date"] <= end_ts)
+                    fallback = cached[mask].reset_index(drop=True)
+                    if not fallback.empty:
+                        results[code] = fallback
+                        logger.info("[%s] 异常后缓存回退成功: %d 行", code, len(fallback))
+            except Exception:
+                pass
 
     return results
 
@@ -471,7 +562,8 @@ def get_valuation_summary() -> pd.DataFrame:
             continue
         try:
             df = pd.read_parquet(path)
-        except Exception:
+        except Exception as e:
+            logger.warning("[%s] 缓存读取失败: %s", code, e)
             rows.append({
                 "code": code,
                 "earliest": None, "latest": None, "rows": 0,
@@ -490,8 +582,8 @@ def get_valuation_summary() -> pd.DataFrame:
 
         rows.append({
             "code": code,
-            "earliest": df["date"].min(),
-            "latest": df["date"].max(),
+            "earliest": df["date"].min() if "date" in df.columns else None,
+            "latest": df["date"].max() if "date" in df.columns else None,
             "rows": len(df),
             "pe_min": df["pe_ttm"].min() if "pe_ttm" in df.columns else None,
             "pe_max": df["pe_ttm"].max() if "pe_ttm" in df.columns else None,

@@ -28,6 +28,19 @@
   - PE 中位数: 48.00
 - [x] 缓存读写正常（force_update=False 秒级返回）
 
+### 代码审查修复（2026-07-23）
+- [x] **估值列类型转换**：`_clean_raw_ohlc` 只转换 OHLC 列，估值列仍为字符串。
+  在 `fetch_index_valuation` 中清洗后添加 `pd.to_numeric` 转换 `pe_ttm`/`pb`/`total_mv` 等 9 列
+- [x] **逐指数 try/except 隔离**：一个指数异常不再中断后续指数，异常后自动尝试缓存回退
+- [x] **API 空返回 → 缓存回退**：Tushare 短暂故障时自动使用已有 parquet 缓存
+- [x] **核心列存在性校验**：合并后检查 `pe_ttm`/`pb`/`total_mv`/`close` 是否存在
+- [x] **使用 `_merge_into_cache` 返回值**：避免落盘后重复 `pd.read_parquet` 读盘
+- [x] **`cached_all["date"]` 无条件访问**：移入 `if "date" in ...` 守卫内
+- [x] **`get_valuation_summary`**：异常时添加 `logger.warning`，date 列添加存在性守卫
+- [x] **分页段边界裁剪**：首/末段不再拉取调用方请求范围外的数据
+- [x] **`_fetch_index_daily_raw` 分页**：拆分为 `_fetch_index_daily_segment` + 分页包装，与 dailybasic 对称
+- [x] 全部 285 测试通过，0 回归
+
 ### 待做（后续）
 - [ ] `src/valuation_core.py` — PE/PB 分位计算/综合评分/EPS 趋势
 - [ ] `config/turtle_config.yaml` — 估值配置节
